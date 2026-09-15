@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
-import { CHECKIN_ACTIVITY_STATUS_PATH, DAILY_CHECKIN_PATH, claimDailyCheckin, fetchCheckinStatus } from '../../src/credits.js'
-import { WORKBUDDY } from '../../src/product.js'
+import {
+  CHECKIN_ACTIVITY_STATUS_PATH,
+  DAILY_CHECKIN_PATH,
+  USER_RESOURCE_PATH,
+  claimDailyCheckin,
+  fetchCheckinStatus,
+  fetchCreditBalance,
+} from '../../src/credits.js'
+import { CODEBUDDY, WORKBUDDY } from '../../src/product.js'
 import type { BuddyCredential } from '../../src/buddy.js'
 
 function makeCredential(): BuddyCredential {
@@ -127,5 +134,399 @@ describe('积分签到模块', () => {
     await claimDailyCheckin(makeCredential(), WORKBUDDY, fetcher)
     expect(method).toBe('POST')
     expect(body).toBe('{}')
+  })
+})
+
+/**
+ * 积分余额（get-user-resource）。
+ *
+ * 固件取自 2026-09-15 对真实账号的实测响应，保留了容易踩坑的四处特征：
+ * 双层嵌套、终身/周期两套口径并存、整数/精确值并存、已失效包混在列表里。
+ *
+ * WorkBuddy 国际版实测：Bonus Pack 247.87 + Free Plan 100 = **347.87**，
+ * 与 IDE 顶部 "Credits Balance 347.87" 一致。
+ */
+describe('积分余额查询', () => {
+  const REAL_BALANCE_RESPONSE = {
+    code: 0,
+    msg: 'OK',
+    requestId: 'test',
+    data: {
+      Response: {
+        Data: {
+          TotalCount: 2,
+          // 服务端的终身口径且取整；与本周期口径的 347.87 不同
+          TotalDosage: 347,
+          Accounts: [
+            {
+              PackageName: 'Bonus Pack',
+              CapacityUnit: 'credit',
+              CapacityRemain: 247,
+              CapacitySize: 250,
+              CapacityUsed: 2,
+              CapacityRemainPrecise: '247.87',
+              CapacitySizePrecise: '250',
+              CapacityUsedPrecise: '2.13',
+              CycleCapacityRemain: 247,
+              CycleCapacityRemainPrecise: '247.87',
+              CycleCapacitySize: 250,
+              CycleCapacitySizePrecise: '250',
+              CycleCapacityUsedPrecise: '2.13',
+              Status: 0,
+              ExpiredTime: '',
+              CycleStartTime: '2026-09-14 10:05:57',
+              CycleEndTime: '2026-09-28 10:05:56',
+            },
+            {
+              PackageName: 'Free Plan Subscription',
+              CapacityUnit: 'credits',
+              CapacityRemain: 100,
+              CapacitySize: 100,
+              CapacityUsed: 0,
+              CapacityRemainPrecise: '100',
+              CapacitySizePrecise: '100',
+              CycleCapacityRemain: 100,
+              CycleCapacityRemainPrecise: '100',
+              CycleCapacitySizePrecise: '100',
+              Status: 0,
+              ExpiredTime: '',
+              CycleStartTime: '2026-09-01 00:00:00',
+              CycleEndTime: '2026-09-30 23:59:59',
+            },
+          ],
+        },
+        RequestId: 'inner',
+        ProTrialStatus: 0,
+      },
+    },
+  }
+
+  it('端点路径正确', () => {
+    expect(USER_RESOURCE_PATH).toBe('/v2/billing/meter/get-user-resource')
+  })
+
+  it('解析双层嵌套的响应并汇总各包余额', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify(REAL_BALANCE_RESPONSE), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+
+    expect(balance).not.toBeNull()
+    expect(balance!.packages).toHaveLength(2)
+    expect(balance!.packages[0]).toMatchObject({
+      name: 'Bonus Pack', unit: 'credit', remaining: 247.87, total: 250, used: 2.13, active: true,
+    })
+    expect(balance!.packages[1]).toMatchObject({
+      name: 'Free Plan Subscription', remaining: 100, total: 100, used: 0, active: true,
+    })
+    expect(balance!.packages[0].cycleEndTime).toBe('2026-09-28 10:05:56')
+  })
+
+  it('总额与 IDE 的 Credits Balance 一致（347.87）', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify(REAL_BALANCE_RESPONSE), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+
+    expect(balance!.total).toBe(347.87)
+    // 服务端的 TotalDosage 是终身口径且取整，不能直接拿来用
+    expect(balance!.total).not.toBe(347)
+  })
+
+  /**
+   * 回归：额度必须取**本周期**口径（CycleCapacityRemain），不是终身口径
+   * （CapacityRemain）。
+   *
+   * 真实事故——某 CodeBuddy 账号的体验版包终身还剩 500，但本周期已用尽
+   * （CycleCapacityRemain=0）。用终身口径算出 655.67，而 IDE 显示 155.67；
+   * 凭空多出的 500 让用户以为插件算错了。
+   */
+  it('取本周期口径而非终身口径（155.67 vs 655.67 的根因）', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({
+      code: 0,
+      data: {
+        Response: {
+          Data: {
+            Accounts: [
+              // 体验版：终身还剩 500，但本周期已用尽
+              {
+                PackageName: 'CodeBuddy个人体验版', Status: 0, ExpiredTime: '',
+                CapacityRemain: 500, CapacityRemainPrecise: '500',
+                CycleCapacityRemain: 0, CycleCapacityRemainPrecise: '0',
+              },
+              {
+                PackageName: '裂变包A', Status: 0, ExpiredTime: '',
+                CapacityRemain: 55, CapacityRemainPrecise: '55.67000031',
+                CycleCapacityRemain: 55, CycleCapacityRemainPrecise: '55.67000031',
+              },
+              {
+                PackageName: '裂变包B', Status: 0, ExpiredTime: '',
+                CapacityRemain: 100, CapacityRemainPrecise: '100',
+                CycleCapacityRemain: 100, CycleCapacityRemainPrecise: '100',
+              },
+            ],
+          },
+        },
+      },
+    }), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
+
+    // 0 + 55.67 + 100 —— 与 IDE 一致
+    expect(balance!.total).toBe(155.67)
+    // 明细同样用周期口径，与总数保持一致
+    expect(balance!.packages[0]!.remaining).toBe(0)
+  })
+
+  it('精确值缺失时回退到整数字段', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({
+      code: 0,
+      data: { Response: { Data: { Accounts: [{ PackageName: 'X', CycleCapacityRemain: 42, CycleCapacitySize: 50, CycleCapacityUsed: 8 }] } } },
+    }), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+
+    expect(balance!.packages[0]).toMatchObject({ remaining: 42, total: 50, used: 8 })
+    expect(balance!.total).toBe(42)
+  })
+
+  it('包名逐级回退（PackageName → SubProductName → PackageCode）', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({
+      code: 0,
+      data: {
+        Response: {
+          Data: {
+            Accounts: [
+              { SubProductName: '次级名', Status: 0, CycleCapacityRemainPrecise: '1' },
+              { PackageCode: 'CODE-ONLY', Status: 0, CycleCapacityRemainPrecise: '2' },
+              { Status: 0, CycleCapacityRemainPrecise: '3' },
+            ],
+          },
+        },
+      },
+    }), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+
+    expect(balance!.packages.map(p => p.name)).toEqual(['次级名', 'CODE-ONLY', ''])
+  })
+
+  /**
+   * 已失效的资源包：Status=3 或 ExpiredTime 已过。它们仍出现在 Accounts[] 里，
+   * 额度可能非 0，但**不能**计入可用总额。
+   */
+  it('失效包不计入总额，但保留在明细里并由 active 标记', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({
+      code: 0,
+      data: {
+        Response: {
+          Data: {
+            Accounts: [
+              // Status=3 已过期，但仍有 200 额度
+              {
+                PackageName: '过期包', Status: 3, ExpiredTime: '2026-06-02 20:48:06',
+                CycleCapacityRemain: 200, CycleCapacityRemainPrecise: '200',
+              },
+              {
+                PackageName: '可用包', Status: 0, ExpiredTime: '',
+                CycleCapacityRemain: 55, CycleCapacityRemainPrecise: '55.67000031',
+              },
+            ],
+          },
+        },
+      },
+    }), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
+
+    expect(balance!.total).toBe(55.67)
+    expect(balance!.expiredTotal).toBe(200)
+    expect(balance!.packages[0]).toMatchObject({ name: '过期包', active: false, expiredTime: '2026-06-02 20:48:06' })
+    expect(balance!.packages[1]).toMatchObject({ name: '可用包', active: true })
+  })
+
+  it('ExpiredTime 已过（即使 Status 为 0）也算失效', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({
+      code: 0,
+      data: {
+        Response: {
+          Data: {
+            Accounts: [{
+              PackageName: 'X', Status: 0, ExpiredTime: '2020-01-01 00:00:00',
+              CycleCapacityRemain: 999, CycleCapacityRemainPrecise: '999',
+            }],
+          },
+        },
+      },
+    }), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
+
+    expect(balance!.packages[0]!.active).toBe(false)
+    expect(balance!.total).toBe(0)
+    expect(balance!.expiredTotal).toBe(999)
+  })
+
+  it('未知 Status 值保守视为有效（不藏起可能可用的额度）', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({
+      code: 0,
+      data: {
+        Response: {
+          Data: {
+            Accounts: [{
+              PackageName: 'X', Status: 7, ExpiredTime: '',
+              CycleCapacityRemain: 30, CycleCapacityRemainPrecise: '30',
+            }],
+          },
+        },
+      },
+    }), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
+
+    expect(balance!.packages[0]!.active).toBe(true)
+    expect(balance!.total).toBe(30)
+  })
+
+  it('全部包都失效时总额为 0，失效合计不为 0', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({
+      code: 0,
+      data: {
+        Response: {
+          Data: {
+            Accounts: [
+              { PackageName: 'A', Status: 3, ExpiredTime: '2026-06-02 20:48:06', CycleCapacityRemainPrecise: '10' },
+              { PackageName: 'B', Status: 3, ExpiredTime: '2026-06-06 09:52:06', CycleCapacityRemainPrecise: '20' },
+            ],
+          },
+        },
+      },
+    }), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
+
+    expect(balance!.total).toBe(0)
+    expect(balance!.expiredTotal).toBe(30)
+  })
+
+  it('业务码非 0 时返回 null（不把错误当成 0 积分）', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({ code: 10001, msg: 'boom' }), { status: 200 }))
+    expect(await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)).toBeNull()
+  })
+
+  it('嵌套层级缺失时返回 null 而不是崩溃', async () => {
+    for (const payload of [
+      { code: 0 },
+      { code: 0, data: {} },
+      { code: 0, data: { Response: {} } },
+      { code: 0, data: { Response: { Data: {} } } },
+      // Accounts 不是数组
+      { code: 0, data: { Response: { Data: { Accounts: 'nope' } } } },
+    ]) {
+      const fetcher = stubFetch(() => new Response(JSON.stringify(payload), { status: 200 }))
+      expect(await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)).toBeNull()
+    }
+  })
+
+  it('网络异常返回 null 而不是抛出', async () => {
+    const fetcher = vi.fn(async () => { throw new Error('socket hang up') }) as unknown as typeof fetch
+    expect(await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)).toBeNull()
+  })
+
+  it('Accounts 为空数组时余额为 0（区别于查询失败）', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({
+      code: 0, data: { Response: { Data: { Accounts: [] } } },
+    }), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+
+    expect(balance).not.toBeNull()
+    expect(balance!.total).toBe(0)
+    expect(balance!.packages).toEqual([])
+  })
+
+  /**
+   * 回归：多包累加的浮点尾数噪声。
+   *
+   * 服务端下发的精确值带浮点表示（55.67000031），直接累加会得到
+   * 655.67000031 这种尾数——展示到分即可。
+   */
+  it('多包累加后规整为两位小数', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({
+      code: 0,
+      data: {
+        Response: {
+          Data: {
+            Accounts: [
+              { PackageName: 'A', Status: 0, CycleCapacityRemainPrecise: '500' },
+              { PackageName: 'B', Status: 0, CycleCapacityRemainPrecise: '0' },
+              { PackageName: 'C', Status: 0, CycleCapacityRemainPrecise: '0' },
+              { PackageName: 'D', Status: 0, CycleCapacityRemainPrecise: '55.67000031' },
+              { PackageName: 'E', Status: 0, CycleCapacityRemainPrecise: '100' },
+            ],
+          },
+        },
+      },
+    }), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+
+    expect(balance!.total).toBe(655.67)
+    // 明细保留原始精度，不做二次加工
+    expect(balance!.packages[3]!.remaining).toBe(55.67000031)
+  })
+
+  it('单包时总额等于该包余额（不受规整影响）', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({
+      code: 0,
+      data: {
+        Response: {
+          Data: { Accounts: [{ PackageName: 'X', Status: 0, CycleCapacityRemainPrecise: '247.87' }] },
+        },
+      },
+    }), { status: 200 }))
+    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+
+    expect(balance!.total).toBe(247.87)
+  })
+
+  /**
+   * 两个产品通用同一端点：只有 baseURL 随 product.endpoint 变化。
+   * 这是本功能能同时服务 CodeBuddy 与 WorkBuddy 的基础。
+   */
+  it('请求打到各自 product.endpoint（中国版 / 国际版都可用）', async () => {
+    const seen: string[] = []
+    const fetcher = vi.fn(async (url: unknown) => {
+      seen.push(String(url))
+      return new Response(JSON.stringify({ code: 0, data: { Response: { Data: { Accounts: [] } } } }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
+    await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+
+    expect(seen[0]).toBe('https://copilot.tencent.com/v2/billing/meter/get-user-resource')
+    expect(seen[1]).toBe('https://www.workbuddy.ai/v2/billing/meter/get-user-resource')
+  })
+
+  it('请求头随产品切换（X-Product-Code 与 X-Domain）', async () => {
+    let seen: Headers | undefined
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      seen = new Headers(init?.headers)
+      return new Response(JSON.stringify({ code: 0, data: { Response: { Data: { Accounts: [] } } } }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+    expect(seen?.get('X-Product-Code')).toBe('workbuddy')
+    expect(seen?.get('X-Domain')).toBe('www.workbuddy.ai')
+    expect(seen?.get('Authorization')).toBe('Bearer AT')
+  })
+
+  /**
+   * 回归：X-Domain 必须跟随**产品**，不能跟随凭据里记录的历史域名。
+   *
+   * 真实场景——早期 workbuddy 指向中国版 copilot.tencent.com，改造为国际版后
+   * 旧凭据的 domain 字段仍是 copilot.tencent.com。若 X-Domain 取凭据值，请求会
+   * 打到 www.workbuddy.ai 却声明自己属于 copilot.tencent.com，身份标识与
+   * baseURL 自相矛盾。
+   */
+  it('凭据 domain 与产品不符时，以产品配置为准', async () => {
+    let seen: Headers | undefined
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      seen = new Headers(init?.headers)
+      return new Response(JSON.stringify({ code: 0, data: { Response: { Data: { Accounts: [] } } } }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    // 凭据里是 CodeBuddy 的域名，但当前产品是 WorkBuddy
+    const stale = { ...makeCredential(), domain: 'copilot.tencent.com' }
+    await fetchCreditBalance(stale, WORKBUDDY, fetcher)
+
+    expect(seen?.get('X-Domain')).toBe('www.workbuddy.ai')
   })
 })

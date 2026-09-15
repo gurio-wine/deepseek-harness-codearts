@@ -235,9 +235,13 @@ bundle）。
 轮询 `login/account`），仅身份标识与端点按上表区分。`X-Product-Code` 为
 `workbuddy`，`X-Domain` 随 `apiDomain` 切换为 `www.workbuddy.ai`。
 
-**没有每日签到积分**：国际版后端不提供签到接口（内核中只有
+**没有每日签到积分**：国际版后端不提供**签到**接口（内核中只有
 `/v2/billing/meter/get-dosage-notify` 用量通知），因此 Jet Hub 的 WorkBuddy
-面板**不显示「一键领取积分」按钮**；积分领取在 CodeBuddy 面板完成。
+面板**不显示「一键领取积分」按钮**；签到领取在 CodeBuddy 面板完成。
+
+> **但积分余额（Credits Balance）可以查。** 签到与余额是两项独立能力：国际版
+> 确实没有签到，但**有**积分余额查询接口，见下节。不要因为"没有签到"就推断
+> 也查不到余额。
 
 - **登录入口：Jet Hub 设置页的 WorkBuddy 面板**（支持多账号与账号池自动切换）。
   同样不注册斜杠命令。
@@ -264,13 +268,26 @@ Jet Hub（设置页）的账号面板按 provider 分组展示，WorkBuddy 是�
 - 面板提供账号列表、新建账号（浏览器登录入池）、启用/停用、删除，以及「重测 /
   重测所有 / 重置 / 重置所有」限流标记操作，行为与 CodeBuddy 面板一致，但
   只操作 `provider: 'workbuddy'` 的账号。
-- 账号卡片只展示 credentialRef、有效期（含「自动续期」标记）与限流状态，
-  **不显示任何签到信息**；面板标题栏「一键领取积分」的结果来自 RPC 端点
-  `credits.claimAll`（实现见 `src/jet-hub-rpc.ts`，签到客户端见 `src/credits.ts`）。
+- 账号卡片展示 credentialRef、有效期（含「自动续期」标记）、限流状态与**积分
+  余额**（见下节）。「一键领取积分」按钮**仅 CodeBuddy 面板提供**，结果来自
+  RPC 端点 `credits.claimAll`（实现见 `src/jet-hub-rpc.ts`，签到客户端见
+  `src/credits.ts`）。
 - 后端另实现了 `credits.status`（查询某 provider 下全部启用账号的签到状态），
   但**前端尚无消费者**：`plugin-src/client/jet-hub.js` 只调用 `credits.claimAll`，
   `credits.status` 目前仅供外部脚本或直接 RPC 调用使用。
 - 对应 LLM provider 的设置命名空间为 `llm-workbuddy`。
+
+### 积分余额（Credits Balance）
+
+账号卡片上的「积分」一行显示该账号的**可用积分**，与 IDE 顶部显示的
+`Credits Balance` 是同一个数值。鼠标悬停可看到各资源包的明细与到期时间。
+
+**两个产品通用**——CodeBuddy 中国版与 WorkBuddy 国际版都实现同一接口
+（只是 baseURL 随 `product.endpoint` 切换）：
+
+```
+POST /v2/billing/meter/get-user-resource    body {}
+```
 
 ### 模型列表开关（黑名单）
 
@@ -295,6 +312,18 @@ Jet Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的**�
 - 开关按 provider 隔离，CodeBuddy / WorkBuddy / CodeArts 三份黑名单互不影响。
 - 相关 RPC 端点：`model.list`（列出模型并回填 `disabled`）、`model.setDisabled`
   （打开/关闭单个模型），实现见 `src/jet-hub-rpc.ts`。
+
+### 积分余额（Credits Balance）
+
+账号卡片上的「积分」一行显示该账号的**剩余积分**，与 IDE 顶部显示的
+`Credits Balance` 是同一个数值。鼠标悬停可看到各资源包的明细与到期时间。
+
+**两个产品通用**——CodeBuddy 中国版与 WorkBuddy 国际版都实现同一接口
+（只是 baseURL 随 `product.endpoint` 切换）：
+
+```
+POST /v2/billing/meter/get-user-resource    body {}
+```
 
 ### 一键领取积分（每日签到）
 

@@ -7,7 +7,7 @@
  * 端点方法：account.list / account.create / account.update / account.delete /
  *           account.refresh / account.retest / account.retestAll /
  *           account.reset / account.resetAll / login.poll /
- *           credits.status / credits.claimAll /
+ *           credits.status / credits.claimAll / credits.balances /
  *           model.list / model.setDisabled
  */
 
@@ -19,7 +19,14 @@ import type { BuddyAuth } from './buddy-auth.js'
 import { decorateLoginUrl, fetchAuthState, runBuddyLoginFlow } from './buddy-oauth.js'
 import { credentialExpiresAtMs } from './buddy.js'
 import type { BuddyCredential } from './buddy.js'
-import { claimDailyCheckin, fetchCheckinStatus, type CheckinStatus, type ClaimOutcome } from './credits.js'
+import {
+  claimDailyCheckin,
+  fetchCheckinStatus,
+  fetchCreditBalance,
+  type CheckinStatus,
+  type ClaimOutcome,
+  type CreditBalance,
+} from './credits.js'
 import { CODEBUDDY, productById, type BuddyProduct } from './product.js'
 import {
   resetAccount,
@@ -48,6 +55,8 @@ import type {
   RpcCreditsClaimAllRequest,
   RpcCreditsClaimAllResponse,
   RpcCreditsClaimSummary,
+  RpcCreditsBalancesRequest,
+  RpcCreditsBalancesResponse,
   RpcModelListRequest,
   RpcModelListResponse,
   RpcModelSetDisabledRequest,
@@ -134,6 +143,8 @@ export interface CreditsEndpointDeps {
   fetchStatus?: (credential: BuddyCredential, product: BuddyProduct) => Promise<CheckinStatus | null>
   /** 执行签到领取；默认使用真实的 claimDailyCheckin。 */
   claim?: (credential: BuddyCredential, product: BuddyProduct) => Promise<ClaimOutcome>
+  /** 查询积分余额；默认使用真实的 fetchCreditBalance。 */
+  fetchBalance?: (credential: BuddyCredential, product: BuddyProduct) => Promise<CreditBalance | null>
   /** 单账号异常时的告警出口（不参与控制流）。 */
   warn?: (message: string) => void
 }
@@ -225,6 +236,55 @@ export async function collectClaimResults(
     results.push({ accountId: entry.id, nickname: entry.nickname, outcome })
   }
   return { results, summary: computeClaimSummary(outcomes) }
+}
+
+/**
+ * 逐账号收集积分余额（顺序执行，避免并发触发风控）。
+ *
+ * 与 {@link collectCreditsStatus} 的关键差异：**这里保留失败原因**。
+ * 余额查不到时用户最需要知道"为什么"（凭据过期？网络不通？），把它降级成
+ * 一个 null 会让账号卡片显示成空白或 0 分，反而误导。因此失败时带上 error 文案。
+ *
+ * **包含已停用账号**：停用只影响账号池的自动选择，与"这个账号还剩多少积分"
+ * 无关——用户就是想在同一个列表里看全部账号的余额。
+ *
+ * 凭据解析同样位于每个账号自己的 try 之内：单个账号的凭据缺失/损坏/名称非法
+ * 都不会冒泡中断整批。
+ */
+export async function collectCreditBalances(
+  accounts: readonly ProviderAccountEntry[],
+  product: BuddyProduct,
+  deps: CreditsEndpointDeps,
+): Promise<RpcCreditsBalancesResponse['accounts']> {
+  const fetchBalance = deps.fetchBalance ?? fetchCreditBalance
+  const results: RpcCreditsBalancesResponse['accounts'] = []
+  // 顺序查询，避免并发触发风控
+  for (const entry of accounts) {
+    let balance: CreditBalance | null = null
+    let error: string | undefined
+    try {
+      const resolved = await deps.resolve(credentialRef(entry.credentialRef))
+      if (resolved === undefined) {
+        error = '凭据未配置'
+      } else {
+        const credential = JSON.parse(resolved.value) as BuddyCredential
+        balance = await fetchBalance(credential, product)
+        // 查询函数以 null 表示"查不到"（网络/业务码异常），与"余额为 0"不同
+        if (balance === null) error = '余额查询失败'
+      }
+    } catch (caught) {
+      deps.warn?.(`[jet-hub] credits.balances 账号 ${entry.id} 失败: ${String(caught)}`)
+      error = caught instanceof Error ? caught.message : String(caught)
+      balance = null
+    }
+    results.push({
+      accountId: entry.id,
+      nickname: entry.nickname,
+      balance,
+      ...error === undefined ? {} : { error },
+    })
+  }
+  return results
 }
 
 /**
@@ -489,6 +549,25 @@ export function registerJetHubRpc(
           warn: (msg) => ctx.logger?.warn?.(msg),
         })
         return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
+      }
+
+      // 积分余额（Credits Balance）：逐账号顺序查询。
+      //
+      // 独立于 account.list 的原因：余额要为每个账号发一次网络请求，而
+      // account.list 是打开面板就会调的轻量操作。混在一起会让账号列表被
+      // 网络耗时拖慢，且一次查询失败会让整份列表都取不到。
+      case 'credits.balances': {
+        const req = payload as RpcCreditsBalancesRequest
+        const product = productById(req.provider)
+        if (product === undefined) {
+          return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
+        }
+        const accounts = await pool.listAccounts(req.provider)
+        const values = await collectCreditBalances(accounts, product, {
+          resolve: (ref) => ctx.credentials.resolve(ref),
+          warn: (msg) => ctx.logger?.warn?.(msg),
+        })
+        return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
       }
 
       // ── 模型列表可见性（黑名单开关）──

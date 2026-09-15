@@ -229,6 +229,39 @@ export interface RpcCreditsClaimAllResponse {
 
 /**
  * ========================================
+ * 积分余额（Credits Balance）
+ * ========================================
+ */
+
+/** RPC: 查询某 provider 下全部账号的积分余额请求 */
+export interface RpcCreditsBalancesRequest {
+  provider: string
+}
+
+/**
+ * 单个账号的积分余额。
+ *
+ * 与签到状态的设计取舍不同：余额**带回每个包的明细**而不只是总数 ——
+ * 用户看到「347.87」时通常还想知道它由哪些包构成、各自何时到期（实测一个
+ * 账号常同时有「Bonus Pack」与「Free Plan Subscription」两个周期不同的包）。
+ * 明细只有几项，一次带回比让前端再发一次请求更划算。
+ */
+export interface RpcCreditsBalanceAccount {
+  accountId: string
+  nickname: string
+  /** 余额查询失败（网络/凭据/响应异常）时为 null —— 与「余额为 0」严格区分。 */
+  balance: import('./credits.js').CreditBalance | null
+  /** 查询失败的原因，供 UI 提示（成功时为 undefined）。 */
+  error?: string
+}
+
+/** RPC: 查询积分余额响应 */
+export interface RpcCreditsBalancesResponse {
+  accounts: RpcCreditsBalanceAccount[]
+}
+
+/**
+ * ========================================
  * 模型列表可见性（黑名单开关）
  * ========================================
  */

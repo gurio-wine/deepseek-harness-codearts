@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   collectClaimResults,
+  collectCreditBalances,
   collectCreditsStatus,
   computeClaimSummary,
   registerJetHubRpc,
 } from '../../src/jet-hub-rpc.js'
 import type { CreditsEndpointDeps } from '../../src/jet-hub-rpc.js'
 import { AccountPool } from '../../src/account-pool.js'
-import type { ClaimOutcome, CheckinStatus } from '../../src/credits.js'
+import type { ClaimOutcome, CheckinStatus, CreditBalance } from '../../src/credits.js'
 import { WORKBUDDY } from '../../src/product.js'
 import type { ProviderAccountEntry } from '../../src/types.js'
 
@@ -357,6 +358,132 @@ describe('credits.claimAll 单账号异常隔离与顺序性', () => {
 
     expect(order).toEqual(['entry-0', 'entry-1', 'entry-2'])
     expect(response.results.map(r => r.accountId)).toEqual(['a', 'b', 'c'])
+  })
+})
+
+/**
+ * collectCreditBalances：逐账号收集积分余额。
+ *
+ * 与状态/领取的关键差异是**保留失败原因**——账号卡片要显示"为什么没查到"，
+ * 把它降级成 null 会让 UI 显示成空白，用户无从判断是余额为 0 还是查询失败。
+ */
+describe('credits.balances 逐账号余额收集', () => {
+  const BALANCE: CreditBalance = {
+    total: 347.87,
+    packages: [
+      { name: 'Bonus Pack', unit: 'credit', remaining: 247.87, total: 250, used: 2.13, cycleStartTime: '', cycleEndTime: '2026-09-28 10:05:56' },
+      { name: 'Free Plan Subscription', unit: 'credits', remaining: 100, total: 100, used: 0, cycleStartTime: '', cycleEndTime: '2026-09-30 23:59:59' },
+    ],
+  }
+
+  it('成功时回传余额与包明细', async () => {
+    const deps = makeDeps({ fetchBalance: async () => BALANCE })
+    const results = await collectCreditBalances([makeEntry({ id: 'a' })], WORKBUDDY, deps)
+
+    expect(results).toEqual([{ accountId: 'a', nickname: '测试号', balance: BALANCE }])
+  })
+
+  it('余额为 0 与查询失败严格区分', async () => {
+    const empty: CreditBalance = { total: 0, packages: [] }
+    let call = 0
+    const deps = makeDeps({ fetchBalance: async () => (call++ === 0 ? empty : null) })
+    const results = await collectCreditBalances(
+      [makeEntry({ id: 'zero' }), makeEntry({ id: 'failed' })], WORKBUDDY, deps,
+    )
+
+    // 第一个真余额 0：可展示为 0，不算错误
+    expect(results[0]!.balance).toEqual(empty)
+    expect(results[0]!.error).toBeUndefined()
+    // 第二个查不到：balance 为 null 且带原因，UI 不能显示成 0
+    expect(results[1]!.balance).toBeNull()
+    expect(results[1]!.error).toBe('余额查询失败')
+  })
+
+  it('凭据未配置时给出原因，且不发起余额请求', async () => {
+    let touched = 0
+    const deps = makeDeps({
+      resolve: async () => undefined,
+      fetchBalance: async () => { touched++; return BALANCE },
+    })
+    const results = await collectCreditBalances([makeEntry({ id: 'noconf' })], WORKBUDDY, deps)
+
+    expect(results[0]!.balance).toBeNull()
+    expect(results[0]!.error).toBe('凭据未配置')
+    expect(touched).toBe(0)
+  })
+
+  it('单个账号异常不中断整批，且记录该账号的原因', async () => {
+    let call = 0
+    const warnings: string[] = []
+    const deps = makeDeps({
+      resolve: async () => {
+        if (call++ === 0) throw new Error('凭据已被外部删除')
+        return { value: VALID_CREDENTIAL_JSON }
+      },
+      fetchBalance: async () => BALANCE,
+      warn: (msg) => warnings.push(msg),
+    })
+    const results = await collectCreditBalances(
+      [makeEntry({ id: 'boom' }), makeEntry({ id: 'ok' })], WORKBUDDY, deps,
+    )
+
+    expect(results).toHaveLength(2)
+    expect(results[0]!.error).toBe('凭据已被外部删除')
+    expect(results[0]!.balance).toBeNull()
+    expect(results[1]!.balance).toEqual(BALANCE)
+    expect(warnings).toHaveLength(1)
+  })
+
+  it('凭据 JSON 损坏只影响该账号', async () => {
+    let call = 0
+    const deps = makeDeps({
+      resolve: async () => ({ value: call++ === 0 ? '{ not json' : VALID_CREDENTIAL_JSON }),
+      fetchBalance: async () => BALANCE,
+    })
+    const results = await collectCreditBalances(
+      [makeEntry({ id: 'corrupt' }), makeEntry({ id: 'ok' })], WORKBUDDY, deps,
+    )
+
+    expect(results[0]!.balance).toBeNull()
+    expect(results[0]!.error).toBeDefined()
+    expect(results[1]!.balance).toEqual(BALANCE)
+  })
+
+  it('停用账号同样查询（停用与余额无关）', async () => {
+    const deps = makeDeps({ fetchBalance: async () => BALANCE })
+    const results = await collectCreditBalances(
+      [makeEntry({ id: 'off', enabled: false })], WORKBUDDY, deps,
+    )
+
+    expect(results[0]!.balance).toEqual(BALANCE)
+  })
+
+  it('顺序执行，不并发（避免风控）', async () => {
+    let inFlight = 0
+    let maxInFlight = 0
+    const deps = makeDeps({
+      fetchBalance: async () => {
+        inFlight++
+        maxInFlight = Math.max(maxInFlight, inFlight)
+        await new Promise(r => setTimeout(r, 1))
+        inFlight--
+        return BALANCE
+      },
+    })
+    await collectCreditBalances(
+      [makeEntry({ id: 'a' }), makeEntry({ id: 'b' }), makeEntry({ id: 'c' })], WORKBUDDY, deps,
+    )
+
+    expect(maxInFlight).toBe(1)
+  })
+
+  it('结果顺序与账号顺序一致', async () => {
+    const deps = makeDeps({ fetchBalance: async () => BALANCE })
+    const results = await collectCreditBalances(
+      [makeEntry({ id: 'a' }), makeEntry({ id: 'b' }), makeEntry({ id: 'c' })], WORKBUDDY, deps,
+    )
+
+    expect(results.map(r => r.accountId)).toEqual(['a', 'b', 'c'])
   })
 })
 

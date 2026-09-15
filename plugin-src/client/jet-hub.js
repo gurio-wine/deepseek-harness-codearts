@@ -78,7 +78,74 @@ function summarizeProbe(kind, res) {
   return parts.join('，');
 }
 
-function AccountCard({ account, onToggle, onDelete, onRetest, onReset, busy }) {
+/**
+ * 把积分余额格式化成一行文案。
+ *
+ * 保留两位小数：服务端下发的精确值就是两位（如 247.87），而整数版字段
+ * 会截断成 247 —— IDE 顶部显示的 "Credits Balance 347.87" 用的是精确值，
+ * 这里必须对齐，否则用户会以为插件算错了。
+ */
+function formatCredits(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  // 整数不显示多余的小数位（100 而不是 100.00），有小数才保留两位
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+/** 把一个包的明细格式化成 tooltip 的一行。 */
+function formatPackageLine(pkg) {
+  const remaining = formatCredits(pkg.remaining) ?? '?';
+  const total = formatCredits(pkg.total) ?? '?';
+  const parts = [`${pkg.active ? '' : '[已失效] '}${pkg.name || '未命名'}: ${remaining} / ${total}`];
+  // 失效包显示它自己的失效时间，有效包显示本周期结束时间
+  if (!pkg.active && pkg.expiredTime) parts.push(`失效于 ${pkg.expiredTime}`);
+  else if (pkg.cycleEndTime) parts.push(`本周期至 ${pkg.cycleEndTime}`);
+  return parts.join(' · ');
+}
+
+/**
+ * 账号卡片上的积分余额行。
+ *
+ * 三种状态严格区分，不能混为一谈：
+ * - 查不到（balance 为 null）→ 显示原因，不要显示成 0 积分
+ * - 查到了但余额为 0 → 显示 0
+ * - 还没有结果 → 显示"读取中"
+ */
+function CreditBalanceRow({ balance, error, loading }) {
+  if (loading) {
+    return React.createElement('div', { className: 'dim-jh-metaRow' },
+      React.createElement('dt', null, '积分'),
+      React.createElement('dd', { 'data-tone': 'muted' }, '读取中…'));
+  }
+  if (error || !balance) {
+    return React.createElement('div', { className: 'dim-jh-metaRow' },
+      React.createElement('dt', null, '积分'),
+      React.createElement('dd', { 'data-tone': 'warn', title: error || '查询失败' },
+        error || '查询失败'));
+  }
+  const total = formatCredits(balance.total) ?? '0';
+  // 明细放进 title，不占版面；账号卡片本身已经信息密集了
+  const detail = (balance.packages || []).map(formatPackageLine).join('\n');
+  const all = balance.packages || [];
+  const activeCount = all.filter(p => p.active).length;
+  return React.createElement('div', { className: 'dim-jh-metaRow' },
+    React.createElement('dt', null, '积分'),
+    React.createElement('dd', {
+      className: 'dim-jh-creditValue',
+      title: detail || undefined,
+    },
+    React.createElement('strong', { className: 'dim-jh-creditTotal' }, total),
+    all.length > 1
+      ? React.createElement('span', { className: 'dim-jh-creditPackages' },
+          `${activeCount}/${all.length} 个资源包有效`)
+      : null,
+    // 失效额度单独提示：它们仍在服务端响应里，但不计入上面的数字
+    balance.expiredTotal > 0
+      ? React.createElement('span', { className: 'dim-jh-creditExpired' },
+          `另有 ${formatCredits(balance.expiredTotal)} 已失效`)
+      : null));
+}
+
+function AccountCard({ account, onToggle, onDelete, onRetest, onReset, busy, credits, creditsLoading }) {
   const rateLimits = account.modelRateLimits
     ? Object.entries(account.modelRateLimits).filter(([, v]) => v > Date.now())
     : [];
@@ -113,7 +180,12 @@ function AccountCard({ account, onToggle, onDelete, onRetest, onReset, busy }) {
         React.createElement('dd', { 'data-tone': expired ? 'warn' : undefined },
           account.expiresAt
             ? `${formatTime(account.expiresAt) || '未知'}${account.refreshable ? ' · 自动续期' : ''}`
-            : '未知'))),
+            : '未知')),
+      React.createElement(CreditBalanceRow, {
+        balance: credits?.balance ?? null,
+        error: credits?.error,
+        loading: creditsLoading,
+      })),
     rateLimits.length > 0
       ? React.createElement('div', { className: 'dim-jh-rateLimits' },
           React.createElement('span', { className: 'dim-jh-rateLimitsLabel' }, '限额重置'),
@@ -330,7 +402,18 @@ function ProviderPanel({ provider, rpcCall }) {
   const [probeBusy, setProbeBusy] = React.useState(null);
   // 上一次重测/重置的结果文案（成功或失败）。
   const [probeNotice, setProbeNotice] = React.useState(null);
+  // 积分余额：accountId → { balance, error }。与账号列表分开加载——余额要逐
+  // 账号发网络请求，不能拖慢账号列表本身的渲染。
+  const [credits, setCredits] = React.useState({});
+  const [creditsLoading, setCreditsLoading] = React.useState(false);
   const mounted = React.useRef(true);
+  /**
+   * 最新账号列表的 ref 镜像。
+   *
+   * loadCredits 的失败分支需要"当前有哪些账号"，但它与 loadAccounts 并发发起，
+   * 闭包里的 accounts 还是初始空数组。ref 保证读到的是最新值。
+   */
+  const accountsRef = React.useRef([]);
 
   const loadAccounts = React.useCallback(async () => {
     setPhase('loading');
@@ -338,7 +421,9 @@ function ProviderPanel({ provider, rpcCall }) {
     try {
       const res = await rpcCall('account.list', { provider });
       if (!mounted.current) return;
-      setAccounts(res.accounts || []);
+      const list = res.accounts || [];
+      accountsRef.current = list;
+      setAccounts(list);
       setPhase('ready');
     } catch (caught) {
       if (!mounted.current) return;
@@ -347,11 +432,54 @@ function ProviderPanel({ provider, rpcCall }) {
     }
   }, [provider, rpcCall]);
 
+  /**
+   * 拉取本页全部账号的积分余额。
+   *
+   * 单独一个请求、单独的 loading 状态：余额查询涉及逐账号的网络往返，可能
+   * 慢或失败；它绝不能影响账号列表的可用性——查不到余额时卡片显示原因，
+   * 而不是让整个面板变成错误页。
+   */
+  const loadCredits = React.useCallback(async () => {
+    setCreditsLoading(true);
+    try {
+      const res = await rpcCall('credits.balances', { provider });
+      if (!mounted.current) return;
+      const next = {};
+      for (const item of res.accounts || []) {
+        next[item.accountId] = { balance: item.balance, error: item.error };
+      }
+      setCredits(next);
+    } catch (caught) {
+      console.error('[jet-hub] load credits failed:', caught);
+      if (!mounted.current) return;
+      // 整批失败（如 provider 不支持、RPC 未注册）：给当前每个账号都留下失败
+      // 原因，避免卡片永远停在"读取中"。
+      //
+      // 用 accountsRef 而不是闭包里的 accounts：本函数与 loadAccounts 在挂载时
+      // 并发发起，此刻闭包捕获的 accounts 仍是初始空数组，会导致一个账号都
+      // 标记不上。ref 始终指向最新值。
+      const snapshot = accountsRef.current;
+      setCredits(prev => {
+        const next = { ...prev };
+        for (const account of snapshot) {
+          next[account.id] = { balance: null, error: caught?.message || '积分查询失败' };
+        }
+        return next;
+      });
+    } finally {
+      if (mounted.current) setCreditsLoading(false);
+    }
+  }, [provider, rpcCall]);
+
   React.useEffect(() => {
     mounted.current = true;
-    loadAccounts();
+    void loadAccounts();
+    void loadCredits();
     return () => { mounted.current = false; };
-  }, [loadAccounts]);
+    // loadCredits 依赖 accounts，但这里只想在挂载/provider 变化时各跑一次；
+    // 账号刷新后由操作方显式再调 loadCredits（见 claimCredits）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider]);
 
   // 积分领取状态：claiming 用于禁用按钮，claimNotice 展示上一次领取的结果摘要。
   const [claiming, setClaiming] = React.useState(false);
@@ -385,6 +513,8 @@ function ProviderPanel({ provider, rpcCall }) {
         text: parts.length > 0 ? parts.join('，') : '没有可领取的账号',
       });
       await loadAccounts();
+      // 领取会改变余额，顺带刷新一次，免得卡片还显示领取前的数字
+      await loadCredits();
     } catch (caught) {
       console.error('[jet-hub] claim credits failed:', caught);
       if (!mounted.current) return;
@@ -496,8 +626,11 @@ function ProviderPanel({ provider, rpcCall }) {
   };
 
   return React.createElement('section', { 'aria-label': `${provider} 账号管理` },
-    React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 } },
-      React.createElement('h2', { style: { margin: 0, fontSize: 16, fontWeight: 600 } },
+    // 标题与按钮分开成两块（而不是同一行的 space-between）：操作按钮多达 5 个，
+    // 与面板标题挤在一行时既会被压缩又会溢出。标题独占一行、按钮组另起一行
+    // 并允许换行，窄面板下也能完整显示。
+    React.createElement('div', { className: 'dim-jh-panelHead' },
+      React.createElement('h2', { className: 'dim-jh-panelTitle' },
         `${PROVIDERS.find(p => p.id === provider)?.label || provider} 账号管理`),
       React.createElement('div', { className: 'dim-jh-headerActions' },
         React.createElement('button', {
@@ -505,6 +638,12 @@ function ProviderPanel({ provider, rpcCall }) {
           title: MODEL_LIST_HELP,
           onClick: () => setShowModels(true),
         }, '显示列表'),
+        React.createElement('button', {
+          className: 'dim-jh-btn',
+          title: '重新查询本页全部账号的剩余积分（Credits Balance）。余额由服务端实时计算，点此可刷新。',
+          disabled: creditsLoading,
+          onClick: () => void loadCredits(),
+        }, creditsLoading ? '查询中…' : '刷新积分'),
         supportsCredits
           ? React.createElement('button', {
               className: 'dim-jh-btn',
@@ -566,6 +705,8 @@ function ProviderPanel({ provider, rpcCall }) {
                 key: account.id,
                 account,
                 busy: probeBusy !== null,
+                credits: credits[account.id],
+                creditsLoading: creditsLoading && credits[account.id] === undefined,
                 onToggle: toggleAccount,
                 onDelete: deleteAccount,
                 onRetest: (id) => void runLimitAction('retest', id),

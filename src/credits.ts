@@ -33,6 +33,22 @@ import type { BuddyProduct } from './product.js'
 export const CHECKIN_ACTIVITY_STATUS_PATH = '/v2/billing/meter/checkin-activity-status'
 /** 每日签到领取端点。 */
 export const DAILY_CHECKIN_PATH = '/v2/billing/meter/daily-checkin'
+/**
+ * 积分余额查询端点。
+ *
+ * **两个产品通用**（2026-09-15 实测）：CodeBuddy 中国版
+ * （copilot.tencent.com）与 WorkBuddy 国际版（www.workbuddy.ai）都实现该端点，
+ * 请求头与响应结构完全一致，只有 baseURL 不同（随 `product.endpoint` 切换）。
+ *
+ * 这与签到能力形成对比 —— **签到**只有中国版有（国际版内核里连
+ * `checkin-status` / `daily-checkin` 的字面量都不存在），但**积分余额查询
+ * 两边都有**。两者是彼此独立的能力，不要因为"国际版没有签到"就推断
+ * 它也查不到余额。
+ *
+ * 该端点不在 CLI 内核里（内核只硬编码了 `get-dosage-notify` 用量通知），
+ * 是 IDE 前端直接调用的，故静态搜索内核找不到，只能用真实凭据实测发现。
+ */
+export const USER_RESOURCE_PATH = '/v2/billing/meter/get-user-resource'
 
 /** 签到请求超时（毫秒）。 */
 const REQUEST_TIMEOUT_MS = 30_000
@@ -77,13 +93,96 @@ export type ClaimOutcome =
   | { kind: 'inactive'; message: string }
   | { kind: 'failed'; code: number; message: string }
 
-/** 构造签到请求头。不含 X-Device-Token（实测非必需）。 */
+/**
+ * 积分资源包（`get-user-resource` 响应里 `Accounts[]` 的一项）。
+ *
+ * ## 一个账号为什么有多个包
+ *
+ * 每个包是**一份独立的积分授予**（套餐 + 若干运营活动赠包），各自有独立的
+ * 计量周期与到期时间。实测某 CodeBuddy 账号有 5 个包：1 个体验版套餐 +
+ * 4 份「国内运营裂变包」，其中 2 份已过期、1 份本周期已耗尽、2 份可用。
+ * 所以界面上「5 个资源包」不等于 5 份额度，需要区分有效与失效。
+ *
+ * ## 两个 "Remain" 字段的口径差异（关键）
+ *
+ * 响应里同时有两个剩余值，**含义完全不同**：
+ *
+ * | 字段                     | 含义                     | 实测（体验版包） |
+ * |--------------------------|--------------------------|------------------|
+ * | `CapacityRemain`         | 该包的**终身**剩余       | 500              |
+ * | `CycleCapacityRemain`    | 该包**本计费周期**剩余   | 0                |
+ *
+ * IDE 顶部的 "Credits Balance" 用的是**周期口径**（`CycleCapacityRemain`）：
+ * 实测该账号终身口径求和为 655.67，而 IDE 显示 155.67 —— 差额 500 正是那个
+ * 「终身还剩 500、但本周期已一分不剩」的体验版包。用错字段会让数字凭空多出
+ * 一大截，且用户无从核对。
+ */
+export interface CreditPackage {
+  /** 包名（如 'Bonus Pack' / 'CodeBuddy个人体验版'） */
+  name: string
+  /** 额度单位（'credit' / 'credits'） */
+  unit: string
+  /** 本计费周期剩余额度（IDE 展示口径，精确值含小数） */
+  remaining: number
+  /** 本计费周期总额度（精确值） */
+  total: number
+  /** 本计费周期已用额度（精确值） */
+  used: number
+  /**
+   * 该包是否仍然有效。
+   *
+   * 判定：服务端 `Status !== 3`（实测 3 = 已过期）且未过 `ExpiredTime`。
+   * 失效包仍会出现在 `Accounts[]` 里（额度可能非 0），UI 需要能区分出来，
+   * 否则用户会以为那些额度还能用。
+   */
+  active: boolean
+  /** 计量周期开始时间（服务端本地时间字符串，可能为空） */
+  cycleStartTime: string
+  /** 计量周期结束时间（服务端本地时间字符串，可能为空） */
+  cycleEndTime: string
+  /** 该包自身的失效时间（可能为空 = 无固定失效时间） */
+  expiredTime: string
+}
+
+/** 账号的积分余额汇总。 */
+export interface CreditBalance {
+  /**
+   * 当前可用总余额（各**有效**包的本周期剩余之和）。
+   *
+   * 这个口径与 IDE 顶部的 "Credits Balance" 一致，用户可直接核对。
+   *
+   * 刻意不用服务端的 `TotalDosage`：它是**终身口径**且取整（实测同一响应里
+   * TotalDosage=655 而 IDE 显示 155.67），既口径不对又有截断误差。
+   */
+  total: number
+  /** 各资源包明细（含已失效的，由 `active` 区分） */
+  packages: CreditPackage[]
+  /**
+   * 已失效包里的剩余额度合计。
+   *
+   * 单独给出而不是并进 `total`：这些额度服务端仍会返回，但实际不可用于扣费。
+   * UI 可以据此提示「另有 N 已失效」，既不误导也不丢信息。
+   */
+  expiredTotal: number
+}
+
+/**
+ * 构造签到/余额请求头。不含 X-Device-Token（实测非必需）。
+ *
+ * `X-Domain` **以产品配置为准**，而不是优先用凭据里的 `credential.domain`：
+ * 凭据的 domain 是"登录时用的域名"的快照，若它系从另一个产品遗留/迁移而来
+ * （典型场景：早期 workbuddy 指向中国版，改造成国际版后旧凭据仍写着
+ * copilot.tencent.com），跟着凭据走就会把请求的身份标识发错区域。请求的
+ * baseURL 来自 `product.endpoint`，X-Domain 必须与之一致，否则前后矛盾。
+ *
+ * 保留凭据 domain 仅作为产品未声明 apiDomain 时的兜底。
+ */
 function checkinHeaders(credential: BuddyCredential, product: BuddyProduct): Headers {
   const headers = new Headers()
   headers.set('Authorization', `Bearer ${credential.access_token}`)
   headers.set('Accept', 'application/json')
   headers.set('Content-Type', 'application/json')
-  headers.set(HTTP_HEADER_DOMAIN, credential.domain ?? product.apiDomain)
+  headers.set(HTTP_HEADER_DOMAIN, product.apiDomain || credential.domain || '')
   headers.set(HTTP_HEADER_PRODUCT, BUDDY_DEPLOYMENT_TYPE)
   headers.set(HTTP_HEADER_PRODUCT_CODE, product.productCode)
   if (credential.user_id !== undefined && credential.user_id.length > 0) {
@@ -235,4 +334,124 @@ export async function claimDailyCheckin(
     isStreakDay: readBool(record, 'is_streak_day'),
     ...delayed.length > 0 ? { delayedMessage: delayed } : {},
   }
+}
+
+/**
+ * 读取一个数值字段，优先取带 `Precise` 后缀的精确版本。
+ *
+ * 实测：`CapacityRemain` = 247（整数、截断），`CapacityRemainPrecise` = "247.87"
+ * （字符串、两位小数）。IDE 显示的是后者，因此精确值优先；精确值缺失或无法
+ * 解析时回退到整数版，保证老响应格式仍能读出数字。
+ */
+function readPreciseNumber(source: Record<string, unknown>, baseKey: string): number {
+  const precise = source[`${baseKey}Precise`]
+  if (typeof precise === 'string') {
+    const parsed = Number.parseFloat(precise)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  if (typeof precise === 'number' && Number.isFinite(precise)) return precise
+  return readNumber(source, baseKey)
+}
+
+/**
+ * 服务端标记「该资源包已过期」的 Status 值（实测）。
+ *
+ * 实测某 CodeBuddy 账号的 5 个包里，两个带 `ExpiredTime`（2026-06-02 /
+ * 2026-06-06）的条目 Status 均为 3，三个有效条目为 0。故把 3 视为失效；
+ * 其他未知取值一律当成有效（宁可多显示一个额度，也不要把能用的额度藏起来）。
+ */
+const PACKAGE_STATUS_EXPIRED = 3
+
+/**
+ * 从 `get-user-resource` 的一个 Account 条目解析资源包。
+ *
+ * 包名回退链：`PackageName` → `SubProductName` → `PackageCode`。实测两个产品
+ * 都会下发 `PackageName`，但企业版等变体可能只有其中之一，故逐级回退而不是
+ * 显示成空字符串。
+ *
+ * 余额取 **`CycleCapacityRemain`（本周期口径）** 而非 `CapacityRemain`
+ * （终身口径）—— 理由见 {@link CreditPackage} 的字段对照表。
+ */
+function parseCreditPackage(entry: Record<string, unknown>): CreditPackage {
+  const name = readString(entry, 'PackageName')
+    || readString(entry, 'SubProductName')
+    || readString(entry, 'PackageCode')
+  const unit = readString(entry, 'CapacityUnit') || readString(entry, 'OriginUnit')
+  const status = entry.Status
+  const expiredTime = readString(entry, 'ExpiredTime')
+  // 失效判定：Status 显式为已过期，或存在已过去的 ExpiredTime
+  const expiredAt = expiredTime.length > 0 ? Date.parse(expiredTime.replace(' ', 'T')) : Number.NaN
+  const active = status !== PACKAGE_STATUS_EXPIRED
+    && !(Number.isFinite(expiredAt) && Date.now() >= expiredAt)
+  return {
+    name,
+    unit,
+    remaining: readPreciseNumber(entry, 'CycleCapacityRemain'),
+    total: readPreciseNumber(entry, 'CycleCapacitySize'),
+    used: readPreciseNumber(entry, 'CycleCapacityUsed'),
+    active,
+    cycleStartTime: readString(entry, 'CycleStartTime'),
+    cycleEndTime: readString(entry, 'CycleEndTime'),
+    expiredTime,
+  }
+}
+
+/**
+ * 查询账号的积分余额（剩余 credits）。
+ *
+ * 两个产品通用（见 {@link USER_RESOURCE_PATH} 的说明）。网络失败、响应非法或
+ * 业务码非 0 时返回 null —— 与 {@link fetchCheckinStatus} 同款语义，让调用方
+ * 能把「查不到」与「余额为 0」区分开，不要把网络故障显示成 0 积分。
+ *
+ * 注意 `data` 是**双层嵌套**：`data.Response.Data.Accounts[]`。这与签到端点的
+ * 单层 `data` 结构不同，是本接口最容易解析错的地方。
+ */
+export async function fetchCreditBalance(
+  credential: BuddyCredential,
+  product: BuddyProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<CreditBalance | null> {
+  const result = await postJson(USER_RESOURCE_PATH, credential, product, fetcher)
+  if (!result.ok) return null
+  const body = result.body
+  if (body.code !== 0) return null
+  // data.Response.Data —— 两层嵌套，逐层校验，任一层缺失即视为不可解析
+  const outer = body.data
+  if (typeof outer !== 'object' || outer === null) return null
+  const response = (outer as Record<string, unknown>).Response
+  if (typeof response !== 'object' || response === null) return null
+  const inner = (response as Record<string, unknown>).Data
+  if (typeof inner !== 'object' || inner === null) return null
+  const accounts = (inner as Record<string, unknown>).Accounts
+  if (!Array.isArray(accounts)) return null
+
+  const packages: CreditPackage[] = []
+  for (const item of accounts) {
+    if (typeof item !== 'object' || item === null) continue
+    packages.push(parseCreditPackage(item as Record<string, unknown>))
+  }
+  // 只累加**有效**包的本周期余额：失效包里的额度服务端仍会返回，但不能用于
+  // 扣费，并进总额会让数字虚高（实测某账号因此从 155.67 变成 655.67）。
+  //
+  // 累加后按两位小数规整：服务端精确值本身带浮点表示（如 55.67000031），
+  // 多包相加会把尾数噪声显式化——金额展示到分即可。
+  const total = roundCredits(
+    packages.reduce((sum, pkg) => sum + (pkg.active ? pkg.remaining : 0), 0),
+  )
+  // 失效包的余额单独汇总，供 UI 提示「另有 N 已失效」——既不误导也不丢信息
+  const expiredTotal = roundCredits(
+    packages.reduce((sum, pkg) => sum + (pkg.active ? 0 : pkg.remaining), 0),
+  )
+  return { total, packages, expiredTotal }
+}
+
+/**
+ * 把额度规整为两位小数。
+ *
+ * 用 `Math.round(v * 100) / 100` 而不是 `toFixed` 后 parse：后者对
+ * 负数与极大值的行为不一致，且返回字符串会污染数值类型。这里只处理
+ * 服务端下发的正数额度，乘法取整足够且结果仍是 number。
+ */
+function roundCredits(value: number): number {
+  return Math.round(value * 100) / 100
 }
