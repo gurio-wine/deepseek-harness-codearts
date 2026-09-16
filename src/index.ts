@@ -4,12 +4,16 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import Schema from '@deepseek-ai/schemastery'
 import { registerCodeArtsLlm } from './llm-adapter.js'
 import { registerBuddyLlm } from './buddy-adapter.js'
+import { registerLobsteraiLlm } from './lobsterai-adapter.js'
 import { CODEARTS_CREDENTIAL_REF, CodeArtsAuth } from './service.js'
 import { BUDDY_CREDENTIAL_REF, BuddyAuth } from './buddy-auth.js'
+import { LobsteraiAuth } from './lobsterai-auth.js'
 import { AccountPool } from './account-pool.js'
 import { registerJetHubRpc } from './jet-hub-rpc.js'
 import { CODEBUDDY, WORKBUDDY } from './product.js'
+import { LOBSTERAI } from './lobsterai-product.js'
 import type { CodeArtsCredential, BuddyCredential } from './types.js'
+import type { LobsteraiCredential } from './lobsterai.js'
 
 export const name = 'codearts-auth'
 export const inject = ['credentials', 'commands', 'llm', 'connection']
@@ -97,11 +101,12 @@ function makeReadImage(ctx: Context) {
 /** 注册 codeartsAuth 服务、命令以及 codearts LLM 路由。 */
 export function apply(ctx: Context): void {
   // provider 的 settingsNs 必须已注册，否则模型设置页会因未注册 namespace 崩溃。
-  // 三个 namespace 分别对应：codearts 路由、CodeBuddy（buddy）路由、
-  // WorkBuddy（workbuddy）路由 —— 后者由 registerBuddyLlm 以
-  // `llm-${product.id}` 派生，漏注册会让模型设置页在
-  // `refFor → deriveKeyRef(provider)` 处以 `provider.toUpperCase is not a function` 崩溃。
-  registerProviderSettings(ctx, 'llm-buddy', 'llm-workbuddy', 'llm-codearts')
+  // 四个 namespace 分别对应：codearts 路由、CodeBuddy（buddy）路由、
+  // WorkBuddy（workbuddy）路由、LobsterAI（lobsterai）路由 —— 后三者由
+  // registerBuddyLlm / registerLobsteraiLlm 以 `llm-${product.id}` 派生，
+  // 漏注册会让模型设置页在 `refFor → deriveKeyRef(provider)` 处以
+  // `provider.toUpperCase is not a function` 崩溃。
+  registerProviderSettings(ctx, 'llm-buddy', 'llm-workbuddy', 'llm-codearts', 'llm-lobsterai')
   const service = new CodeArtsAuth(ctx)
   const pool = new AccountPool(ctx)
 
@@ -243,6 +248,34 @@ export function apply(ctx: Context): void {
     product: WORKBUDDY,
   })
 
+  // ===== LobsterAI (有道龙虾) 服务 =====
+  // 第三个产品线，但协议与腾讯系**完全不同**：不走 external-link 轮询登录，
+  // 而是本地回调 + authCode 换 token（见 src/lobsterai-oauth.ts）。
+  // 服务名由 LobsteraiAuth 依 product.id 派生，注册为 ctx.lobsteraiAuth。
+  // 与其他 provider 一样不注册斜杠命令：入口在 Jet Hub 的 LobsterAI 面板。
+  const lobsterai = new LobsteraiAuth(ctx)
+  registerLobsteraiLlm(ctx, {
+    credentialRef: credentialRef(LOBSTERAI.defaultCredentialRef),
+    resolveCredential: async () => {
+      // 只从 lobsterai 的账号池取账号，回退到 LobsterAI 自己的单凭据 ref，
+      // 保证不会串用 CodeBuddy / WorkBuddy / CodeArts 的凭据。
+      const available = await pool.getAvailableAccount('lobsterai', '')
+      if (available) return available.credential as LobsteraiCredential
+      const resolved = await ctx.credentials.resolve(credentialRef(LOBSTERAI.defaultCredentialRef))
+      if (!resolved) return undefined
+      try {
+        return JSON.parse(resolved.value) as LobsteraiCredential
+      } catch {
+        return undefined
+      }
+    },
+    refresh: () => lobsterai.refresh(),
+    fetchRemoteModels: () => lobsterai.fetchModels(pool),
+    resolveClientVersion: () => lobsterai.resolveClientVersion(),
+    accountPool: pool,
+    product: LOBSTERAI,
+  })
+
   // ===== 多账号静默续期调度 =====
   // 替代原有的单账号 scheduleRefresh()，使用 refreshAll() 遍历所有账号续期
   const REFRESH_INTERVAL_MS = 30 * 60 * 1000  // 每 30 分钟检查一次
@@ -257,6 +290,9 @@ export function apply(ctx: Context): void {
     try {
       await workbuddy.refreshAll(pool)
     } catch { /* 静默 */ }
+    try {
+      await lobsterai.refreshAll(pool)
+    } catch { /* 静默 */ }
   }
 
   // 启动时如果有任何可续期账号，安排定期续期
@@ -270,6 +306,7 @@ export function apply(ctx: Context): void {
         service.stop()
         buddy.stop()
         workbuddy.stop()
+        lobsterai.stop()
       }, 'jet-hub: multi-account refresh scheduler')
     }
   })
@@ -279,9 +316,10 @@ export function apply(ctx: Context): void {
     service.stop()
     buddy.stop()
     workbuddy.stop()
+    lobsterai.stop()
   }, 'codearts-auth.scheduler (legacy)')
 
   // ===== Jet Hub RPC 注册 =====
-  registerJetHubRpc(ctx, pool, service, buddy, workbuddy)
+  registerJetHubRpc(ctx, pool, service, buddy, workbuddy, lobsterai)
   ctx.provide('accountPool', pool)
 }

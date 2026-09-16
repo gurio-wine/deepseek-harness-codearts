@@ -27,6 +27,7 @@ const STYLES = `
 .dim-jh-providerIcon.codearts { background: white; }
 .dim-jh-providerIcon.buddy { background: white; }
 .dim-jh-providerIcon.workbuddy { background: white; }
+.dim-jh-providerIcon.lobsterai { background: white; }
 
 /* provider 文案：align dsh-im .dim-channelCopy */
 .dim-jh-providerLabel { min-width: 0; display: grid; }
