@@ -236,7 +236,7 @@ export function lobsteraiKeyfromBody(
     // `KeyfromBody()`（`auth.go:37-50`）：它读的就是 `a.LatestKeyfrom`，
     // 而 `RefreshToken`（`client.go:137-145`）从不更新该字段。
     // 因此 Go 每次续期发的都是「登录时的那一刻」，本插件照做。
-    latestKeyfrom: String(Date.now()),
+    latestKeyfrom: credential.latest_keyfrom ?? '',
     version: clientVersion,
   }
   if (credential.uuid !== undefined && credential.uuid.length > 0) body.uuid = credential.uuid
