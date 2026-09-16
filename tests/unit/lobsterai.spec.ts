@@ -163,9 +163,9 @@ describe('凭据过期与可刷新判定', () => {
 
 describe('keyfrom 身份载荷', () => {
   it('必带三字段，且有 uuid/userId 时附带', () => {
-    expect(lobsteraiKeyfromBody(makeCredential(), TEST_VERSION, 1700000009999)).toEqual({
+    expect(lobsteraiKeyfromBody(makeCredential(), TEST_VERSION)).toEqual({
       firstKeyfrom: '1700000000000',
-      latestKeyfrom: '1700000009999',
+      latestKeyfrom: '1700000000000',
       version: TEST_VERSION,
       uuid: '11111111-2222-4333-8444-555555555555',
       userId: 'yid-1',
@@ -184,17 +184,19 @@ describe('keyfrom 身份载荷', () => {
     expect(body.firstKeyfrom).toBe('')
   })
 
-  it('latestKeyfrom 每次取传入时刻', () => {
-    expect(lobsteraiKeyfromBody(makeCredential(), TEST_VERSION, 1).latestKeyfrom).toBe('1')
-    expect(lobsteraiKeyfromBody(makeCredential(), TEST_VERSION, 2).latestKeyfrom).toBe('2')
+  it('latestKeyfrom 取**凭据存储值**，不是当前时刻', () => {
+    // 对齐 Go 的 KeyfromBody()：读 a.LatestKeyfrom，而 RefreshToken 从不更新它。
+    // 详见 lobsterai-parity.spec.ts 的一致性契约。
+    expect(lobsteraiKeyfromBody(makeCredential({ latest_keyfrom: '1' }), TEST_VERSION).latestKeyfrom).toBe('1')
+    expect(lobsteraiKeyfromBody(makeCredential({ latest_keyfrom: '2' }), TEST_VERSION).latestKeyfrom).toBe('2')
   })
 })
 
 describe('续期请求体', () => {
   it('在 keyfrom 载荷基础上追加 refreshToken', () => {
-    expect(lobsteraiRefreshBody(makeCredential(), TEST_VERSION, 1700000009999)).toEqual({
+    expect(lobsteraiRefreshBody(makeCredential(), TEST_VERSION)).toEqual({
       firstKeyfrom: '1700000000000',
-      latestKeyfrom: '1700000009999',
+      latestKeyfrom: '1700000000000',
       version: TEST_VERSION,
       uuid: '11111111-2222-4333-8444-555555555555',
       userId: 'yid-1',
@@ -255,11 +257,15 @@ describe('令牌载荷解析与 uid 回退链', () => {
     })).toBe('yid-1')
   })
 
-  it('uid 回退链：全部为空时用 JWT sub', () => {
-    expect(resolveLobsteraiUid({
+  it('uid 回退链：全部为空时用 sha256 前 16 位（**无** JWT sub 这一级）', () => {
+    // 严格对齐 Go 的四级回退：user.id → user.userId → user.yid → sha256。
+    // 曾经的实现多插了一级 JWT sub，会让同一账号在两边得到不同 uid。
+    const uid = resolveLobsteraiUid({
       accessToken: fakeJwt({ sub: 'sub-1' }), refreshToken: '',
       userId: '', accountUserId: '', yid: '',
-    })).toBe('sub-1')
+    })
+    expect(uid).not.toBe('sub-1')
+    expect(uid).toMatch(/^[0-9a-f]{16}$/)
   })
 
   it('uid 回退链：连 JWT 都不可解析时用 sha256 前 16 位', () => {
@@ -331,20 +337,22 @@ describe('凭据组装', () => {
 })
 
 describe('续期结果合并', () => {
-  it('更新 access_token 与 latest_keyfrom，保留 uuid/first_keyfrom', () => {
+  it('更新 access_token，保留 uuid/first_keyfrom/latest_keyfrom', () => {
     const previous = makeCredential()
     const next = applyLobsteraiRefresh(
       previous, { accessToken: 'AT2', refreshToken: 'RT2', expiresIn: 3600 }, 1700000009999,
     )
     expect(next.access_token).toBe('AT2')
     expect(next.refresh_token).toBe('RT2')
-    expect(next.latest_keyfrom).toBe('1700000009999')
     // 这三个服务端不返回，必须沿用旧值 —— 丢了会让下一次续期失败。
     expect(next.uuid).toBe(previous.uuid)
     expect(next.first_keyfrom).toBe(previous.first_keyfrom)
     expect(next.uid).toBe(previous.uid)
     expect(next.user_id).toBe(previous.user_id)
     expect(next.nickname).toBe(previous.nickname)
+    // latest_keyfrom **刻意不更新**（对齐 Go：RefreshToken 不碰该字段）。
+    expect(next.latest_keyfrom).toBe(previous.latest_keyfrom)
+    expect(next.latest_keyfrom).not.toBe('1700000009999')
   })
 
   it('refresh 响应未带新 refreshToken 时沿用旧值（不能覆盖成空串）', () => {

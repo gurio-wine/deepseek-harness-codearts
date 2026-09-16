@@ -591,7 +591,7 @@ describe('LobsteraiAdapter 限流切换', () => {
     expect(chunks.some((c) => c.type === 'text-delta')).toBe(true)
   })
 
-  it('全部账号耗尽时抛 QUOTA_EXCEEDED', async () => {
+  it('全部账号耗尽时抛可读错误（带真实原因）', async () => {
     const { adapter } = makeAdapter(
       () => new Response('您的使用量已超出频率限制，将在 2026-09-11 18:08:17 UTC+8 重置', { status: 429 }),
       {
@@ -602,8 +602,48 @@ describe('LobsteraiAdapter 限流切换', () => {
         } as never,
       },
     )
-    const error = await collect(generateOptions(), adapter).catch((e: unknown) => e as { code?: string })
-    expect(error.code).toBe('QUOTA_EXCEEDED')
+    const error = await collect(generateOptions(), adapter).catch((e: unknown) => e as { code?: string; message?: string })
+    // 试遍候选后报「所有账号均不可用」，并带上最后一次的真实原因
+    // （不吞诊断信息；Go 也把 lastErr 拼进最终错误）。
+    expect(error.message).toMatch(/所有账号均不可用/)
+    expect(error.message).toMatch(/频率限制/)
+  })
+
+  it('404 也会换号（对齐 Go：每个分类分支都 continue）', async () => {
+    // 曾经的实现不把 404 计入换号条件，导致偶发 404 直接暴露给用户。
+    const getAvailableAccount = vi.fn(async () => ({
+      entry: { id: 'acc-2', provider: 'lobsterai' },
+      credential: makeCredential({ access_token: 'AT-2' }),
+    }))
+    let attempt = 0
+    const { adapter, calls } = makeAdapter(() => {
+      attempt += 1
+      return attempt === 1 ? new Response('not found', { status: 404 }) : textSse('ok')
+    }, {
+      accountPool: {
+        findAccountIdByCredential: async () => 'acc-1',
+        updateModelRateLimit: async () => {},
+        getAvailableAccount,
+      } as never,
+    })
+    const chunks = await collect(generateOptions(), adapter)
+    expect(getAvailableAccount).toHaveBeenCalled()
+    expect(calls).toHaveLength(2)
+    expect(chunks.some((c) => c.type === 'text-delta')).toBe(true)
+  })
+
+  it('server/client 类失败**不留**限流徽章（避免把「出错」显示成「限流」）', async () => {
+    const updateModelRateLimit = vi.fn(async () => {})
+    const { adapter } = makeAdapter(() => new Response('bad request', { status: 400 }), {
+      accountPool: {
+        findAccountIdByCredential: async () => 'acc-1',
+        updateModelRateLimit,
+        getAvailableAccount: async () => null,
+      } as never,
+    })
+    await collect(generateOptions(), adapter).catch(() => {})
+    // Go 对 default 分支只 NoteError，不写冷却时间 —— 本插件照做。
+    expect(updateModelRateLimit).not.toHaveBeenCalled()
   })
 
   it('无账号池时积分不足直接报错（不尝试换号）', async () => {

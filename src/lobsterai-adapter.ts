@@ -30,7 +30,7 @@ import {
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { AccountPool } from './account-pool.js'
-import { isRateLimited, parseRateLimitError } from './llm-adapter.js'
+import { parseRateLimitError } from './llm-adapter.js'
 import {
   LOBSTERAI_CHAT_PATH,
   LOBSTERAI_MODELS_PATH,
@@ -43,7 +43,7 @@ import {
   type LobsteraiCredential,
 } from './lobsterai.js'
 import { LOBSTERAI, type LobsteraiFallbackModel, type LobsteraiProduct } from './lobsterai-product.js'
-import { classifyLobsteraiError } from './lobsterai-errors.js'
+import { classifyLobsteraiError, recordsLobsteraiRateLimit, shouldRotateLobsteraiAccount } from './lobsterai-errors.js'
 import { isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, resolveToolPairing } from './sse.js'
 
 /** 本适配器注册的 provider 路由名（历史常量，等价于 `LOBSTERAI.id`）。 */
@@ -498,21 +498,23 @@ export class LobsteraiAdapter extends LlmAdapter {
       let errorText = await response.text().catch(() => '')
       const kind = classifyLobsteraiError(response.status, errorText)
 
-      // 限流/余额不足/账号级失败 → 逐个尝试其余可用账号。
-      // 只对「换号有意义」的类别切换（见 shouldRotateLobsteraiAccount 的说明：
-      // client 类错误是请求本身的问题，换号只会白白消耗其他账号的额度）。
-      if (this.options.accountPool && (kind === 'hard-credit' || kind === 'soft-rate' || isRateLimited(errorText))) {
+      // 任何非 2xx 都轮转到下一个账号（对齐 Go `handler.go:218-243`：
+      // 那个 switch 每个分支都以 continue 结尾）。策略判定集中在
+      // `shouldRotateLobsteraiAccount` 里，不在这里内联条件 ——
+      // 否则「策略声明」与「实际行为」两处分叉，后续维护必然互相误导。
+      if (this.options.accountPool && shouldRotateLobsteraiAccount(kind)) {
         const tried = new Set<string>()
         if (currentAccountId) tried.add(currentAccountId)
 
         for (;;) {
-          // 记录当前账号在该模型上的限流重置时间（UI 据此展示限流徽章）。
-          //
-          // 两层取值：优先 `parseRateLimitError` 从错误体里抠出**服务端声明的**
-          // 重置时刻；抠不到则用本地兜底（见下）。两者都要能落地 ——
-          // 若在抠不到时直接跳过记录，UI 上就不会出现任何限流标记，
-          // 「重测/重置」按钮也就无从操作。
-          if (currentAccountId) {
+          // 只有 Go 里真正 `Cooldown(...)` 的三类才记限流徽章
+          // （见 `recordsLobsteraiRateLimit` 的说明）：server/client 类
+          // 若也留徽章，会把「账号出过错」显示成「该模型限流」——虚假信息。
+          if (currentAccountId && recordsLobsteraiRateLimit(kind)) {
+            // 两层取值：优先 `parseRateLimitError` 从错误体里抠出**服务端声明的**
+            // 重置时刻；抠不到则用本地兜底。两者都要能落地 ——
+            // 若在抠不到时直接跳过记录，UI 上就不会出现任何限流标记，
+            // 「重测/重置」按钮也就无从操作。
             const parsed = parseRateLimitError(errorText, options.model)
             await this.options.accountPool.updateModelRateLimit(
               currentAccountId,
@@ -535,17 +537,17 @@ export class LobsteraiAdapter extends LlmAdapter {
             return
           }
           errorText = await response.text().catch(() => '')
-          const nextKind = classifyLobsteraiError(response.status, errorText)
-          if (nextKind !== 'hard-credit' && nextKind !== 'soft-rate' && !isRateLimited(errorText)) {
-            // 新账号失败但不是限流：按原错误抛出，不要吞成「均受限」。
-            throw new LlmError(`lobsterai: ${errorDetail(errorText)}`, httpErrorCode(response.status), { status: response.status })
-          }
+          // 换号后若新账号也失败，**继续**轮转（不在这里抛）——
+          // Go 的循环同样是「失败就 continue 到下一个」，只有
+          // 试遍 MaxRotate 次才把最后那个错误抛给客户端。
+          // 这里用最新一次的错误信息覆盖，供耗尽后的文案使用。
+          if (!shouldRotateLobsteraiAccount(classifyLobsteraiError(response.status, errorText))) break
         }
+        // 试遍候选：报「均不可用」，并带上最后一次的真实原因（不吞诊断信息）。
         throw new LlmError(
-          kind === 'hard-credit'
-            ? `lobsterai: 模型 ${options.model} 所有账号均积分不足`
-            : `lobsterai: 模型 ${options.model} 所有账号均受限，请稍后再试`,
-          'QUOTA_EXCEEDED',
+          `lobsterai: 模型 ${options.model} 所有账号均不可用（${errorDetail(errorText)}）`,
+          kind === 'hard-credit' ? 'QUOTA_EXCEEDED' : httpErrorCode(response.status),
+          { status: response.status },
         )
       }
 

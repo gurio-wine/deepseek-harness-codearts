@@ -3,8 +3,8 @@ import {
   LOBSTERAI_HARD_CREDIT_MARKERS,
   LOBSTERAI_SESSION_DEAD_MARKERS,
   classifyLobsteraiError,
-  isLobsteraiCreditExhausted,
   isLobsteraiTerminalError,
+  recordsLobsteraiRateLimit,
   shouldRotateLobsteraiAccount,
 } from '../../src/lobsterai-errors.js'
 
@@ -82,19 +82,18 @@ describe('LobsterAI 错误分类', () => {
 })
 
 describe('错误分类的派生谓词', () => {
-  it('可换号类别：hard-credit / soft-rate / not-found', () => {
+  it('**所有**非成功类别都可换号（对齐 handler.go:218-243 每个分支都 continue）', () => {
+    // 曾经只对 hard-credit / soft-rate 换号，并错误地声称 Go 对 client 类
+    // 也不换号 —— 实际 NoteError 之后紧跟的就是 continue。
     expect(shouldRotateLobsteraiAccount('hard-credit')).toBe(true)
     expect(shouldRotateLobsteraiAccount('soft-rate')).toBe(true)
     expect(shouldRotateLobsteraiAccount('not-found')).toBe(true)
+    expect(shouldRotateLobsteraiAccount('server')).toBe(true)
+    expect(shouldRotateLobsteraiAccount('client')).toBe(true)
+    expect(shouldRotateLobsteraiAccount('session-dead')).toBe(true)
   })
 
-  it('client / server / session-dead 不换号', () => {
-    // client 是**请求本身**的问题（请求体非法、模型名不存在），
-    // 换个账号照样失败，换号只会白白消耗其他账号的额度。
-    // session-dead 需要重新登录，换号无法解决。
-    expect(shouldRotateLobsteraiAccount('client')).toBe(false)
-    expect(shouldRotateLobsteraiAccount('server')).toBe(false)
-    expect(shouldRotateLobsteraiAccount('session-dead')).toBe(false)
+  it('成功不换号', () => {
     expect(shouldRotateLobsteraiAccount('none')).toBe(false)
   })
 
@@ -107,10 +106,14 @@ describe('错误分类的派生谓词', () => {
     }
   })
 
-  it('只有 hard-credit 属余额耗尽', () => {
-    expect(isLobsteraiCreditExhausted('hard-credit')).toBe(true)
-    expect(isLobsteraiCreditExhausted('soft-rate')).toBe(false)
-    expect(isLobsteraiCreditExhausted('none')).toBe(false)
+  it('只有 Go 里真正 Cooldown 的三类记限流徽章', () => {
+    expect(recordsLobsteraiRateLimit('hard-credit')).toBe(true)
+    expect(recordsLobsteraiRateLimit('soft-rate')).toBe(true)
+    expect(recordsLobsteraiRateLimit('not-found')).toBe(true)
+    // session-dead 走 Disable、default 走 NoteError，都不写冷却时间。
+    expect(recordsLobsteraiRateLimit('session-dead')).toBe(false)
+    expect(recordsLobsteraiRateLimit('server')).toBe(false)
+    expect(recordsLobsteraiRateLimit('client')).toBe(false)
   })
 })
 

@@ -180,19 +180,6 @@ export function parseLobsteraiEnvelope(body: unknown): LobsteraiEnvelopeResult {
 
 // ── 过期时间与可刷新判定 ──
 
-/** 从 JWT payload 读取 `sub`；非 JWT 或解析失败返回空串。 */
-function jwtSubject(token: string): string {
-  if (typeof token !== 'string' || token.length === 0) return ''
-  const parts = token.split('.')
-  if (parts.length < 2) return ''
-  try {
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<string, unknown>
-    return typeof payload.sub === 'string' ? payload.sub : ''
-  } catch {
-    return ''
-  }
-}
-
 /**
  * 从凭据的 `expires_at` 解析毫秒时间戳。
  *
@@ -245,11 +232,14 @@ export function isLobsteraiRefreshable(credential: LobsteraiCredential): boolean
 export function lobsteraiKeyfromBody(
   credential: LobsteraiCredential,
   clientVersion: string,
-  nowMs: number = Date.now(),
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     firstKeyfrom: credential.first_keyfrom ?? '',
-    latestKeyfrom: String(nowMs),
+    // 直接用凭据里**存储的**值，不取当前时刻 —— 严格对齐 Go 的
+    // `KeyfromBody()`（`auth.go:37-50`）：它读的就是 `a.LatestKeyfrom`，
+    // 而 `RefreshToken`（`client.go:137-145`）从不更新该字段。
+    // 因此 Go 每次续期发的都是「登录时的那一刻」，本插件照做。
+    latestKeyfrom: credential.latest_keyfrom ?? '',
     version: clientVersion,
   }
   if (credential.uuid !== undefined && credential.uuid.length > 0) body.uuid = credential.uuid
@@ -269,10 +259,9 @@ export function lobsteraiKeyfromBody(
 export function lobsteraiRefreshBody(
   credential: LobsteraiCredential,
   clientVersion: string,
-  nowMs: number = Date.now(),
 ): Record<string, unknown> {
   return {
-    ...lobsteraiKeyfromBody(credential, clientVersion, nowMs),
+    ...lobsteraiKeyfromBody(credential, clientVersion),
     refreshToken: credential.refresh_token,
   }
 }
@@ -318,7 +307,7 @@ export function parseLobsteraiTokenPayload(data: Record<string, unknown>): Lobst
 }
 
 /**
- * 解析账号唯一 ID，按四级回退（对齐 `main.go:297-306`）：
+ * 解析账号唯一 ID，按**四级**回退（严格对齐 `main.go:297-306`）：
  *
  * `user.id` → `user.userId` → `user.yid` → `sha256(accessToken)` 前 16 位。
  *
@@ -327,14 +316,18 @@ export function parseLobsteraiTokenPayload(data: Record<string, unknown>): Lobst
  * 账号池里多个账号互相覆盖（`addAccount` 按 id 去重）。
  *
  * 哈希取 hex 前 16 字符，与 Go 的 `fmt.Sprintf("%x", sha256.Sum256(...))[:16]`
- * 完全一致，便于与 `lobsterai2api` 生成的 `auths/lobsterai-{uid}.json` 对照。
+ * 完全一致 —— 这是与 `lobsterai2api` 生成的 `auths/lobsterai-{uid}.json`
+ * 逐字节对照的前提。
+ *
+ * ⚠️ **刻意不在 `yid` 与哈希之间插入 JWT `sub` 回退**：Go 没有这一级，
+ * 插进去会让「服务端三个 user 字段皆空」的账号在本插件得到 `sub`、
+ * 而在 Go 得到 16 位哈希 —— 同一账号两种 uid，破坏上述对照能力。
+ * 稀有路径上与参考实现分叉，比多兜一层更糟。
  */
 export function resolveLobsteraiUid(payload: LobsteraiTokenPayload): string {
   for (const candidate of [payload.userId, payload.accountUserId, payload.yid]) {
     if (candidate !== undefined && candidate.length > 0) return candidate
   }
-  const subject = jwtSubject(payload.accessToken)
-  if (subject.length > 0) return subject
   return createHash('sha256').update(payload.accessToken).digest('hex').slice(0, 16)
 }
 
@@ -382,9 +375,16 @@ export function buildLobsteraiCredential(
 /**
  * 用续期结果更新凭据（保留服务端未返回的字段）。
  *
- * 关键：`uuid` / `first_keyfrom` **沿用旧值**（服务端不返回），
- * `latest_keyfrom` 更新为当前时刻，`user_id`/`uid`/`nickname` 沿用旧值
- * （refresh 响应不含 user 对象）。丢掉 uuid/first_keyfrom 会让下一次续期失败。
+ * **所有身份字段一律沿用旧值**（`uuid` / `first_keyfrom` / `latest_keyfrom`
+ * / `uid` / `user_id` / `nickname`）：LobsterAI 的 refresh 响应只带令牌，
+ * 不含 account 对象。
+ *
+ * ⚠️ `latest_keyfrom` **刻意不更新为当前时刻**（虽然字段名叫「最近活动」）——
+ * 严格对齐 Go：`RefreshToken`（`client.go:137-145`）只改 token 与过期时间，
+ * `LatestKeyfrom` 永久停留在登录时那一刻，续期时原样回发。
+ * 语义上「刷新即活动、理应更新」是更直觉的读法，但 Go 是唯一在生产验证过的
+ * 实现；若服务端对该字段有校验，自作聪明地更新会让续期失败，
+ * 而这不是能从代码推导出来的，需要实测支撑（见计划文档 §7.2）。
  */
 export function applyLobsteraiRefresh(
   previous: LobsteraiCredential,
@@ -403,7 +403,6 @@ export function applyLobsteraiRefresh(
     // refresh 响应可能不返回新 refreshToken（沿用旧的），不能覆盖成空串。
     refresh_token: payload.refreshToken.length > 0 ? payload.refreshToken : previous.refresh_token,
     expires_at: expiresAt,
-    latest_keyfrom: String(nowMs),
   }
 }
 

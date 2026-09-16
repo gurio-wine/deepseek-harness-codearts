@@ -138,7 +138,7 @@ describe('LobsteraiAuth 客户端版本号', () => {
 })
 
 describe('LobsteraiAuth 续期', () => {
-  it('成功时写回新令牌并更新 latest_keyfrom', async () => {
+  it('成功时写回新令牌，且 latest_keyfrom 保持不变（对齐 Go）', async () => {
     const { ctx, credentials } = makeContext()
     const credential = makeCredential()
     await credentials.set(LOBSTERAI_CREDENTIAL_REF, JSON.stringify(credential))
@@ -152,7 +152,8 @@ describe('LobsteraiAuth 续期', () => {
     // 身份字段必须保留 —— 丢了会让下一次续期失败。
     expect(stored.uuid).toBe('uuid-1')
     expect(stored.first_keyfrom).toBe('1700000000000')
-    expect(Number(stored.latest_keyfrom)).toBeGreaterThan(Number(credential.latest_keyfrom))
+    // latest_keyfrom **刻意不更新**：Go 的 RefreshToken 不碰该字段。
+    expect(stored.latest_keyfrom).toBe(credential.latest_keyfrom)
   })
 
   it('请求体带 refreshToken 与全部身份字段，且**不带** Authorization', async () => {

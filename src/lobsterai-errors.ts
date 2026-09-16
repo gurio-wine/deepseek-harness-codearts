@@ -119,12 +119,42 @@ export function classifyLobsteraiError(status: number, body: string): LobsteraiE
 /**
  * 该类别是否应当触发「换下一个账号」（而不是直接把错误抛给用户）。
  *
- * **不含 `client`**：其他 4xx（请求体非法、模型名不存在……）是**请求本身**的
- * 问题，换个账号照样失败，换号只会白白消耗其他账号的额度。
- * Go 版对此的处理是 `NoteError` 累计 3 次才冷却 —— 本质上也是不换号，
- * 本插件没有该计数器，故直接判为「不换」。
+ * **除成功外的每一类都换号**，严格对齐 Go 的 `handler.go:218-243`：
+ * 那个 switch 的**每一个分支都以 `continue` 结尾**（`ErrHardCredit`、
+ * `ErrSoftRate`、`ErrSessionDead`、`ErrNotFound`、default 全是），
+ * 也就是「任何非 2xx 都轮转到下一个账号」，最多换 `MaxRotate`(3) 次，
+ * 全部失败才把 `lastErr` 抛给客户端。注释里写得很直白：
+ * default 分支「轮转下一个账号，不直接返回（防雪崩）」。
+ *
+ * ⚠️ 曾经的实现只对 `hard-credit` / `soft-rate` 换号，并在这段注释里
+ * 声称「Go 对这种错误也是不换号（靠 NoteError 累计 3 次）」—— 那是**错的**：
+ * `NoteError` 之后紧跟的就是 `continue`，计数只决定「换完之后要不要冷却」，
+ * 不决定「要不要换」。少换号会让一个账号的偶发错误直接暴露给用户，
+ * 而参考实现靠多账号掩盖它。
+ *
+ * 与 D2（不照搬自动冷却状态机）不冲突：**轮转**与**冷却**是两件事 ——
+ * 前者是「这次请求换个人试试」，后者是「把这个账号标记为不可用一段时间」。
+ * 本插件采纳前者（对齐 Go），不用后者（复用已有的 `modelRateLimits`）。
  */
 export function shouldRotateLobsteraiAccount(kind: LobsteraiErrorKind): boolean {
+  return kind !== 'none'
+}
+
+/**
+ * 该类别的失败是否应**记为该模型的限流标记**（让 UI 亮出「限额重置」徽章）。
+ *
+ * 只覆盖 Go 里真正调用 `Cooldown(...)` 的三类（`handler.go:221-237`）：
+ * - `hard-credit` → `CoolHard`（12h）
+ * - `soft-rate` → `CoolSoft`（60s）
+ * - `not-found` → `CoolSoft`（60s）
+ *
+ * `session-dead` 与 default（server/client）在 Go 里分别走 `Disable` 与
+ * `NoteError`，**都不写冷却时间**。本插件没有这两套机制（见 D2），
+ * 因此它们只轮转、不留徽章 —— 否则一个 400 请求错误会被显示成
+ * 「该模型限流 1 小时」，那是虚假信息。徽章的含义必须是
+ * 「这个模型受限」，而不是「这个账号出过错」。
+ */
+export function recordsLobsteraiRateLimit(kind: LobsteraiErrorKind): boolean {
   return kind === 'hard-credit' || kind === 'soft-rate' || kind === 'not-found'
 }
 
@@ -138,14 +168,4 @@ export function shouldRotateLobsteraiAccount(kind: LobsteraiErrorKind): boolean 
  */
 export function isLobsteraiTerminalError(kind: LobsteraiErrorKind): boolean {
   return kind === 'session-dead'
-}
-
-/**
- * 该类别是否属于**余额耗尽**（需要用户充值/等待次日签到）。
- *
- * 单独的谓词而非让调用方自己比较字符串：调用点分散在适配器、签到、
- * 账号探测三处，集中一处便于将来新增同类码时一次改全。
- */
-export function isLobsteraiCreditExhausted(kind: LobsteraiErrorKind): boolean {
-  return kind === 'hard-credit'
 }

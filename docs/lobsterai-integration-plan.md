@@ -1620,7 +1620,45 @@ curl 命令（55-71 行）。
 | R13 | `User-Agent` 该不该跟着真版本改成 `LobsterAI/2026.9.4`？ | **先照抄 `LobsterAI/0.1.0`**（Go 侧实测可用的值），只改 `X-LobsterAI-Client-Version` 头。UA 变更需单独实测，避免同时改两个变量导致无法归因 |
 | R14 | 登录换来的 `accessToken` 是否 JWT（可否解 `exp`）？ | Go 注释说「实测 HS512 access token 30 天」，说明是 JWT。**但要有 `expiresIn` 优先、JWT 兜底的顺序**（对齐 `main.go:313-319`），且两者都拿不到时按「不可刷新」处理而非崩溃 |
 
-### 7.3 架构层面的取舍（需要你确认）
+### 7.4 与 `lobsterai2api` 的一致性审计（实施后回查）
+
+实施完成后逐条核对了与参考实现的行为一致性，发现并修正了 **4 处实现层缺陷**
+（均由本插件引入，非参考实现的问题），另有 2 处**保留的有意分歧**。
+
+#### 已修正的缺陷（对齐 Go）
+
+| # | 缺陷 | Go 依据 | 修正 |
+|---|---|---|---|
+| C1 | `resolveLobsteraiUid` 在 `yid` 与 `sha256` 之间多插了一级 **JWT `sub`** 回退 | `main.go:297-306` 只有四级 | 删除该级。否则「服务端 user 字段皆空」的账号在本插件得 `sub`、在 Go 得 16 位哈希，**同一账号两种 uid**，破坏与 `auths/lobsterai-{uid}.json` 对照的能力 |
+| C2 | 适配器的换号条件只含 `hard-credit` / `soft-rate`，**404 / 5xx / client 直接抛给用户** | `handler.go:218-243` 的 switch **每个分支都以 `continue` 结尾**（含 `ErrNotFound`、default），注释明写「轮转下一个账号，不直接返回（防雪崩）」 | 改为 `shouldRotateLobsteraiAccount(kind)` = 「非成功即换号」，并把 exhausted 文案改为带真实原因 |
+| C3 | `shouldRotateLobsteraiAccount` / `isLobsteraiCreditExhausted` 是**死代码**（零调用点），适配器走内联条件 —— 策略声明与实际行为分叉 | — | 适配器改为真正调用该谓词；删除无调用者的 `isLobsteraiCreditExhausted`；新增 `recordsLobsteraiRateLimit` 区分「换号」与「记徽章」 |
+| C4 | 余额未 clamp 负值 | `client.go:303-308`、`cmd/credit/main.go:91-96` 都有 `if v < 0 { return 0 }` | `total` 与 `expiredTotal` 均 `Math.max(0, …)`，避免显示「-12.5 积分」 |
+
+> **C2 的附带修正**：原实现给**所有**换号场景都写限流徽章，但 Go 只对三类
+> 真正 `Cooldown`（`hard-credit` → 12h、`soft-rate` / `not-found` → 60s），
+> `session-dead` 走 `Disable`、default 走 `NoteError`，**都不写冷却时间**。
+> 现已收敛为 `recordsLobsteraiRateLimit` —— 否则一个 400 请求错误会被显示成
+> 「该模型限流 1 小时」，那是**虚假信息**。
+
+#### 保留的有意分歧（已在文档中标注理由）
+
+| # | 分歧 | Go | 本插件 | 理由 |
+|---|---|---|---|---|
+| D-a | `latest_keyfrom` 是否随续期更新 | **不更新**（`client.go:137-145` 只改 token 与过期时间） | 同样**不更新**（原实现曾更新为当前时刻，现已改回） | 语义上「刷新即活动」更直觉，但 Go 是唯一生产验证过的实现。若服务端校验该字段，自作聪明地更新会让续期失败 —— 这需要实测支撑，不能从代码推导 |
+| D-b | 续期终态判定 | 只判「响应里有没有 accessToken」，把网络抖动也当终态 | `HTTP 401/403` 或 `code ∈ {40100, 40101}` 才判终态 | 误判会让用户被迫重新登录；本插件的判定更窄，其余错误走可重试路径 |
+| D-c | `version` 字段取值 | 硬编码假值 `0.1.0`（`auth.go:41`） | 动态真值（实测 `2026.9.4`） | `0.1.0` 是假值（`sigin.py` 会动态取），后端未强校验才未暴露 |
+| D-d | 自动冷却 / 禁用状态机 | `Cooldown` / `Disable` / `NoteError` 计数 | 不移植，复用 `modelRateLimits` + 用户手动重测 | 见 D2；**注意「轮转」与「冷却」是两件事** —— 本插件采纳前者（对齐 Go）、不用后者 |
+
+#### 一致性契约测试
+
+上述每一条都固化在 `tests/unit/lobsterai-parity.spec.ts`（24 项）里，
+每条断言都标注 Go 侧依据位置，防止后续「凭直觉优化」造成无声漂移。
+
+> 该文件经反向验证：临时把 C1 的 JWT `sub` 回退加回去，
+> 确认 2 项测试**确实失败**（`lobsterai-parity.spec.ts` + `lobsterai.spec.ts` 各 1 项），
+> 再撤回修复。否则无法排除「测试写得宽松、压根抓不到」。
+
+### 7.5 架构层面的取舍（需要你确认）
 
 | # | 取舍 | 推荐 |
 |---|---|---|
