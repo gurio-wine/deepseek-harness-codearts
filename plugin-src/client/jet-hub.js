@@ -1,5 +1,7 @@
 import * as React from 'react';
 
+import { supportsCreditBalance, supportsDailyCheckin } from './credits-capabilities.js';
+
 export const JET_HUB_RPC_CHANNEL = '/jet-hub';
 
 // 内联图标 base64
@@ -14,14 +16,14 @@ const PROVIDERS = Object.freeze([
 ]);
 
 /**
- * 支持积分领取（每日签到）的 provider 列表。
+ * 积分能力判定见 `./credits-capabilities.js`。
  *
- * 目前只有 CodeBuddy 支持：签到接口位于腾讯中国区后端，**国际版
- * WorkBuddy（www.workbuddy.ai）没有该接口**（内核中只有
- * `/v2/billing/meter/get-dosage-notify` 用量通知），故其面板不渲染领取按钮。
- * CodeArts 是华为云账号体系，同样不参与。
+ * 之前这里有一份 `CREDITS_PROVIDERS = ['buddy']`，只用来决定「一键领取积分」
+ * 按钮是否渲染，却**没有**约束余额查询 —— 后者在面板挂载时对所有 provider
+ * 无条件发起，于是 CodeArts 面板每次打开都在控制台报
+ * `unsupported provider: codearts`，账号卡片的「积分」也永远是「查询失败」。
+ * 现在两项能力（balance / dailyCheckin）都在同一张表里显式登记，并在请求前判定。
  */
-const CREDITS_PROVIDERS = Object.freeze(['buddy'])
 
 function ProviderLogo({ provider }) {
   const p = PROVIDERS.find(p => p.id === provider);
@@ -145,7 +147,7 @@ function CreditBalanceRow({ balance, error, loading }) {
       : null));
 }
 
-function AccountCard({ account, onToggle, onDelete, onRetest, onReset, busy, credits, creditsLoading }) {
+function AccountCard({ account, onToggle, onDelete, onRetest, onReset, busy, credits, creditsLoading, showCredits }) {
   const rateLimits = account.modelRateLimits
     ? Object.entries(account.modelRateLimits).filter(([, v]) => v > Date.now())
     : [];
@@ -181,11 +183,16 @@ function AccountCard({ account, onToggle, onDelete, onRetest, onReset, busy, cre
           account.expiresAt
             ? `${formatTime(account.expiresAt) || '未知'}${account.refreshable ? ' · 自动续期' : ''}`
             : '未知')),
-      React.createElement(CreditBalanceRow, {
-        balance: credits?.balance ?? null,
-        error: credits?.error,
-        loading: creditsLoading,
-      })),
+      // 不支持积分余额的 provider（CodeArts）不渲染该行：留着它只能显示
+      // 「查询失败」，而失败原因是「这个 provider 根本没有此接口」——
+      // 与其展示一条无法修复的错误，不如不展示。
+      showCredits
+        ? React.createElement(CreditBalanceRow, {
+            balance: credits?.balance ?? null,
+            error: credits?.error,
+            loading: creditsLoading,
+          })
+        : null),
     rateLimits.length > 0
       ? React.createElement('div', { className: 'dim-jh-rateLimits' },
           React.createElement('span', { className: 'dim-jh-rateLimitsLabel' }, '限额重置'),
@@ -433,13 +440,33 @@ function ProviderPanel({ provider, rpcCall }) {
   }, [provider, rpcCall]);
 
   /**
+   * 本 provider 是否支持积分余额查询。
+   *
+   * CodeArts 是华为云账号体系，后端**没有**这两条腾讯计费接口
+   * （`credits.balances` 会回 `unsupported provider: codearts`）。
+   * 因此这里必须在**发起请求之前**判掉：既不调用 RPC，也不渲染「积分」行与
+   * 「刷新积分」按钮——否则卡片会永远停在「查询失败」，控制台每次都留报错。
+   *
+   * 判定依据是 `./credits-capabilities.js` 的能力矩阵（唯一真相源），
+   * 而不是散落在 UI 里的 provider 字面量比较。
+   */
+  const canLoadCredits = supportsCreditBalance(provider);
+  // CodeBuddy / WorkBuddy 支持每日签到积分，其他 provider 不渲染领取按钮。
+  const supportsCredits = supportsDailyCheckin(provider);
+
+  /**
    * 拉取本页全部账号的积分余额。
    *
    * 单独一个请求、单独的 loading 状态：余额查询涉及逐账号的网络往返，可能
    * 慢或失败；它绝不能影响账号列表的可用性——查不到余额时卡片显示原因，
    * 而不是让整个面板变成错误页。
+   *
+   * **不支持的 provider 直接返回**：不支持的 provider（CodeArts）连请求都不发。
+   * 这是刻意放在函数内部而不是只靠调用点判断——`claimCredits` / 「刷新积分」
+   * 按钮等多个入口都调它，门控收在这里才不会被将来新增的调用点绕过。
    */
   const loadCredits = React.useCallback(async () => {
+    if (!canLoadCredits) return;
     setCreditsLoading(true);
     try {
       const res = await rpcCall('credits.balances', { provider });
@@ -469,12 +496,14 @@ function ProviderPanel({ provider, rpcCall }) {
     } finally {
       if (mounted.current) setCreditsLoading(false);
     }
-  }, [provider, rpcCall]);
+  }, [provider, rpcCall, canLoadCredits]);
 
   React.useEffect(() => {
     mounted.current = true;
     void loadAccounts();
-    void loadCredits();
+    // 只有支持余额查询的 provider 才在挂载时拉积分；CodeArts 不会走到这里
+    // （loadCredits 内部也有一道门控，这里提前判掉是为了连 loading 状态都不翻）。
+    if (canLoadCredits) void loadCredits();
     return () => { mounted.current = false; };
     // loadCredits 依赖 accounts，但这里只想在挂载/provider 变化时各跑一次；
     // 账号刷新后由操作方显式再调 loadCredits（见 claimCredits）。
@@ -487,16 +516,19 @@ function ProviderPanel({ provider, rpcCall }) {
   // 「显示列表」：控制模型列表面板的展开状态。关闭时不挂载面板，避免
   // 每次进入面板都白白发一次 model.list 请求。
   const [showModels, setShowModels] = React.useState(false);
-  // CodeBuddy / WorkBuddy 支持每日签到积分，其他 provider 不渲染领取按钮。
-  const supportsCredits = CREDITS_PROVIDERS.includes(provider);
 
   /**
    * 一键领取当前 provider 下全部已启用账号的每日签到积分。
    *
    * 后端逐个账号顺序处理，单个账号失败不会中断整批，因此这里通常正常返回，
    * 由 summary 各计数决定提示文案与色调。
+   *
+   * **不支持的 provider 直接返回**：守卫与按钮渲染同源（`supportsCredits`），
+   * 放在函数内是为了将来若从别处调用（如快捷键、批量入口）也不会打到
+   * `unsupported provider` 上——按钮不渲染只是 UI 便利，不是安全边界。
    */
   const claimCredits = async () => {
+    if (!supportsCredits) return;
     setClaiming(true);
     setClaimNotice(null);
     try {
@@ -638,12 +670,14 @@ function ProviderPanel({ provider, rpcCall }) {
           title: MODEL_LIST_HELP,
           onClick: () => setShowModels(true),
         }, '显示列表'),
-        React.createElement('button', {
-          className: 'dim-jh-btn',
-          title: '重新查询本页全部账号的剩余积分（Credits Balance）。余额由服务端实时计算，点此可刷新。',
-          disabled: creditsLoading,
-          onClick: () => void loadCredits(),
-        }, creditsLoading ? '查询中…' : '刷新积分'),
+        canLoadCredits
+          ? React.createElement('button', {
+              className: 'dim-jh-btn',
+              title: '重新查询本页全部账号的剩余积分（Credits Balance）。余额由服务端实时计算，点此可刷新。',
+              disabled: creditsLoading,
+              onClick: () => void loadCredits(),
+            }, creditsLoading ? '查询中…' : '刷新积分')
+          : null,
         supportsCredits
           ? React.createElement('button', {
               className: 'dim-jh-btn',
@@ -707,6 +741,7 @@ function ProviderPanel({ provider, rpcCall }) {
                 busy: probeBusy !== null,
                 credits: credits[account.id],
                 creditsLoading: creditsLoading && credits[account.id] === undefined,
+                showCredits: canLoadCredits,
                 onToggle: toggleAccount,
                 onDelete: deleteAccount,
                 onRetest: (id) => void runLimitAction('retest', id),

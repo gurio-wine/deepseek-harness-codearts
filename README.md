@@ -315,15 +315,26 @@ Jet Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的**�
 
 ### 积分余额（Credits Balance）
 
-账号卡片上的「积分」一行显示该账号的**剩余积分**，与 IDE 顶部显示的
+账号卡片上的「积分」一行显示该账号的**可用积分**，与 IDE 顶部显示的
 `Credits Balance` 是同一个数值。鼠标悬停可看到各资源包的明细与到期时间。
 
-**两个产品通用**——CodeBuddy 中国版与 WorkBuddy 国际版都实现同一接口
-（只是 baseURL 随 `product.endpoint` 切换）：
+**支持范围**：CodeBuddy 中国版与 WorkBuddy 国际版通用（都实现同一接口，
+只是 baseURL 随 `product.endpoint` 切换）：
 
 ```
 POST /v2/billing/meter/get-user-resource    body {}
 ```
+
+**CodeArts 不支持**：它是华为云账号体系，没有这两条腾讯计费接口。因此 CodeArts
+面板**不显示「积分」行，也不显示「刷新积分」按钮**，且不会发起
+`credits.balances` 请求。这一点由 `plugin-src/client/credits-capabilities.js`
+的能力矩阵在**请求前**判定，而非等后端返回错误再吞掉。
+
+> 历史缺陷：早期客户端在面板挂载时对所有 provider 无条件调用
+> `credits.balances`，于是每次打开 CodeArts 面板都会在控制台报
+> `unsupported provider: codearts`，并把每个账号卡片的「积分」渲染成
+> 「查询失败」。修法是不发起该请求——后端 `productById()` 的拒绝是正确的
+> 契约行为，不该被当作运行时故障展示。
 
 ### 一键领取积分（每日签到）
 

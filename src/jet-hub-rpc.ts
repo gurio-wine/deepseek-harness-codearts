@@ -522,6 +522,15 @@ export function registerJetHubRpc(
 
       // ── 每日签到（积分领取）──
       // 查询某 provider 下全部启用账号的签到状态。
+      //
+      // ⚠️ 三个积分端点（status / claimAll / balances）都以 `productById()`
+      // 判能力，而 **CodeArts 不是 BuddyProduct**（华为云账号体系没有腾讯计费
+      // 接口），因此 `codearts` 必定落到下面的 bad-request。这是正确且必要的
+      // 拒绝，但客户端**不应**把这条错误当作运行时故障去展示：它应当在发请求
+      // 之前就按 `plugin-src/client/credits-capabilities.js` 的能力矩阵判掉
+      // （历史缺陷：CodeArts 面板挂载时无条件调用 credits.balances，导致每次
+      // 打开设置页都在控制台报 unsupported provider 并把账号卡片标成查询失败）。
+      // 此处的拒绝是兜底与契约声明，不是常规路径。
       case 'credits.status': {
         const req = payload as RpcCreditsStatusRequest
         const product = productById(req.provider)

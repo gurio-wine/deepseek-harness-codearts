@@ -130,7 +130,7 @@ Jet Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限
 
 ## 积分余额（Credits Balance）
 
-**两个产品通用**，与签到是彼此独立的能力 —— 不要因为「国际版没有签到」就推断也查不到余额：
+**两个 CodeBuddy 系产品通用**，与签到是彼此独立的能力 —— 不要因为「国际版没有签到」就推断也查不到余额：
 
 - 端点：`POST /v2/billing/meter/get-user-resource`，body `{}`
 - 响应**双层嵌套**：`data.Response.Data.Accounts[]`（签到是单层 `data`，此处最易解析错）
@@ -138,7 +138,25 @@ Jet Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限
 - 包名回退链：`PackageName` → `SubProductName` → `PackageCode`
 - 「余额为 0」与「查不到」严格区分：失败时 `balance` 为 `null` + `error`，卡片显示原因而非 0
 - RPC：`credits.balances`；前端 `AccountCard` 的 `CreditBalanceRow`，面板有「刷新积分」按钮
+- **CodeArts 不支持**（华为云账号体系，无腾讯计费接口）：`productById('codearts')` 为 `undefined`，三个积分端点都会回 `bad-request: unsupported provider: codearts`
 - 该接口**不在 CLI 内核**里（内核只有 `get-dosage-notify`），静态搜索找不到，靠真实凭据实测发现
+
+## 积分能力必须在请求前判定（`credits-capabilities.js`）
+
+`plugin-src/client/credits-capabilities.js` 是「哪个 provider 有哪项积分能力」的**唯一真相源**，两项能力彼此独立、不可互相推断：
+
+| provider | `balance` | `dailyCheckin` |
+|---|---|---|
+| `codearts` | ✗ | ✗ |
+| `buddy` | ✓ | ✓ |
+| `workbuddy` | ✓ | ✗（国际版后端无签到接口） |
+
+要点：
+
+- **默认关闭**：未登记的 provider 视为两项全无。新增 provider 忘登记时，最坏结果是暂时看不到积分，而不是每次打开面板都发一个必然失败的请求
+- **门控在发请求之前**，不是在 UI 上吞错误：`loadCredits` / `claimCredits` 函数内部各有一道守卫（按钮不渲染只是 UI 便利，不是安全边界），`AccountCard` 的积分行与「刷新积分」按钮也按能力渲染
+- **历史缺陷**（用户报障）：客户端在面板挂载时对所有 provider 无条件调用 `credits.balances`，CodeArts 面板每次打开都在控制台报 `unsupported provider: codearts`，并把账号卡片的「积分」渲染成「查询失败」。后端 `productById()` 的拒绝是正确契约，不该被当成运行时故障
+- 改动能力矩阵后必须同步 `PROVIDERS` 列表：`tests/unit/credits-capabilities.spec.ts` 有一条断言锁死两者条目集合相等
 
 ## X-Domain 必须跟随产品，而非凭据
 

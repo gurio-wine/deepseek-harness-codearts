@@ -763,3 +763,77 @@ describe('model.list / model.setDisabled 端点', () => {
     expect(result.error?.message).toContain('令牌已过期')
   })
 })
+
+/**
+ * 三个积分端点的 provider 能力边界（后端侧契约）。
+ *
+ * CodeArts 是华为云账号体系，**不是** BuddyProduct —— `productById('codearts')`
+ * 返回 undefined，因此 `credits.status` / `credits.claimAll` / `credits.balances`
+ * 必然回 `bad-request: unsupported provider: codearts`。
+ *
+ * 这不是缺陷，而是正确的能力边界声明。真实缺陷在客户端：它在面板挂载时对
+ * **所有** provider 无条件调用 `credits.balances`，把这条必然的拒绝当成运行时
+ * 故障打进了控制台，并把账号卡片的「积分」渲染成「查询失败」（修法见
+ * `plugin-src/client/credits-capabilities.js` 与 `tests/unit/credits-capabilities.spec.ts`）。
+ *
+ * 此用例锁住后端这一侧，防止两种「好心改坏」：
+ * - 把拒绝改成「返回空结果」→ 前端会以为 CodeArts 真没有积分可查，永远查不出问题；
+ * - 让它抛异常 → 退化成 `jet-hub/handler-failed`，丢失「provider 不支持」这一原因。
+ * 同时也验证拒绝是**按 provider 精确生效**的，没有连 CodeBuddy 系一起误拒。
+ */
+describe('积分端点的 provider 能力边界', () => {
+  /** 从 connection.fetch.register 捕获到的处理器。 */
+  type Handler = (request: Request) => Promise<Response>
+
+  /** 注册端点，返回一个「调用端点方法并解包 result」的函数。 */
+  function registerCreditsEndpoints() {
+    let handler: Handler | undefined
+    const ctx = {
+      get: (key: string) => key === 'connection'
+        ? { fetch: { register: (config: { fetch: Handler }) => { handler = config.fetch } } }
+        : undefined,
+      logger: { warn: () => {}, info: () => {} },
+    }
+    // pool 替身：一旦 provider 校验被绕过，listAccounts 会返回空数组，
+    // 端点便以 `ok: true` + 空列表「假成功」——下面的断言会立刻揭穿它，
+    // 而不会因为抛 TypeError 变成误导性的 handler-failed。
+    const pool = { listAccounts: async () => [] }
+
+    registerJetHubRpc(ctx as never, pool as never, {} as never, {} as never, {} as never)
+    if (handler === undefined) throw new Error('endpoint handler was not registered')
+
+    return async (method: string, payload: unknown) => {
+      const response = await handler!(new Request('http://localhost/api/jet-hub', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId: 'rpc-1',
+          method: 'jet-hub',
+          payload: { method, payload },
+        }),
+      }))
+      const body = await response.json() as { result: { ok: boolean; value?: unknown; error?: { message: string } } }
+      return body.result
+    }
+  }
+
+  const CREDITS_METHODS = ['credits.status', 'credits.claimAll', 'credits.balances']
+
+  it.each(CREDITS_METHODS)('%s 对 codearts 返回 unsupported provider（可读的 bad-request）', async (method) => {
+    const call = registerCreditsEndpoints()
+    const result = await call(method, { provider: 'codearts' })
+
+    expect(result.ok).toBe(false)
+    expect(result.error?.message).toBe('unsupported provider: codearts')
+  })
+
+  it.each(CREDITS_METHODS)('%s 不会把 CodeBuddy 系一并误拒', async (method) => {
+    const call = registerCreditsEndpoints()
+    // 两个 Buddy 系产品都能通过 provider 校验，走到 listAccounts（替身返回空）。
+    for (const provider of ['buddy', 'workbuddy']) {
+      const result = await call(method, { provider })
+      expect(result.ok, `${method}/${provider}`).toBe(true)
+    }
+  })
+})
