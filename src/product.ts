@@ -240,7 +240,7 @@ const WORKBUDDY_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
     id: 'hy3', name: 'Hy3', contextWindow: 192_000, supportsImages: true,
     reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high',
   },
-  { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', contextWindow: 1_000_000, supportsImages: true, reasoningEfforts: ['high'] },
+  { id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', contextWindow: 1_000_000, supportsImages: true, reasoningEfforts: ['high'], defaultReasoningEffort: 'high' },
   {
     id: 'gpt-6-astra', name: 'GPT-6-Astra', contextWindow: 1_000_000, supportsImages: true,
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultReasoningEffort: 'high',

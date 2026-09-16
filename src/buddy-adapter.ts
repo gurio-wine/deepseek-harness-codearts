@@ -37,6 +37,19 @@ import { isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reso
  * （www.workbuddy.ai），故不能再用本常量拼接请求 URL。
  */
 export const CHAT_API_BASE = 'https://copilot.tencent.com/v2'
+
+/**
+ * 是否为 DeepSeek 系模型（前缀匹配，不区分大小写）。
+ *
+ * 对齐 workbuddy2api-panel `thinking.go` 的 `isDeepSeekModel` 判定口径与
+ * 官方客户端 `thinkingFormat:"deepseek"` 标记：deepseek 系模型「开思考」
+ * 必须显式带 `thinking:{type:"enabled"}` + `reasoning_effort` 档位，缺任一
+ * 上游都按不思考应答（`reasoning_content` 为空/缺失）。glm/kimi 等其他模型
+ * 走各自 thinkingFormat（默认开或 `enable_thinking`），不需要此开关。
+ */
+function isDeepSeekModel(model: string): boolean {
+  return /^deepseek/i.test(model.trim())
+}
 /**
  * CodeBuddy 的 provider 路由名（历史常量，保留导出以兼容既有导入方）。
  *
@@ -538,6 +551,18 @@ export class BuddyAdapter extends LlmAdapter {
   }
 
   /**
+   * 模型声明的默认思考等级（远端 `reasoning.defaultEffort` 优先，产品兜底表次之）。
+   *
+   * 用途：composer 未选档位时补 `reasoning_effort`（deepseek 系不带档位 = 不思考）。
+   * 若声明值不在该模型的支持档内（远端数据不一致）则视为未声明，由调用方回退。
+   */
+  private defaultEffortFor(model: string): string | undefined {
+    const declared = this.remoteMeta.get(model)?.defaultReasoningEffort
+      ?? this.productFallbackMeta.get(model)?.defaultReasoningEffort
+    return declared !== undefined && this.effortsFor(model).includes(declared) ? declared : undefined
+  }
+
+  /**
    * 产品级兜底模型目录（`product.fallbackModels`）。
    *
    * 用于远端不可用或远端未覆盖到该模型时。与 `remoteMeta` 分开存放，
@@ -720,11 +745,33 @@ export class BuddyAdapter extends LlmAdapter {
     if (tools !== undefined && tools.length > 0) bodyObj.tools = tools
     if (options.temperature !== undefined) bodyObj.temperature = options.temperature
     if (options.stop !== undefined && options.stop.length > 0) bodyObj.stop = options.stop
+    // DeepSeek 思维链开关（逆向官方 codebuddy.js，对齐 workbuddy2api-panel
+    // thinking.go）。**实测关键结论（2026-09，直连三站点对照）**：
+    //   - 裸请求（无 reasoning_effort、无 thinking）→ reasoning_content 恒为 0；
+    //   - 仅带 reasoning_effort:high → 返回思考（148~250 字符）；
+    //   - 仅带 thinking:{type:'enabled'} → 仍为 0（该字段单独无效）；
+    //   - 两者都带 → 返回思考。
+    // 即 **reasoning_effort 是真正的开关**，thinking 字段单独不生效（保留它是
+    // 为对齐官方客户端出站形态，并覆盖未来后端按它判定的情形）。
+    // 三站点（workbuddy 国际/中国 UA、codebuddy）行为一致 → endpoint/UA 无关。
+    const deepseek = isDeepSeekModel(options.model)
+    if (deepseek) {
+      bodyObj.thinking = { type: 'enabled' }
+    }
     // 思考强度：composer 选中的等级透传为 `reasoning_effort`（实测
     // low/high/max 会显著改变返回的 reasoning_content 长度，服务端真实生效）。
     // 只在该模型确实支持该等级时才发，否则服务端会因非法参数 400。
-    if (options.reasoningEffort !== undefined && this.effortsFor(options.model).includes(options.reasoningEffort)) {
+    const efforts = this.effortsFor(options.model)
+    if (options.reasoningEffort !== undefined && efforts.includes(options.reasoningEffort)) {
       bodyObj.reasoning_effort = options.reasoningEffort
+    } else if (deepseek && efforts.length > 0) {
+      // composer 未选档位（历史请求可能 `adapterDefaults: undefined`）或所选
+      // 档位不被支持时，必须补一个档位——否则请求体里只剩 thinking，上游仍按
+      // 不思考应答（实测）。回退顺序：声明默认档 → high（对齐官方客户端
+      // REASONING_SUPPLEMENTS.defaultEffort 与 thinking.go 的兜底）→ 最低支持档
+      // （绝不臆造模型未声明的档位，否则服务端 400）。
+      bodyObj.reasoning_effort = this.defaultEffortFor(options.model)
+        ?? (efforts.includes('high') ? 'high' : efforts[0])
     }
     const body = JSON.stringify(bodyObj)
 

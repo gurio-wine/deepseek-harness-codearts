@@ -343,11 +343,35 @@ describe('BuddyAdapter credential handling', () => {
     expect(await captureBody({ reasoningEffort: 'max' })).toMatchObject({ reasoning_effort: 'max' })
   })
 
-  it('stream omits reasoning_effort when none is selected or it is unsupported', async () => {
-    expect(await captureBody()).not.toHaveProperty('reasoning_effort')
+  // 实测（2026-09，直连 workbuddy 国际/中国 UA 与 codebuddy 三站点对照）：
+  //   - 裸请求（无 reasoning_effort、无 thinking）→ reasoning_content 恒为 0；
+  //   - 仅 reasoning_effort:high → 返回思考；仅 thinking:{type:'enabled'} → 仍为 0；
+  //   - 两者都带 → 返回思考。
+  // 即 reasoning_effort 才是真正开关，thinking 单独不生效（保留以对齐官方形态）。
+  it('stream enables thinking for deepseek models', async () => {
+    expect(await captureBody()).toMatchObject({ thinking: { type: 'enabled' } })
+  })
+
+  // 真实缺陷回归（会话 session-03b4d1f2 "测试思考过程显示"）：workbuddy 的
+  // deepseek-v4.1-flash 未声明 defaultReasoningEffort，composer 因而未预选档位，
+  // 请求体里只剩 thinking 而没有 reasoning_effort → 上游按不思考应答 → UI 看不到
+  // 思考块。适配器必须在此情形补档，保证任何 deepseek 请求都带 reasoning_effort。
+  it('stream backfills reasoning_effort for deepseek when none is selected or unsupported', async () => {
+    // composer 未选等级（options.reasoningEffort === undefined）时补默认档。
+    expect(await captureBody()).toMatchObject({ reasoning_effort: 'high' })
     // 会话历史里可能残留切换模型前的旧等级（如 glm-5.2 的 xhigh），
-    // 直接透传会让服务端拒绝整个请求。
-    expect(await captureBody({ reasoningEffort: 'xhigh' })).not.toHaveProperty('reasoning_effort')
+    // 不被该模型支持时也要补成合法档位，而非丢弃导致静默不思考。
+    const body = await captureBody({ reasoningEffort: 'xhigh' })
+    expect(body).toHaveProperty('reasoning_effort')
+    expect(['low', 'high', 'max']).toContain(body.reasoning_effort)
+  })
+
+  it('stream does not enable thinking or backfill effort for non-deepseek models', async () => {
+    // glm 等其他模型走各自 thinkingFormat（默认开或 enable_thinking），
+    // 不注入 thinking 开关、不补默认档。
+    const body = await captureBody({ model: 'glm-5.2' })
+    expect(body).not.toHaveProperty('thinking')
+    expect(body).not.toHaveProperty('reasoning_effort')
   })
 
   // CodeBuddy 只接受 OpenAI 多模态 parts 形态的图片；
