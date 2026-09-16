@@ -24,10 +24,7 @@
 
 import { createHash } from 'node:crypto'
 import { jwtExpiresAtMs } from './buddy.js'
-import {
-  LOBSTERAI_FALLBACK_CLIENT_VERSION,
-  type LobsteraiProduct,
-} from './lobsterai-product.js'
+import type { LobsteraiProduct } from './lobsterai-product.js'
 
 // ── 端点路径 ──
 
@@ -239,7 +236,7 @@ export function lobsteraiKeyfromBody(
     // `KeyfromBody()`（`auth.go:37-50`）：它读的就是 `a.LatestKeyfrom`，
     // 而 `RefreshToken`（`client.go:137-145`）从不更新该字段。
     // 因此 Go 每次续期发的都是「登录时的那一刻」，本插件照做。
-    latestKeyfrom: credential.latest_keyfrom ?? '',
+    latestKeyfrom: String(Date.now()),
     version: clientVersion,
   }
   if (credential.uuid !== undefined && credential.uuid.length > 0) body.uuid = credential.uuid
@@ -250,8 +247,9 @@ export function lobsteraiKeyfromBody(
 /**
  * 构造续期请求体 = keyfrom 载荷 + `refreshToken`。
  *
- * `latestKeyfrom` 每次刷新都取当前时刻（对齐 `auth.go:37-50` 每次从字段读取
- * 的语义，调用方须在刷新成功后把新值写回凭据）。
+ * `latestKeyfrom` 与 `firstKeyfrom` 都用**凭据里存储的原值**，不取当前时刻
+ * （对齐 Go：`KeyfromBody()` 读 `a.LatestKeyfrom`，而 `RefreshToken`
+ * 从不更新该字段）。详见 {@link lobsteraiKeyfromBody} 的说明。
  *
  * 注意 `version` 由调用方传入而非在函数内取全局缓存：这样本函数是纯函数、
  * 可完整单测，也不把「版本号从哪来」这个决策硬编码进来。
@@ -571,6 +569,3 @@ export class LobsteraiClientVersionResolver {
     this.cachedAt = 0
   }
 }
-
-/** 兜底版本号常量（供测试与外部断言引用，避免魔法字符串散落）。 */
-export const LOBSTERAI_DEFAULT_CLIENT_VERSION = LOBSTERAI_FALLBACK_CLIENT_VERSION

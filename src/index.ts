@@ -257,9 +257,11 @@ export function apply(ctx: Context): void {
   registerLobsteraiLlm(ctx, {
     credentialRef: credentialRef(LOBSTERAI.defaultCredentialRef),
     resolveCredential: async () => {
-      // 只从 lobsterai 的账号池取账号，回退到 LobsterAI 自己的单凭据 ref，
+      // 只从 LobsterAI 自己的账号池取账号，回退到自己的单凭据 ref，
       // 保证不会串用 CodeBuddy / WorkBuddy / CodeArts 的凭据。
-      const available = await pool.getAvailableAccount('lobsterai', '')
+      // provider 实参用 LOBSTERAI.id 而非字面量 'lobsterai'：写死字面量在
+      // 改名/多产品场景下会静默查不到账号（本插件在 workbuddy 上踩过同类坑）。
+      const available = await pool.getAvailableAccount(LOBSTERAI.id, '')
       if (available) return available.credential as LobsteraiCredential
       const resolved = await ctx.credentials.resolve(credentialRef(LOBSTERAI.defaultCredentialRef))
       if (!resolved) return undefined
