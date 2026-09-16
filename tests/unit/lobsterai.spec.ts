@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
+import * as lobsteraiModule from '../../src/lobsterai.js'
 import {
   LOBSTERAI_CALLBACK_PATH,
   LOBSTERAI_CHAT_PATH,
   LOBSTERAI_EXCHANGE_PATH,
   LOBSTERAI_MODELS_PATH,
-  LOBSTERAI_PROFILE_SUMMARY_PATH,
   LOBSTERAI_REFRESH_PATH,
   LobsteraiClientVersionResolver,
   applyLobsteraiRefresh,
@@ -57,7 +57,10 @@ describe('LobsterAI 端点常量', () => {
     expect(LOBSTERAI_EXCHANGE_PATH).toBe('/api/auth/exchange')
     expect(LOBSTERAI_REFRESH_PATH).toBe('/api/auth/refresh')
     expect(LOBSTERAI_MODELS_PATH).toBe('/api/models/available')
-    expect(LOBSTERAI_PROFILE_SUMMARY_PATH).toBe('/api/user/profile-summary')
+    // 积分余额端点常量定义在 src/lobsterai-credits.ts（唯一使用方）——
+    // 曾经两处各定义一份同名常量，端点变更只改一处会让语义分叉且无测试失败。
+    // 这里断言它在 lobsterai.js 里**不再**导出，防止重复定义回归。
+    expect(lobsteraiModule).not.toHaveProperty('LOBSTERAI_PROFILE_SUMMARY_PATH')
     expect(LOBSTERAI_CHAT_PATH).toBe('/api/proxy/v1/chat/completions')
     expect(LOBSTERAI_CALLBACK_PATH).toBe('/auth/callback')
   })

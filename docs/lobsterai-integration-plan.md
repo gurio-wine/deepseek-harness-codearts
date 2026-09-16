@@ -1649,14 +1649,47 @@ curl 命令（55-71 行）。
 | D-c | `version` 字段取值 | 硬编码假值 `0.1.0`（`auth.go:41`） | 动态真值（实测 `2026.9.4`） | `0.1.0` 是假值（`sigin.py` 会动态取），后端未强校验才未暴露 |
 | D-d | 自动冷却 / 禁用状态机 | `Cooldown` / `Disable` / `NoteError` 计数 | 不移植，复用 `modelRateLimits` + 用户手动重测 | 见 D2；**注意「轮转」与「冷却」是两件事** —— 本插件采纳前者（对齐 Go）、不用后者 |
 
+#### 第二轮：独立审查发现的缺陷（同一批次的更深问题）
+
+首轮自查通过后，另起一个独立 reviewer 做对抗性审查，又发现 **4 个严重 + 4 个中等**。
+这批问题**在首轮 763 项测试全绿的情况下依然存在** —— 其价值恰在于此。
+
+| # | 缺陷 | 证据 | 修正 |
+|---|---|---|---|
+| S1 | 适配器从**账号池**取凭据，`refresh` 回调却刷**默认单凭据 ref** | 实跑：`refresh 目标是 LOBSTERAI_ACCESS_TOKEN；池凭据 token 仍是 POOL-AT`。症状：池凭据过期 → 刷新成功但回写到**另一个** ref → 再 resolve 仍拿到过期凭据 → 401；**续期日志全绿，用户却一直认证失败** | `index.ts` 的 `refresh` 改为先 `getAvailableAccount` 再 `refreshAccountCredential(该账号 ref)`；与 Go 一致（`handler.go:197-209` 也是 Pick 出账号后对该账号 `RefreshToken(acct)`） |
+| S3 | 换号耗尽后**错误码跨账号错配**：`kind` 循环外只算一次，`errorText`/`response` 每轮覆盖 | 实跑：`A=402(积分不足) B=503 → 最终 code=SERVER`，用户完全看不到真实原因 | 循环内同步维护 `lastStatus`/`lastKind`/`errorText` 成组状态，最终错误用它们构造 |
+| S4 | 换号循环给**错误的账号**写限流徽章（用循环外的 kind，而 `currentAccountId` 已推进到下一个账号） | 实跑：A=429 换成 B、B=404 → A、B 都写。B 写对**纯属巧合**（soft-rate 与 not-found 恰好都 true）；**若 B 是 5xx 就会给 B 写「该模型限流 1 小时」** | 改用**本轮**的 `lastKind`；测试锁定「A=429/B=500 只写 A」等三种组合 |
+| S2 | `latest_keyfrom` 的对齐修复曾在 `e2d9362` 生效，被 `a0319d5` **无声丢失**，`9e34754` 才恢复 | 该行取值逐提交追踪：`bb9cc92`=Date.now() → `e2d9362`=存储值 → **`a0319d5`=Date.now()** → `9e34754`=存储值。`a0319d5` 只删了一个临时文件、没碰该文件，说明是**工作区被覆盖后夹带** | 已由 `lobsterai-parity.spec.ts` 覆盖（实跑：改回 `Date.now()` 会 3 项失败） |
+
+**中等项**：
+
+| # | 问题 | 修正 |
+|---|---|---|
+| M1 | SSE 的 `message` 回退缺 `gotAnyContent` 守卫 → 内容重复拼接（实跑 `'AM'`，Go 是 `'A'`） | 补 `gotAnyContent` 标志，对齐 `sse.go:72,98` |
+| M3 | `LOBSTERAI_PROFILE_SUMMARY_PATH` 在两处重复定义，前者零引用 | 只保留 `lobsterai-credits.ts` 一处，并加断言防止重复定义回归 |
+| M4 | `refreshAll` 对非终态失败**完全静默**（不记日志、不更新状态） | 补 `logger.warn`。注：`buddy-auth.ts` 有同样的静默问题，属既有实现，**本次不改动其行为** |
+| U2 | 换号**无次数上限**，而 Go 有 `MaxRotate=3`（`handler.go:190` 防雪崩） | 加 `LOBSTERAI_MAX_ROTATE`；注意 Go 的循环**含首个账号**，而适配器在进入循环前已请求过一次，故实际取 `MaxRotate - 1` |
+
+> **为什么首批测试全绿却漏掉这些**（这条比缺陷本身更有价值）：
+> - **S1** 是**接线层**错配 —— 所有 adapter 测试都注入同一个固定
+>   `resolveCredential`，从不模拟「resolve 从池取、refresh 动另一个 ref」。
+>   需要**集成级**测试才能发现（已在 `lobsterai-wiring.spec.ts` 补齐）。
+> - **S3/S4** 需要构造「首账号错误类别 ≠ 末账号错误类别」；原用例只让一个账号失败。
+>   补的用例虽让两轮错误体不同（429/402），但**只断言了 `message`、没断言 `code`**
+>   —— 而错配恰恰只在 code/status 上。**那个测试通过本身给了「此处已验证」的错觉**，
+>   这是最值得记取的教训。
+> - **M1** 只测了「仅有 message」，没测「delta 与 message 混发」。
+
 #### 一致性契约测试
 
-上述每一条都固化在 `tests/unit/lobsterai-parity.spec.ts`（24 项）里，
-每条断言都标注 Go 侧依据位置，防止后续「凭直觉优化」造成无声漂移。
+上述每一条都固化在测试里，且**每条都做过反向验证**（把缺陷改回去、确认测试确实失败）：
 
-> 该文件经反向验证：临时把 C1 的 JWT `sub` 回退加回去，
-> 确认 2 项测试**确实失败**（`lobsterai-parity.spec.ts` + `lobsterai.spec.ts` 各 1 项），
-> 再撤回修复。否则无法排除「测试写得宽松、压根抓不到」。
+| 文件 | 覆盖 |
+|---|---|
+| `tests/unit/lobsterai-parity.spec.ts` | 24 项与 Go 的行为对齐契约（每条标注 Go 依据位置） |
+| `tests/unit/lobsterai-review-fixes.spec.ts` | S3/S4/U2/M1（10 项），含跨账号错配与混发形态 |
+| `tests/unit/lobsterai-wiring.spec.ts` | S1 接线层（3 项），走真实接线而非固定桩 |
+| `tests/unit/lobsterai-rotation-exhaustion.spec.ts` | 耗尽路径的诊断完整性（2 项） |
 
 ### 7.5 架构层面的取舍（需要你确认）
 

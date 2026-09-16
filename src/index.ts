@@ -271,7 +271,23 @@ export function apply(ctx: Context): void {
         return undefined
       }
     },
-    refresh: () => lobsterai.refresh(),
+    refresh: async () => {
+      // 必须刷新**解析凭据时所用的那一个**账号，而不是默认单凭据 ref。
+      //
+      // 为什么：resolveCredential（上面）优先从账号池取
+      // `LOBSTERAI_ACCOUNT_XXX` 的凭据，而 `lobsterai.refresh()` 读写的是
+      // `LOBSTERAI_ACCESS_TOKEN`。两者错配的后果是 —— 适配器检测到池凭据
+      // 过期 → 调 refresh → 成功回写到**另一个** ref → 再 resolve 仍取到
+      // 那份未更新的过期凭据 → 带着过期 token 发请求 → 401。
+      // 用户看到的是「刚在 Jet Hub 登录好，却一直认证失败」，
+      // 而日志里续期全是成功的，极难排查。
+      //
+      // 与 Go 一致：`handler.go:197-209` 也是先 Pick 出账号、再对该账号
+      // `RefreshToken(acct)`（而非某个全局单例）。
+      const available = await pool.getAvailableAccount(LOBSTERAI.id, '')
+      if (available) await lobsterai.refreshAccountCredential(available.entry.credentialRef)
+      else await lobsterai.refresh()
+    },
     fetchRemoteModels: () => lobsterai.fetchModels(pool),
     resolveClientVersion: () => lobsterai.resolveClientVersion(),
     accountPool: pool,

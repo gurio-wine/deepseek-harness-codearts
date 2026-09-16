@@ -452,6 +452,20 @@ export class LobsteraiAuth extends Service {
           } catch {
             // 忽略 updateAccount 本身的错误
           }
+          this.ctx.logger?.warn?.(
+            `[lobsterai] 账号 ${entry.id} 的 refresh_token 已失效，已标记为不可续期（需重新登录）`,
+          )
+        } else {
+          // 非终态失败（网络抖动、5xx、429…）：**必须留下日志**。
+          //
+          // 曾经这里完全静默 —— 账号在 UI 上仍显示「可续期」，续期却永远
+          // 失败，用户拿不到任何线索。`src/buddy-auth.ts` 的 refreshAll
+          // 有同样的静默问题（属既有实现，本次不改动其行为），
+          // 但新代码没有理由重复这个可诊断性缺陷。
+          this.ctx.logger?.warn?.(
+            `[lobsterai] 账号 ${entry.id} 续期失败（将按调度器策略重试）: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+          )
         }
         // 单账号失败不中断循环
       }

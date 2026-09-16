@@ -59,6 +59,16 @@ export const PROVIDER = 'lobsterai'
 const LOBSTERAI_RATE_LIMIT_FALLBACK_MS = 3_600_000
 
 /**
+ * 单次请求最多换几个账号（含首次），对齐 Go 的 `MaxRotate`。
+ *
+ * Go 在 `server.NewHandler` 中把 `MaxRotate` 默认设为 3（`handler.go:38-40`），
+ * 循环写成 `for i := 0; i < h.cfg.MaxRotate; i++`（`handler.go:190`），
+ * 注释明写是**防雪崩**：账号池很大时若逐个试完，一次用户请求可能打出
+ * N 个上游请求，既放大延迟也放大额度消耗。
+ */
+const LOBSTERAI_MAX_ROTATE = 3
+
+/**
  * LobsterAI 远端模型条目。
  *
  * 远端 `GET /api/models/available` 只返回 `modelId`/`modelName`/`provider`/
@@ -496,21 +506,42 @@ export class LobsteraiAdapter extends LlmAdapter {
 
     if (!response.ok) {
       let errorText = await response.text().catch(() => '')
-      const kind = classifyLobsteraiError(response.status, errorText)
+      // 当前这次失败的**成组**状态（status / kind / body 必须同源）。
+      //
+      // 用一组可变变量而不是只看循环外的 `kind`：换号循环里
+      // `response`、`errorText` 每轮都被覆盖，若单把 `kind` 留在循环外，
+      // 就会出现「A 账号的 kind 配 B 账号的 status/body」——
+      //   实测：A=402(积分不足) → B=503 时最终 code 变成 SERVER，
+      //   用户完全看不到「积分不足」这个真实原因；
+      //   且会拿 A 的 kind 去判断「要不要给 B 记限流徽章」，
+      //   给 B 写上「该模型限流 1 小时」这种虚假信息。
+      let lastStatus = response.status
+      let lastKind = classifyLobsteraiError(response.status, errorText)
 
       // 任何非 2xx 都轮转到下一个账号（对齐 Go `handler.go:218-243`：
       // 那个 switch 每个分支都以 continue 结尾）。策略判定集中在
       // `shouldRotateLobsteraiAccount` 里，不在这里内联条件 ——
       // 否则「策略声明」与「实际行为」两处分叉，后续维护必然互相误导。
-      if (this.options.accountPool && shouldRotateLobsteraiAccount(kind)) {
+      if (this.options.accountPool && shouldRotateLobsteraiAccount(lastKind)) {
         const tried = new Set<string>()
         if (currentAccountId) tried.add(currentAccountId)
 
-        for (;;) {
-          // 只有 Go 里真正 `Cooldown(...)` 的三类才记限流徽章
-          // （见 `recordsLobsteraiRateLimit` 的说明）：server/client 类
-          // 若也留徽章，会把「账号出过错」显示成「该模型限流」——虚假信息。
-          if (currentAccountId && recordsLobsteraiRateLimit(kind)) {
+        // 换号次数上限，对齐 Go 的 `MaxRotate`（`handler.go:190` 的
+        // `for i := 0; i < h.cfg.MaxRotate; i++`，默认值 3 见
+        // `server.NewHandler`）。防雪崩：账号池很大时若逐个试完，
+        // 一次用户请求会打出 N 个上游请求，放大延迟与额度消耗。
+        //
+        // ⚠️ **减 1**：Go 的循环计数**包含首个账号**（它每次迭代都
+        // `PickExcluding` 取一个号），而本适配器在进入这个循环**之前**
+        // 已经用首个凭据发过一次请求了。若这里不减，总请求数会变成
+        // 1 + MaxRotate = 4，比 Go 多一次。
+        const maxRotate = LOBSTERAI_MAX_ROTATE - 1
+        for (let round = 0; round < maxRotate; round++) {
+          // 用**本轮**的 lastKind 判断是否该记徽章，而不是循环外的 kind：
+          // 只有 Go 里真正 `Cooldown(...)` 的三类才记（见
+          // `recordsLobsteraiRateLimit` 的说明），且必须记在**真正失败的那个
+          // 账号**上 —— currentAccountId 在下面的循环体里会被推进到下一个账号。
+          if (currentAccountId && recordsLobsteraiRateLimit(lastKind)) {
             // 两层取值：优先 `parseRateLimitError` 从错误体里抠出**服务端声明的**
             // 重置时刻；抠不到则用本地兜底。两者都要能落地 ——
             // 若在抠不到时直接跳过记录，UI 上就不会出现任何限流标记，
@@ -536,27 +567,29 @@ export class LobsteraiAdapter extends LlmAdapter {
             yield* this.consumeSse(response, options)
             return
           }
+          // 覆盖成组状态：status / kind / body 三者必须一起更新，
+          // 否则下面抛出的错误码与实际原因会对不上（见上方说明）。
           errorText = await response.text().catch(() => '')
-          // 换号后若新账号也失败，**继续**轮转（不在这里抛）——
-          // Go 的循环同样是「失败就 continue 到下一个」，只有
-          // 试遍 MaxRotate 次才把最后那个错误抛给客户端。
-          // 这里用最新一次的错误信息覆盖，供耗尽后的文案使用。
-          if (!shouldRotateLobsteraiAccount(classifyLobsteraiError(response.status, errorText))) break
+          lastStatus = response.status
+          lastKind = classifyLobsteraiError(response.status, errorText)
+          // 新账号也不可轮转（理论上不会：shouldRotate 仅对 none 为 false，
+          // 而非 2xx 已排除 none）—— 留作防御，避免将来改动引入死循环。
+          if (!shouldRotateLobsteraiAccount(lastKind)) break
         }
-        // 试遍候选：报「均不可用」，并带上最后一次的真实原因（不吞诊断信息）。
+        // 试遍候选：报「均不可用」，并带上**最后一次**的真实原因（不吞诊断信息）。
         throw new LlmError(
           `lobsterai: 模型 ${options.model} 所有账号均不可用（${errorDetail(errorText)}）`,
-          kind === 'hard-credit' ? 'QUOTA_EXCEEDED' : httpErrorCode(response.status),
-          { status: response.status },
+          lastKind === 'hard-credit' ? 'QUOTA_EXCEEDED' : httpErrorCode(lastStatus),
+          { status: lastStatus },
         )
       }
 
       // 积分不足但无账号池（或只有一个账号）：用可读文案明确告知，
       // 而不是抛一个泛泛的 HTTP 错误 —— 这是 LobsterAI 最主要的失败模式。
-      if (kind === 'hard-credit') {
-        throw new LlmError(`lobsterai: 积分不足（${errorDetail(errorText)}）`, 'QUOTA_EXCEEDED', { status: response.status })
+      if (lastKind === 'hard-credit') {
+        throw new LlmError(`lobsterai: 积分不足（${errorDetail(errorText)}）`, 'QUOTA_EXCEEDED', { status: lastStatus })
       }
-      throw new LlmError(`lobsterai: ${errorDetail(errorText)}`, httpErrorCode(response.status), { status: response.status })
+      throw new LlmError(`lobsterai: ${errorDetail(errorText)}`, httpErrorCode(lastStatus), { status: lastStatus })
     }
 
     // 5. 消费 SSE 流
@@ -616,6 +649,14 @@ export class LobsteraiAdapter extends LlmAdapter {
     let buffer = ''
     let streamEnded = false
     let finishReason: 'stop' | 'tool_calls' | 'length' | undefined
+    /**
+     * 是否已通过 `delta.content` 收到过正文。
+     *
+     * 用途与 Go 的 `gotAnyContent`（`sse.go:72,98`）一致：一旦为 true，
+     * 就不再采纳 `message.content` 这条兼容回退路径，避免两种下发形态
+     * 同时出现时把内容重复拼接。
+     */
+    let gotAnyContent = false
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let firstTokenReceived = false
@@ -687,9 +728,20 @@ export class LobsteraiAdapter extends LlmAdapter {
           if (typeof choice?.finish_reason === 'string') {
             finishReason = choice.finish_reason as 'stop' | 'tool_calls' | 'length'
           }
-          const textDelta = delta?.content
-            ?? (typeof choice?.message?.content === 'string' ? choice.message.content : undefined)
+          // `message.content` 只是**兼容回退**：有的上游把完整消息放在 message
+          // 而非 delta 里（对齐 `sse.go:97-102`）。它与 delta 是**互斥**的两种
+          // 下发形态，不能同时采纳 —— 一旦某个 chunk 既有 delta.content 又有
+          // message.content，无守卫的 `??` 会把两段都拼进去。
+          //
+          // Go 用 `&& !gotAnyContent`（`sse.go:98`，标志位在 `sse.go:72`
+          // 每次写入 delta.content 时置 true）表达「只要已经收到过正文，
+          // 就再也不采纳 message 形态」。这里照搬该语义。
+          const deltaContent = delta?.content
+          const textDelta = deltaContent !== undefined && deltaContent.length > 0
+            ? deltaContent
+            : (!gotAnyContent && typeof choice?.message?.content === 'string' ? choice.message.content : undefined)
           if (textDelta !== undefined && textDelta.length > 0) {
+            if (deltaContent !== undefined && deltaContent.length > 0) gotAnyContent = true
             let block = blocks.find(candidate => candidate.kind === 'text')
             if (block === undefined) {
               block = { index: nextIndex++, kind: 'text', text: '' }

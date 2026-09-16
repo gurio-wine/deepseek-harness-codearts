@@ -34,9 +34,14 @@ export const LOBSTERAI_EXCHANGE_PATH = '/api/auth/exchange'
 export const LOBSTERAI_REFRESH_PATH = '/api/auth/refresh'
 /** 可用模型列表。 */
 export const LOBSTERAI_MODELS_PATH = '/api/models/available'
-/** 账号积分余额（**不是** `/api/user/quota`，后者不含活动积分）。 */
-export const LOBSTERAI_PROFILE_SUMMARY_PATH = '/api/user/profile-summary'
-/** 对话（OpenAI 兼容，**仅支持 SSE**）。 */
+/**
+ * 对话端点（OpenAI 兼容，**仅支持 SSE**）。
+ *
+ * 积分余额端点（`/api/user/profile-summary`）刻意**不在此处**定义：
+ * 唯一使用方是 `src/lobsterai-credits.ts`，常量就近定义在那里。
+ * 曾经两处各定义一份同名常量，端点一旦变更只改一处会让语义分叉，
+ * 且没有任何测试会失败 —— 单一真相源比「集中放一起」更重要。
+ */
 export const LOBSTERAI_CHAT_PATH = '/api/proxy/v1/chat/completions'
 /** 登录回调路径（对齐 `cmd/login/main.go:35` 的 `callbackPath`）。 */
 export const LOBSTERAI_CALLBACK_PATH = '/auth/callback'
