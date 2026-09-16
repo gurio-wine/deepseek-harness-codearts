@@ -592,12 +592,31 @@ export function registerJetHubRpc(
         // 黑名单直接读账号池的进程内副本：开关写入后无需重建适配器，
         // 下一次 listModels 就会应用新的过滤结果。
         const disabledMap = pool.listDisabledModels(req.provider)
+        // ⚠️ `llm.listModels()` 返回的目录**已被适配器过滤掉黑名单**：两个适配器
+        // （llm-adapter.ts / buddy-adapter.ts）的 listModels 内部都会实时
+        // `filter(m => !disabledModelsFor(provider).has(m.id))`。若直接对这个
+        // 结果回填 disabled，就形成闭环矛盾——`disabledMap` 里的键恰好是
+        // `models` 中已被移除的那些元素，`.map()` 永远匹配不到它们，被关闭的
+        // 模型连同它的开关一起从设置页消失，用户**再也无法重新打开**（只能手工
+        // 编辑 settings.yaml）。这正是「关掉后彻底找不到该模型」的根因。
+        //
+        // 因此这里以黑名单为准做并集：凡是「黑名单里为 true、却已不在
+        // listModels 结果中」的模型，补回列表并标记为已关闭。设置页据此始终能
+        // 渲染出全部开关；而对话框模型选择器读的仍是过滤后的 listModels，
+        // 可见性行为完全不变。
+        const listedIds = new Set(models.map((model) => model.id))
+        const filteredOut = Object.keys(disabledMap)
+          .filter((id) => disabledMap[id] === true && !listedIds.has(id))
         const value: RpcModelListResponse = {
-          models: models.map((model) => ({
-            id: model.id,
-            name: model.name,
-            disabled: disabledMap[model.id] === true,
-          })),
+          models: [
+            ...models.map((model) => ({
+              id: model.id,
+              name: model.name,
+              disabled: disabledMap[model.id] === true,
+            })),
+            // 这些模型已被适配器过滤掉，拿不到原始 name，回退为 id。
+            ...filteredOut.map((id) => ({ id, name: id, disabled: true })),
+          ],
         }
         return { ok: true, value }
       }

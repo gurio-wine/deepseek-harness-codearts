@@ -494,10 +494,17 @@ describe('credits.balances 逐账号余额收集', () => {
  * 一起正确的事：
  * 1. 列表来自 `ctx.llm.listModels()`（对话框模型选择器读的同一份目录）；
  * 2. 黑名单经 AccountPool 持久化；
- * 3. 关闭后的模型真的从下一次 listModels 的结果里消失。
+ * 3. 关闭后的模型从对话框选择器里消失，**但在设置页仍可被重新打开**。
  *
  * 因此这里用「注册端点 → 通过 HTTP 请求调用 → 断言响应」的方式做端到端
  * 验证，而不是分别测两个函数——两者的衔接正是最容易出错的地方。
+ *
+ * ⚠️ 第 3 条的两个方向必须都覆盖，且**桩必须模拟真实适配器的过滤行为**：
+ * 真实 `listModels` 会实时剔除黑名单命中的模型，所以 `model.list` 绝不能在
+ * 一个已被过滤的目录上「回填 disabled」——那样被关闭的模型会连同开关一起
+ * 消失，用户再也无法重新打开（历史 bug）。早期版本的桩是
+ * `options.models.map(...)`（从不过滤），恰好绕过这个矛盾，导致该 bug 在
+ * 「注释声称已验证第 3 条」的情况下依然漏到了线上。
  */
 describe('model.list / model.setDisabled 端点', () => {
   /** 从 connection.fetch.register 捕获到的处理器。 */
@@ -511,6 +518,15 @@ describe('model.list / model.setDisabled 端点', () => {
     listModelsError?: string
     /** 省略 llm 服务（验证降级行为）。 */
     withoutLlm?: boolean
+    /**
+     * 是否让桩复刻真实适配器的黑名单过滤（默认 true）。
+     *
+     * 真实 `CodeArtsAdapter.listModels` / `BuddyAdapter.listModels` 都会实时
+     * 剔除 `disabledModelsFor(provider)` 命中的模型，因此桩默认也必须过滤，
+     * 否则「端点在一个已过滤目录上回填 disabled」这类缺陷会被静默绕过。
+     * 仅当需要验证「适配器未过滤」这一非真实场景时才置为 false。
+     */
+    adapterFiltersDisabledModels?: boolean
   }) {
     // settings 替身：内存里保存 namespace 的值，语义与真实服务一致的
     // 「整体 replace」。
@@ -551,7 +567,16 @@ describe('model.list / model.setDisabled 端点', () => {
           return {
             listModels: async (provider: string) => {
               if (options.listModelsError !== undefined) throw new Error(options.listModelsError)
-              return options.models.map(m => ({ ...m, provider }))
+              // 复刻真实适配器：黑名单命中的模型不会出现在 listModels 结果里。
+              // 读的是 settings 替身的当前值（而非构造时的快照），这样
+              // model.setDisabled 之后的下一次 listModels 会立刻反映过滤结果，
+              // 与真实「每次调用都实时读账号池」的语义一致。
+              const disabled = options.adapterFiltersDisabledModels !== false
+                ? ((stored.disabledModels as Record<string, Record<string, boolean>> | undefined)?.[provider] ?? {})
+                : {}
+              return options.models
+                .filter(m => disabled[m.id] !== true)
+                .map(m => ({ ...m, provider }))
             },
           }
         }
@@ -597,13 +622,69 @@ describe('model.list / model.setDisabled 端点', () => {
     const result = await call('model.list', { provider: 'buddy' })
 
     expect(result.ok).toBe(true)
+    // hy3 已被适配器过滤掉（桩复刻了真实过滤），由端点补回列表；
+    // 补回的条目拿不到原始 name，回退为 id —— 这是与契约一致的取舍：
+    // 设置页需要的是「能重新打开它」，而不是它的展示名。
     expect(result.value).toEqual({
       models: [
         { id: 'glm-5.2', name: 'GLM-5.2', disabled: false },
         { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', disabled: false },
-        { id: 'hy3', name: 'Hy3', disabled: true },
+        { id: 'hy3', name: 'hy3', disabled: true },
       ],
     })
+  })
+
+  /**
+   * 回归测试：关闭 → 列表 → 重新打开的完整往返。
+   *
+   * 历史 bug：`model.list` 直接在 `llm.listModels()`（已被适配器过滤）的结果上
+   * 回填 disabled，被关闭的模型不在数组里，它的开关因此从设置页彻底消失，
+   * 用户无法重新打开。此用例锁死「关掉的模型必须仍在 model.list 里且可被 reopen」。
+   */
+  it('关闭模型后它仍出现在 model.list 中（可被重新打开），但不在对话框目录里', async () => {
+    const { call } = registerEndpoints({ models: MODELS })
+
+    // 初始：全部可见、全部打开
+    const before = await call('model.list', { provider: 'buddy' })
+    expect((before.value as { models: Array<{ id: string }> }).models.map(m => m.id))
+      .toEqual(['glm-5.2', 'deepseek-v4-flash', 'hy3'])
+
+    // 关闭 hy3
+    await call('model.setDisabled', { provider: 'buddy', modelId: 'hy3', disabled: true })
+
+    // 关键断言：hy3 仍出现在设置页列表里，且标记为已关闭 —— 否则无法重新打开
+    const after = await call('model.list', { provider: 'buddy' })
+    const models = (after.value as { models: Array<{ id: string; disabled: boolean }> }).models
+    const hy3 = models.find(m => m.id === 'hy3')
+    expect(hy3).toBeDefined()
+    expect(hy3!.disabled).toBe(true)
+    // 其余模型不受影响
+    expect(models.filter(m => m.disabled).map(m => m.id)).toEqual(['hy3'])
+
+    // 重新打开：hy3 恢复正常显示
+    await call('model.setDisabled', { provider: 'buddy', modelId: 'hy3', disabled: false })
+    const reopened = await call('model.list', { provider: 'buddy' })
+    const reopenedModels = (reopened.value as { models: Array<{ id: string; disabled: boolean }> }).models
+    expect(reopenedModels.map(m => m.id)).toEqual(['glm-5.2', 'deepseek-v4-flash', 'hy3'])
+    expect(reopenedModels.every(m => !m.disabled)).toBe(true)
+  })
+
+  /**
+   * 关闭多个模型（含连续操作）后，全部都能在设置页找到。
+   *
+   * 覆盖用户实际场景：连续关掉多个模型后想找回其中一个。
+   */
+  it('连续关闭多个模型后，每个都仍可在 model.list 中找到并重新打开', async () => {
+    const { call } = registerEndpoints({ models: MODELS })
+
+    for (const id of ['glm-5.2', 'hy3']) {
+      await call('model.setDisabled', { provider: 'buddy', modelId: id, disabled: true })
+    }
+
+    const listed = await call('model.list', { provider: 'buddy' })
+    const models = (listed.value as { models: Array<{ id: string; disabled: boolean }> }).models
+    expect(models.map(m => m.id).sort()).toEqual(['deepseek-v4-flash', 'glm-5.2', 'hy3'])
+    expect(models.filter(m => m.disabled).map(m => m.id).sort()).toEqual(['glm-5.2', 'hy3'])
   })
 
   it('未配置黑名单时全部模型默认打开（黑名单制）', async () => {
