@@ -1048,13 +1048,18 @@ describe('产品参数化', () => {
     } as never)
     expect(seen!.get('X-Product-Code')).toBe(CODEBUDDY.productCode)
     expect(seen!.get('User-Agent')).toBe(CODEBUDDY.userAgent)
-    // 部署类型（X-Product）两个产品共用 SaaS，不随产品变化。
-    expect(seen!.get('X-Product')).toBe('SaaS')
+    // X-Product 是**归属名**（产品名），不是部署类型。
+    expect(seen!.get('X-Product')).toBe('CodeBuddy')
+    // 归属头族：后台「使用端」列按这组头归因。
+    expect(seen!.get('X-Agent-Purpose')).toBe('conversation')
+    expect(seen!.get('X-IDE-Name')).toBe('CodeBuddy')
+    expect(seen!.get('X-IDE-Type')).toBe('CodeBuddy')
+    expect(seen!.get('X-IDE-Version')).toBe(CODEBUDDY.clientVersion)
   })
 
   it('WorkBuddy 适配器使用自身 product 的 productCode、User-Agent 与 providerInfo 展示名', async () => {
-    // 两个内置产品的 userAgent 字面量暂时相同，无法观测「是否取自 product」，
-    // 故这里注入自定义 UA 的 product，让该分支真正有鉴别力。
+    // deepseek-v4-flash 不命中任何模型族规则 → 回落到 product.userAgent，
+    // 故注入自定义 UA 的 product 仍能被观测到。
     const custom: BuddyProduct = { ...WORKBUDDY, userAgent: 'WorkBuddy/7.7.7' }
     let seen: Headers | undefined
     const adapter = new BuddyAdapter({
@@ -1074,7 +1079,8 @@ describe('产品参数化', () => {
     } as never)
     expect(seen!.get('X-Product-Code')).toBe('workbuddy')
     expect(seen!.get('User-Agent')).toBe('WorkBuddy/7.7.7')
-    expect(seen!.get('X-Product')).toBe('SaaS')
+    expect(seen!.get('X-Product')).toBe('WorkBuddy')
+    expect(seen!.get('X-IDE-Name')).toBe('WorkBuddy')
     expect(adapter.providerInfo('workbuddy').name).toBe(WORKBUDDY.displayName)
   })
 
@@ -1098,8 +1104,65 @@ describe('产品参数化', () => {
     expect(seen!.get('User-Agent')).toBe('CustomAgent/9.9.9')
   })
 
-  it('providerInfo 对非字符串入参回退到本产品的 id', () => {
-    // 上游传入 undefined 时不得让 deriveKeyRef 的 toUpperCase 崩在客户端。
+  // ── 按模型族分档的 User-Agent ──
+
+  it('WorkBuddy 的 UA 按模型族分档：GPT 系走国际版形态，GLM 系走国内形态', async () => {
+    const uaFor = async (model: string): Promise<string | null> => {
+      let seen: Headers | undefined
+      const adapter = new BuddyAdapter({
+        credentialRef: credentialRef('WORKBUDDY_ACCESS_TOKEN'),
+        resolveCredential: async () => makeCredential(),
+        refresh: async () => {},
+        product: WORKBUDDY,
+        fetchImpl: async (_url, init) => {
+          seen = new Headers(init?.headers as HeadersInit)
+          return sseResponse('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+        },
+      })
+      await collectChunks(adapter, {
+        model,
+        messages: [{ role: 'user', content: 'hi' }] as never,
+        signal: new AbortController().signal,
+      } as never)
+      return seen!.get('User-Agent')
+    }
+
+    // 国际版独有模型线 → 国际版形态（平台段为 `WorkBuddy AI`）。
+    expect(await uaFor('gpt-5.6-sol')).toBe('WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2')
+    expect(await uaFor('gemini-3.5-flash')).toBe('WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2')
+    // 国内系模型 → 国内客户端形态（平台段为 `WorkBuddy`）。
+    expect(await uaFor('glm-5.2')).toBe('WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/5.5.2')
+    expect(await uaFor('hy3')).toBe('WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/5.5.2')
+    expect(await uaFor('kimi-k3')).toBe('WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/5.5.2')
+    // 未命中任何模型族规则 → 回落到 product.userAgent（默认国际版形态）。
+    expect(await uaFor('deepseek-v4.1-flash')).toBe(WORKBUDDY.userAgent)
+  })
+
+  it('分档后的 UA 仍含产品品牌字样，不会退化成框架的 harness UA', async () => {
+    // 归因前提：腾讯后台按出站 UA 归因「使用端」，UA 必须含 WorkBuddy/CodeBuddy 字样。
+    const custom: BuddyProduct = { ...WORKBUDDY, userAgent: 'WorkBuddy/9.9.9' }
+    let seen: Headers | undefined
+    const adapter = new BuddyAdapter({
+      credentialRef: credentialRef('WORKBUDDY_ACCESS_TOKEN'),
+      resolveCredential: async () => makeCredential(),
+      refresh: async () => {},
+      product: custom,
+      fetchImpl: async (_url, init) => {
+        seen = new Headers(init?.headers as HeadersInit)
+        return sseResponse('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+      },
+    })
+    await collectChunks(adapter, {
+      model: 'gpt-5.5',
+      messages: [{ role: 'user', content: 'hi' }] as never,
+      signal: new AbortController().signal,
+    } as never)
+    const ua = seen!.get('User-Agent')!
+    expect(ua).toContain('WorkBuddy')
+    expect(ua).not.toContain('deepseek-harness')
+  })
+
+  it('providerInfo 对非字符串入参回退到本产品的 id', () => {    // 上游传入 undefined 时不得让 deriveKeyRef 的 toUpperCase 崩在客户端。
     const workbuddy = new BuddyAdapter({
       credentialRef: credentialRef('WORKBUDDY_ACCESS_TOKEN'),
       resolveCredential: async () => makeCredential(),

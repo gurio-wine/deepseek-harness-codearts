@@ -20,14 +20,13 @@ import { isRateLimited, parseRateLimitError } from './llm-adapter.js'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
-  BUDDY_DEPLOYMENT_TYPE,
   HTTP_HEADER_DOMAIN,
   HTTP_HEADER_PRODUCT,
   HTTP_HEADER_PRODUCT_CODE,
   credentialExpiresAtMs,
 } from './buddy.js'
 import type { BuddyCredential, BuddyRemoteModel } from './buddy.js'
-import { CODEBUDDY, type BuddyFallbackModel, type BuddyProduct } from './product.js'
+import { CODEBUDDY, resolveUserAgent, type BuddyFallbackModel, type BuddyProduct } from './product.js'
 import { isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, resolveToolPairing } from './sse.js'
 
 /**
@@ -796,12 +795,19 @@ export class BuddyAdapter extends LlmAdapter {
     headers.set('Accept', 'text/event-stream')
     headers.set('Content-Type', 'application/json')
     headers.set(HTTP_HEADER_DOMAIN, credential.domain ?? this.product.apiDomain)
-    // X-Product 是**部署类型**（SaaS），各产品共用同一取值，
-    // 故保持常量；随产品变化的身份标识是 X-Product-Code 与 User-Agent。
-    headers.set(HTTP_HEADER_PRODUCT, BUDDY_DEPLOYMENT_TYPE)
     headers.set(HTTP_HEADER_PRODUCT_CODE, this.product.productCode)
-    // User-Agent 必须伪装为对应产品的 IDE 客户端（后端以此识别客户端）。
-    headers.set('User-Agent', this.product.userAgent)
+    // 用量归属头族：后台「使用端」列按这组头归因，缺任一个都会显示为 `-`。
+    // 注意 X-Product 是**归属名**（产品名），不是部署类型 —— 历史实现发成
+    // `SaaS` 导致后台归因不到产品。
+    headers.set('X-Agent-Purpose', 'conversation')
+    headers.set('X-IDE-Name', this.product.attributionName)
+    headers.set('X-IDE-Type', this.product.attributionName)
+    headers.set('X-IDE-Version', this.product.clientVersion)
+    headers.set(HTTP_HEADER_PRODUCT, this.product.attributionName)
+    // User-Agent 按模型族分档：不同模型线归属不同客户端形态，后台据此分列。
+    // 必须用 set 覆盖（attributionHeaders() 注入的框架 UA 键为小写，
+    // 但 Headers 键大小写不敏感，set 能正常覆盖）。
+    headers.set('User-Agent', resolveUserAgent(this.product, options.model))
     try {
       return await this.fetchImpl(`${this.product.endpoint}/v2/chat/completions`, {
         method: 'POST',
