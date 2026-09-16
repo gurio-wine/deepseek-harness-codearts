@@ -582,6 +582,14 @@ describe('model.list / model.setDisabled 端点', () => {
         }
         return undefined
       },
+      // `connection` 由生产代码用**惰性注入**（`ctx.inject`）挂载，而非插件级
+      // 静态 `inject`：它只存在于 Web bundle，静态声明会让 headless/CLI profile
+      // 永久 pending 而启动失败。替身必须复刻这一机制，否则 registerJetHubRpc
+      // 会以 `ctx.inject is not a function` 直接抛错。
+      //
+      // 语义对齐真实 cordis：回调以**同一 ctx** 立即调用（本替身里 connection
+      // 始终可用），使端点注册行为与 Web profile 下完全一致。
+      inject: (_deps: string[], callback: (ctx: unknown) => void) => { callback(ctx) },
       logger: { warn: () => {}, info: () => {} },
     }
 
@@ -788,10 +796,13 @@ describe('积分端点的 provider 能力边界', () => {
   /** 注册端点，返回一个「调用端点方法并解包 result」的函数。 */
   function registerCreditsEndpoints() {
     let handler: Handler | undefined
-    const ctx = {
+    const ctx: Record<string, unknown> = {
       get: (key: string) => key === 'connection'
         ? { fetch: { register: (config: { fetch: Handler }) => { handler = config.fetch } } }
         : undefined,
+      // 生产代码用惰性注入挂载 connection 端点（见 registerJetHubRpc 的说明）：
+      // 替身必须提供 inject，否则会以 `ctx.inject is not a function` 抛错。
+      inject: (_deps: string[], callback: (ctx: unknown) => void) => { callback(ctx) },
       logger: { warn: () => {}, info: () => {} },
     }
     // pool 替身：一旦 provider 校验被绕过，listAccounts 会返回空数组，

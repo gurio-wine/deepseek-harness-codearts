@@ -301,9 +301,25 @@ function llmServiceOf(ctx: Context): { listModels(provider: string): Promise<Arr
 
 /**
  * 注册 Jet Hub 管理 API 端点。
- * 使用 ctx.connection.fetch.register() 注册 HTTP POST 端点。
+ *
+ * `connection` 服务只存在于 Web bundle；这里用**惰性注入**而非插件级静态
+ * `inject`，因此在 headless / CLI profile 下本模块正常加载、只是不注册端点，
+ * 而不是把整个插件树卡在 pending（那会让 profile 启动直接失败）。
  */
 export function registerJetHubRpc(
+  ctx: Context,
+  pool: AccountPool,
+  codearts: CodeArtsAuth,
+  buddy: BuddyAuth,
+  workbuddy: BuddyAuth,
+): void {
+  ctx.inject(['connection'], (connectionCtx) => {
+    registerJetHubEndpoints(connectionCtx as Context, pool, codearts, buddy, workbuddy)
+  })
+}
+
+/** 注册 Jet Hub 管理 API 端点。使用 ctx.connection.fetch.register() 注册 HTTP POST 端点。 */
+function registerJetHubEndpoints(
   ctx: Context,
   pool: AccountPool,
   codearts: CodeArtsAuth,

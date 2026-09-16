@@ -12,7 +12,14 @@ import { CODEBUDDY, WORKBUDDY } from './product.js'
 import type { CodeArtsCredential, BuddyCredential } from './types.js'
 
 export const name = 'codearts-auth'
-export const inject = ['credentials', 'commands', 'llm', 'connection']
+// `connection` 刻意不列入静态 inject：它只由 Web bundle（dsh-client-connection）
+// 提供，headless/CLI profile 里并不存在。静态 inject 会让本插件在那些 profile
+// 里永久 pending，进而让整个 profile 以
+// "plugin tree failed to load: 1 entry did not activate" 启动失败
+// —— chicheng-cron 的 skill/agent 任务正是通过 `dsh --profile headless` 运行的，
+// 会因此全部 exit 1。Jet Hub 的 RPC 端点在 Web 下通过 apply 内的可选注入挂载，
+// 其余 profile 只是不注册该端点。
+export const inject = ['credentials', 'commands', 'llm']
 
 /**
  * Provider 配置 namespace 的 schema。

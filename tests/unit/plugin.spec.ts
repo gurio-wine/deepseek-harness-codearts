@@ -2,6 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { apply } from '../../src/index.js'
+import * as pluginEntry from '../../src/index.js'
 import { runLoginFlow, runOAuthFlow } from '../../src/login.js'
 import { runBuddyLoginFlow } from '../../src/buddy-oauth.js'
 import { CodeArtsAuth } from '../../src/service.js'
@@ -308,5 +309,31 @@ describe('WorkBuddy provider 注册', () => {
     await ctx.fiber.dispose()
     expect(buddyStop).toHaveBeenCalled()
     expect(workbuddyStop).toHaveBeenCalled()
+  })
+
+  /**
+   * `connection` **不得**出现在插件级静态 `inject` 里。
+   *
+   * 该服务只由 Web bundle（dsh-client-connection）提供，headless / CLI profile
+   * 中并不存在。静态 `inject` 会让本插件在那些 profile 里永久 pending，整个
+   * profile 因此以
+   * `plugin tree failed to load: 1 entry did not activate` 启动失败
+   * —— chicheng-cron 的 skill/agent 任务正是跑在 `dsh --profile headless` 下，
+   * 会全部 exit 1。
+   *
+   * 正确做法是 `registerJetHubRpc` 内部用惰性注入（`ctx.inject(['connection'], …)`）
+   * 挂载端点：Web 下正常注册，其余 profile 只是不注册 Jet Hub 端点。
+   *
+   * 这条断言锁住的是「**能不能加载**」而非某个功能细节，所以即便日后有人为了
+   * 让 UI 更"直接"而把 connection 加回静态 inject，也必须先看到这里失败。
+   */
+  it('静态 inject 不得包含 connection（否则 headless profile 启动失败）', () => {
+    const { inject } = pluginEntry as { inject?: readonly string[] }
+    expect(Array.isArray(inject)).toBe(true)
+    expect(inject).not.toContain('connection')
+    // 必需服务仍须声明，避免修 connection 时顺手把别的服务误删。
+    for (const required of ['credentials', 'commands', 'llm']) {
+      expect(inject, required).toContain(required)
+    }
   })
 })
