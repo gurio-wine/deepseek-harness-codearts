@@ -14,7 +14,12 @@
  *
  * 判定：
  *   - A 返回 200 且有正文 → 该账号**并未真的受限**，徽章记录已过期/失效；
- *   - A 返回 429/6004 且含「频率限制」→ **确实受限**，徽章记录准确。
+ *   - A 返回 429/6004 且被 {@link isRateLimited} 判为限流 → **确实受限**，徽章记录准确。
+ *
+ * ⚠️ 限流判定**必须复用生产代码的 `isRateLimited`**，不要在这里另写一份正则：
+ * 早期本探针内联了 `/频率限制|使用量已超出|rate.?limit/i`（只认中文），于是国际版
+ * WorkBuddy 的英文 6004 会被误判为「非限流失败」，把排查引向错误方向。判定逻辑只有
+ * 一份真相源，才不会两边各自漂移。
  *
  * 双重闸门（缺一不可，防止误跑消耗积分）：
  *   DSH_BUDDY_RATELIMIT_E2E=1             启用本探针
@@ -27,6 +32,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { BuddyAdapter } from '../../src/buddy-adapter.js'
+import { isRateLimited } from '../../src/llm-adapter.js'
 import type { BuddyCredential } from '../../src/buddy.js'
 
 const E2E = process.env.DSH_BUDDY_RATELIMIT_E2E === '1'
@@ -255,8 +261,9 @@ suite('限流账号真实性探针', () => {
     }
 
     // ── 结论 ──
+    // 复用生产判定（中英文 + 业务码三重判据），避免与适配器行为分叉。
     const reallyLimited = direct.status === 429
-      || (direct.status >= 400 && /频率限制|使用量已超出|rate.?limit/i.test(direct.body))
+      || (direct.status >= 400 && isRateLimited(direct.body))
     console.log('\n===== 结论 =====')
     if (reallyLimited) {
       console.log(`  真限流：服务端对 ${TARGET_MODEL} 返回 ${direct.status}。`)

@@ -878,6 +878,21 @@ describe('BuddyAdapter 账号池限流切换', () => {
   }
 
   /**
+   * 国际版（WorkBuddy）英文 6004 响应体 —— 用户报障原文。
+   *
+   * 与 {@link rateLimitBody} 的唯一差别是语言（以及句式）。两者都必须能
+   * 触发账号切换：服务端对同一业务码返回哪种语言，取决于请求落在哪个区域。
+   */
+  function intlRateLimitBody(): string {
+    return JSON.stringify({
+      code: 6004,
+      msg: "usage exceeds frequency limit, but don't worry, your usage will reset at "
+        + '2099-12-31 23:59:59 UTC+8, alternatively, you can switch to the other models to continue using it.',
+      requestId: 'ffb5bd97-2036-48a0-baba-a56c6ab13c9c',
+    })
+  }
+
+  /**
    * 记录 updateModelRateLimit / getAvailableAccount 调用的轻量 AccountPool 替身。
    * @param current - 会话开始时就已启用的当前账号（token 与 resolveCredential 一致）
    * @param candidates - 切换时按顺序返回的候选账号
@@ -996,6 +1011,91 @@ describe('BuddyAdapter 账号池限流切换', () => {
     // 不应被吞成 QUOTA_EXCEEDED —— 这是模型/请求错误，需要如实上报
     expect((error as LlmError).code).not.toBe('QUOTA_EXCEEDED')
     expect((error as LlmError).message).toContain('model not found')
+  })
+
+  /**
+   * 国际版（WorkBuddy）英文 6004 必须同样触发账号切换。
+   *
+   * 历史缺陷（用户报障）：限流判定与重置时间解析都只认中文文案，而国际版
+   * 返回的是英文 `usage exceeds frequency limit ... reset at <时间> UTC+8`。
+   * 于是 `isRateLimited` 恒为 false，适配器**只试了当前账号就抛原始 JSON**
+   * （用户看到的正是 `buddy: {"code":6004,...}`），既没切换账号，也没记录
+   * 限流标记。国内版返回中文，故该缺陷只在国际版复现。
+   *
+   * 本用例锁死「英文 6004 → 逐个尝试其余账号 → 成功账号产出内容」的完整链路。
+   */
+  it('国际版英文 6004 同样触发账号切换，并记录限流标记', async () => {
+    const pool = makePool(
+      { id: 'acct-1', token: 'AT1' },
+      [
+        { id: 'acct-2', token: 'AT2' },
+        { id: 'acct-3', token: 'AT3' },
+      ],
+    )
+    const sentTokens: string[] = []
+    const adapter = new BuddyAdapter({
+      credentialRef: credentialRef('WORKBUDDY_ACCESS_TOKEN'),
+      resolveCredential: async () => makeCredential({ access_token: 'AT1' }),
+      refresh: async () => {},
+      accountPool: pool as never,
+      product: WORKBUDDY,
+      fetchImpl: async (_url, init) => {
+        const auth = (init?.headers as Headers | undefined)?.get('Authorization') ?? ''
+        const token = auth.replace('Bearer ', '')
+        sentTokens.push(token)
+        // AT1 与 AT2 都被英文 6004 拒绝，AT3 成功
+        if (token === 'AT3') {
+          return sseResponse('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+        }
+        return new Response(intlRateLimitBody(), { status: 400 })
+      },
+    })
+
+    const chunks = await collectChunks(adapter, {
+      model: DEFAULT_MODEL,
+      messages: [{ role: 'user', content: 'hi' }] as never,
+      signal: new AbortController().signal,
+    } as never)
+
+    // 关键断言 1：确实换了账号（旧实现只会发 AT1 一次）
+    expect(sentTokens).toEqual(['AT1', 'AT2', 'AT3'])
+    // 关键断言 2：最终拿到内容，而不是把 6004 抛给用户
+    expect(chunks.some((c) => c.type === 'text-delta' && c.text === 'ok')).toBe(true)
+    // 关键断言 3：失败账号都被记录限流（UI 才能显示标记），且用的是真实重置时间
+    expect(pool.recorded.map((r) => r.accountId)).toEqual(['acct-1', 'acct-2'])
+    expect(pool.recorded.every((r) => r.modelId === DEFAULT_MODEL)).toBe(true)
+    // 英文报文里的重置时间是 2099 年（远未来），不能是 fallback 的「1 小时后」
+    expect(pool.recorded.every((r) => r.resetAtMs > Date.parse('2090-01-01'))).toBe(true)
+  })
+
+  it('国际版英文 6004 全部账号受限时报 QUOTA_EXCEEDED（而非原始 400）', async () => {
+    const pool = makePool({ id: 'acct-1', token: 'AT1' }, [{ id: 'acct-2', token: 'AT2' }])
+    const sentTokens: string[] = []
+    const adapter = new BuddyAdapter({
+      credentialRef: credentialRef('WORKBUDDY_ACCESS_TOKEN'),
+      resolveCredential: async () => makeCredential({ access_token: 'AT1' }),
+      refresh: async () => {},
+      accountPool: pool as never,
+      product: WORKBUDDY,
+      fetchImpl: async (_url, init) => {
+        const auth = (init?.headers as Headers | undefined)?.get('Authorization') ?? ''
+        sentTokens.push(auth.replace('Bearer ', ''))
+        return new Response(intlRateLimitBody(), { status: 400 })
+      },
+    })
+
+    const error = await collectChunks(adapter, {
+      model: DEFAULT_MODEL,
+      messages: [{ role: 'user', content: 'hi' }] as never,
+      signal: new AbortController().signal,
+    } as never).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(LlmError)
+    // 关键：错误码必须是不可重试的 QUOTA_EXCEEDED。
+    // 旧实现因 HTTP 400 退化成 INVALID_REQUEST，且两个账号都被试过（证明切换生效）
+    expect((error as LlmError).code).toBe('QUOTA_EXCEEDED')
+    expect(sentTokens).toEqual(['AT1', 'AT2'])
+    expect(pool.recorded.map((r) => r.accountId)).toEqual(['acct-1', 'acct-2'])
   })
 })
 

@@ -1431,10 +1431,66 @@ export function registerCodeArtsLlm(ctx: Context, options: CodeArtsAdapterOption
   ctx.llm.registerAdapter([PROVIDER], new CodeArtsAdapter(options))
 }
 
+/**
+ * CodeBuddy 系（buddy / workbuddy）表示「用量超出频率限制」的业务码。
+ *
+ * 判据优先用结构化业务码而非文案：**它与语言无关**，且不受服务端改文案影响。
+ * 国际版与国内版用的是同一个码（实测均为 6004），只有 msg 文案分中英文。
+ */
+const RATE_LIMIT_BUSINESS_CODE = 6004
+
+/**
+ * 限流文案的**自然语言兜底**判据。
+ *
+ * 为什么需要兜底：并非所有限流错误都带得上结构化 code —— SSE 流内错误、
+ * 网关返回的裸文本、以及 CodeArts（华为云）的中文错误都只有文案可判。
+ *
+ * ⚠️ **中英文都必须列全**。历史缺陷（用户报障，仅国际版暴露）：此处早期只有
+ * 中文词（频率限制 / 使用量已超出 / 频率超出 / 重置），而国际版 WorkBuddy
+ * （www.workbuddy.ai）返回的是英文
+ * `usage exceeds frequency limit ... your usage will reset at <时间> UTC+8`。
+ * 结果 `isRateLimited` 恒为 false → 适配器**跳过整个账号切换分支**，直接抛出
+ * 原始 6004 JSON；错误码也因 HTTP 400 退化成 INVALID_REQUEST 而非
+ * QUOTA_EXCEEDED。国内版返回中文文案，所以该缺陷只在国际版复现。
+ *
+ * `too many requests` 是标准 OpenAI 429 措辞，一并纳入。
+ */
+const RATE_LIMIT_PATTERN =
+  /频率限制|频率超出|使用量已超出|重置|rate.?limit|frequency limit|usage exceeds|too many requests/i
+
+/**
+ * 结构化判定：响应体是可解析 JSON 且 `code` 为该业务码。
+ *
+ * 不采用「全文包含 6004」的写法：`requestId` 是 UUID，任意数字子串都可能
+ * 偶然出现，文本匹配会产生假阳性；这里只认 JSON 顶层的 `code` 字段。
+ * 兼容 `"6004"`（字符串）与 `6004`（数字）两种编码。
+ */
+function hasRateLimitBusinessCode(body: string): boolean {
+  try {
+    const data = JSON.parse(body) as Record<string, unknown>
+    const code = data.code
+    return code === RATE_LIMIT_BUSINESS_CODE || code === String(RATE_LIMIT_BUSINESS_CODE)
+  } catch {
+    // 非 JSON：交给文案兜底
+    return false
+  }
+}
+
 /** 判断错误文本是否为频率限制错误 */
 export function isRateLimited(body: string): boolean {
-  return /频率限制|rate.?limit|使用量已超出|频率超出|重置/i.test(body)
+  return hasRateLimitBusinessCode(body) || RATE_LIMIT_PATTERN.test(body)
 }
+
+/**
+ * 重置时间的两种句式（中文 / 英文），并**捕获实际时区**而非硬编码 UTC+8。
+ *
+ * 中文（buddy 国内版）："您的使用量已超出频率限制，将在 2026-09-11 18:08:17 UTC+8 重置"
+ * 英文（workbuddy 国际版）："... your usage will reset at 2026-09-17 09:09:36 UTC+8, alternatively, ..."
+ *
+ * 早期只列了中文句式，导致国际版即使判定为限流也只能走「1 小时后重试」的
+ * 兜底，丢掉服务端给出的真实重置时刻（UI 限流徽章因此显示错误时间）。
+ */
+const RESET_TIME_PATTERN = /(?:将在|reset at)\s+([\d-]+\s+[\d:]+)\s+(UTC[+-]\d+(?::\d+)?)/i
 
 /** 从限流错误中提取重置时间 */
 export function parseRateLimitError(
@@ -1444,16 +1500,15 @@ export function parseRateLimitError(
   try {
     const data = JSON.parse(body) as Record<string, unknown>
     const msg = typeof data.msg === 'string' ? data.msg : ''
-    // buddy格式: "您的使用量已超出频率限制，将在 2026-09-11 18:08:17 UTC+8 重置"
-    const resetMatch = /将在\s+([\d-]+\s+[\d:]+)\s+UTC[+-]\d+/.exec(msg)
+    const resetMatch = RESET_TIME_PATTERN.exec(msg)
     if (resetMatch) {
-      const resetTimeStr = resetMatch[1] + ' UTC+8'
-      const resetMs = Date.parse(resetTimeStr)
+      // 用捕获到的真实时区拼接（不再写死 UTC+8），Date.parse 能正确解析该写法。
+      const resetMs = Date.parse(`${resetMatch[1]} ${resetMatch[2]}`)
       if (!Number.isNaN(resetMs)) {
         return { modelId: currentModel, resetTimeMs: resetMs }
       }
     }
-    // 标准 OpenAI 429 格式
+    // 标准 OpenAI 429 格式，或带业务码但文案无法解析出时间
     if (isRateLimited(body)) {
       // fallback: 1小时后重试
       return { modelId: currentModel, resetTimeMs: Date.now() + 3_600_000 }
