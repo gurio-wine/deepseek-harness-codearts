@@ -622,14 +622,16 @@ describe('TraeCnAdapter 请求构造', () => {
   it('请求头用 Cloud-IDE-JWT + 两个同值 token 头，且**不带**腾讯系归属头', async () => {
     const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
     await collect(adapter, generateOptions())
-    const headers = calls[0]!.init?.headers as Headers
-    expect(headers.get('Authorization')).toBe('Cloud-IDE-JWT AT-1')
-    expect(headers.get('X-Ide-Token')).toBe('AT-1')
-    expect(headers.get('X-Cloudide-Token')).toBe('AT-1')
-    expect(headers.get('Accept')).toBe('text/event-stream')
+    const headers = calls[0]!.init?.headers as Record<string, string>
+    // 普通对象（非 Headers 实例）：与 credits 模块一致，避免 Headers 构造器
+    // 丢弃/规范化部分请求头导致两处形态不一致。
+    expect(headers['Authorization']).toBe('Cloud-IDE-JWT AT-1')
+    expect(headers['X-Ide-Token']).toBe('AT-1')
+    expect(headers['X-Cloudide-Token']).toBe('AT-1')
+    expect(headers['Accept']).toBe('text/event-stream')
     // 归属头：Trae CN 一个都不发。
     for (const name of ['X-Domain', 'X-Product-Code', 'X-Product', 'X-LobsterAI-Client-Version']) {
-      expect(headers.get(name)).toBeNull()
+      expect(headers[name]).toBeUndefined()
     }
   })
 

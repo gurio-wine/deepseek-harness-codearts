@@ -687,7 +687,9 @@ export class TraeCnAdapter extends LlmAdapter {
     options: GenerateOptions,
   ): Promise<Response> {
     // `Accept: text/event-stream` 由 traeCnAccessHeaders 的 accept 参数给出。
-    const headers = new Headers(traeCnAccessHeaders(credential, 'text/event-stream'))
+    // 注意：这里不用 `new Headers(...)` —— Headers 构造器会丢弃/规范化部分头，
+    // 普通对象逐字传递（与 credits 模块一致），避免两处请求头形态不一致。
+    const headers = traeCnAccessHeaders(credential, 'text/event-stream')
     try {
       return await this.fetchImpl(`${this.product.apiBase}${TRAE_CN_CHAT_PATH}`, {
         method: 'POST',
