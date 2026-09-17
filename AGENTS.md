@@ -19,9 +19,9 @@
 
 `lobsterai` 与上述两者**完全不同源**：登录方式、请求头、续期载荷、签到流程、版本号来源都不一样，因此实现是独立一套 `src/lobsterai*.ts`。它只**共用架构模式**（产品配置驱动、账号池、限流切换、模型黑名单），**不共用 `BuddyProduct` 类型** —— 那里面 `apiDomain` / `productCode` / `attributionName` / `userAgentByModelFamily` / `appendSessionParams` 等字段对 LobsterAI 全部无意义。详见 README 的「LobsterAI provider」章节与 `docs/lobsterai-integration-plan.md`。
 
-`trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。它比 `lobsterai` 还要再少一步：**回调 query 直接携带 refreshToken**，没有 authCode 交换；续期走 `POST …/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**产品配置 + 认证 + 模型路由（`src/trae-cn-adapter.ts`）+ 签到与积分余额（`src/trae-cn-credits.ts`）均已实现**。三个关键事实决定了它的适配器与其它 provider 结构不同：**SSE 是具名事件流**（`event:output`，不是 OpenAI 的 `data:{choices}`）、**业务失败发生在 HTTP 200 的 `event:error` 帧里**（故换号循环必须接住流内失败，错误分类按业务码而非状态码，见 `src/trae-cn-errors.ts`）、**签到必须带设备四件套**（见「积分领取」）。回调 URL 形态（T5）、chat 端点路径（T6）与签到/余额的若干字段名（T7 / T8）**尚未真机实测**，实现采「候选表 + 常量」策略，详见 README 的「Trae CN provider」章节。
+`trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。**登录协议已用真机校准（2026-09-17）**：本地回调 + **PKCE(S256)**，回调投递 `authCodeInfo`（双重编码 JSON）→ `POST /trae/api/v3/oauth/ExchangeToken`（body 五字段 `{ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}`）；续期走**另一个**端点 `POST /cloudide/api/v3/trae/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**登录 URL 的 `client_id` 是 snake_case**（写成 `clientID` 会让授权页停在「认证中」，是曾经的报障根因），且必须带 `auth_type=local` / `login_channel=native_ide` / `login_version=1` 与 PKCE 参数。**产品配置 + 认证 + 模型路由（`src/trae-cn-adapter.ts`）+ 签到与积分余额（`src/trae-cn-credits.ts`）均已实现**。三个关键事实决定了它的适配器与其它 provider 结构不同：**SSE 是具名事件流**（`event:output`，不是 OpenAI 的 `data:{choices}`）、**业务失败发生在 HTTP 200 的 `event:error` 帧里**（故换号循环必须接住流内失败，错误分类按业务码而非状态码，见 `src/trae-cn-errors.ts`）、**签到必须带设备四件套**（见「积分领取」）。回调 URL 形态（T5）**已校准**；chat 端点路径（T6）与签到/余额的若干字段名（T7 / T8）**尚未真机实测**，实现采「候选表 + 常量」策略；**签到设备号来源（T9）待校准**（凭据里存的是 exchange 返回的 `BoundDeviceID`，而真机签到成功时用的是 16 位十进制设备号，形态不同），详见 README 的「Trae CN provider」章节。
 
-Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**由 CodeBuddy、LobsterAI 与 Trae CN 三个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。Trae CN 的签到与余额**前后端及宿主接线均已就绪**（`src/trae-cn-credits.ts` + 客户端能力矩阵 + `jet-hub-rpc.ts` 三处分支与 `traeCn` 实例传参）。回调 URL 形态（T5）等少量协议细节待真机校准，见「积分能力必须在请求前判定」与 README 的「Trae CN provider」章节。
+Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**由 CodeBuddy、LobsterAI 与 Trae CN 三个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。Trae CN 的签到与余额**前后端及宿主接线均已就绪**（`src/trae-cn-credits.ts` + 客户端能力矩阵 + `jet-hub-rpc.ts` 三处分支与 `traeCn` 实例传参）。登录协议（T5）已真机校准，仅签到设备号来源（T9）等少量细节待校准，见「积分能力必须在请求前判定」与 README 的「Trae CN provider」章节。
 
 - **包名**：`dsh-account-hub`
 - **入口**：`lib/index.js`（宿主侧）、`lib/client/jet-hub.js`（客户端 bundle）
@@ -176,7 +176,7 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 
 - 状态 `POST /trae/api/v2/ug/checkin_credits/status` → 未领则 `POST /trae/api/v2/ug/checkin_credits/claim`，两者 body 均为 `{"req_source":1}`
 - **幂等判据用 `checked_in`（账号级当日）**；`did_checked_in` 是**设备级**语义（换设备仍 false），**不要用**
-- **claim 必须带设备头**：`x-device-id`（**取自凭据**的 Aha 设备号，16 位十进制）+ `x-device-type: windows` + `x-os-version` + `x-app-version: 3.3.100`；缺了回 `code:9004`
+- **claim 必须带设备头**：`x-device-id`（**取自凭据**的 `device_id`，即登录 exchange 返回的 `BoundDeviceID`）+ `x-device-type: windows` + `x-os-version` + `x-app-version: 3.3.100`；缺了回 `code:9004`。⚠️ **T9 待校准**：真机第一轮签到成功时用的是 16 位十进制设备号，与 `BoundDeviceID`（14 位字母数字）形态不同，「签到认哪个号」尚无定论；拿到 9004 时按凭据里的值与宿主日志校准，**不要**拿 `machine_id` 折算一个假的 16 位号顶上
 - `Origin` / `Referer` = `https://www.trae.cn`（编译期常量 `product.portalBase`，不从凭据推断）
 - 无 auth 时是 **HTTP 200 + `code:1001` + `enable:false`**（不是 401）—— 判定**以 body `code` 为准**；`1001` 统一译为「凭据已失效，请重新登录」
 

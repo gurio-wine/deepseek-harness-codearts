@@ -12,6 +12,9 @@
  * 1. **续期端点是 `ExchangeToken`**（不是 `/refresh`）：body 四字段
  *    `{ClientID, ClientSecret, RefreshToken, UserID}`，且 `UserID` **必填** ——
  *    它来自凭据的五件套，故续期前必须先解析出 `user_id`，缺失时只能让用户重新登录。
+ *    注意这与**登录**的 authCode 交换**不是同一个端点**：续期在
+ *    `cloudide/api/v3/trae/oauth/ExchangeToken`，登录在
+ *    `trae/api/v3/oauth/ExchangeToken`（见 `src/trae-cn-oauth.ts` 模块头）。
  * 2. **access token 用法是 `Authorization: Cloud-IDE-JWT`**（不是 `Bearer`），
  *    另带 `X-Ide-Token` / `X-Cloudide-Token` 两个同值头。
  */
@@ -289,9 +292,15 @@ export class TraeCnAuth extends Service {
   /**
    * 用**已有的 refreshToken** 完成登录（供 e2e 探针与「粘贴凭据」场景使用）。
    *
-   * 与 {@link login} 的区别：不起回调服务器，直接走 `ExchangeToken`。
-   * 保留这个入口是为了让 e2e 探针能在不打开浏览器的情况下验证 exchange ——
-   * T5 校准回调形态时尤其需要它（先把 refreshToken 拿到手，再单独验续期）。
+   * 与 {@link login} 的区别：不起回调服务器，直接走**续期端点**
+   * （`cloudide/api/v3/trae/oauth/ExchangeToken`）。保留这个入口是为了让 e2e
+   * 探针能在不打开浏览器的情况下验证续期链路。
+   *
+   * ⚠️ 它**不是**登录协议的主路径：真机登录走的是 PKCE → `authCodeInfo` →
+   * `trae/api/v3/oauth/ExchangeToken`（见 `src/trae-cn-oauth.ts` 模块头）。
+   * 这里拿不到 exchange 响应的 `BoundDeviceID`，故凭据的 `device_id` 只能取
+   * 续期响应里自带的设备字段（通常为空）；签到时若报 9004，正是因为
+   * 这条路径造出的凭据缺设备绑定 —— 应改用浏览器登录。
    */
   async loginWithRefreshToken(
     refreshToken: string,
@@ -304,8 +313,8 @@ export class TraeCnAuth extends Service {
       this.product,
       this.fetchImpl,
     )
-    // 用与回调路径**同一个**构造函数组装凭据：五件套的默认值（设备号来源标记、
-    // machine_id 兜底形态）在两处必须一致，各写一份会逐渐分叉。
+    // 用与回调路径**同一个**构造函数组装凭据：五件套的默认值（设备号来源标记等）
+    // 在两处必须一致，各写一份会逐渐分叉。
     const credential = applyTraeCnRefresh(
       buildTraeCnCredential({
         accessToken: payload.accessToken,
@@ -313,7 +322,7 @@ export class TraeCnAuth extends Service {
         userId: options.userId ?? '',
         clientId: this.product.clientId,
         deviceId: payload.deviceId,
-        deviceIdSource: 'aha',
+        deviceIdSource: 'exchange-bound-device-id',
         machineId: options.machineId ?? '',
       }),
       payload,

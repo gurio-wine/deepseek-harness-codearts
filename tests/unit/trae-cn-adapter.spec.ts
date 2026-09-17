@@ -60,7 +60,7 @@ function makeCredential(overrides: Partial<TraeCnCredential> = {}): TraeCnCreden
     client_id: 'ono9krqynydwx5',
     device_id: '1234567890123456',
     machine_id: 'a'.repeat(32),
-    device_id_source: 'aha',
+    device_id_source: 'exchange-bound-device-id',
     // 用**不透明**的过期值：`isTraeCnExpired` 只在能解析出过期时间时才判定过期，
     // 这里给一个远期时间戳，避免测试里被动触发续期分支。
     expires_at: String(Date.now() + 7_200_000),

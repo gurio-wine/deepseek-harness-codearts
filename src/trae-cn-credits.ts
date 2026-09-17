@@ -294,10 +294,11 @@ function describeFailureCode(code: number, message: string): string {
   if (code === TRAE_CN_CODE_CREDENTIAL_INVALID) return '凭据已失效，请重新登录'
   if (code === TRAE_CN_CODE_DEVICE_REJECTED) {
     // 本模块总是带设备四件套 ⇒ 9004 只可能是「服务端不认可我们构造的设备身份」，
-    // 而不是「忘了带设备头」。文案因此指向真正要校准的那两个值。
+    // 而不是「忘了带设备头」。文案因此指向真正要校准的那个值。
     return `设备校验未通过（code ${TRAE_CN_CODE_DEVICE_REJECTED}）：`
-      + 'x-device-id 取自凭据的 Aha 设备号，'
-      + `x-os-version / x-app-version 为实测常量（${TRAE_CN_OS_VERSION} / ${TRAE_CN_APP_VERSION}），需按真机校准`
+      + 'x-device-id 取自凭据的 device_id（登录 exchange 返回的 BoundDeviceID，T9 待校准：'
+      + '真机签到成功时用的是 16 位十进制设备号，与本字段形态不同），'
+      + `x-os-version / x-app-version 为实测常量（${TRAE_CN_OS_VERSION} / ${TRAE_CN_APP_VERSION}）`
   }
   return message
 }

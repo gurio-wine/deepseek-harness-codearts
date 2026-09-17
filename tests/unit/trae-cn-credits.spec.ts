@@ -21,7 +21,14 @@ import {
 import { TRAE_CN } from '../../src/trae-cn-product.js'
 import type { TraeCnCredential } from '../../src/trae-cn-oauth.js'
 
-/** 16 位十进制 Aha 设备号（签到 `x-device-id` 的来源）。 */
+/**
+ * 设备号（签到 `x-device-id` 的来源）。
+ *
+ * ⚠️ **T9 待校准**：真机登录返回的 `BoundDeviceID` 是 14 位字母数字
+ * （如 `wl2k1e2endpp32`），与这里用的 16 位十进制形态不同 ——
+ * 「签到认哪个号」尚无定论。本用例只断言「凭据里的值被原样发出去」，
+ * 不假设服务端接受哪种形态。
+ */
 const DEVICE_ID = '7212345678901234'
 
 function makeCredential(overrides: Partial<TraeCnCredential> = {}): TraeCnCredential {
@@ -32,7 +39,7 @@ function makeCredential(overrides: Partial<TraeCnCredential> = {}): TraeCnCreden
     client_id: 'ono9krqynydwx5',
     device_id: DEVICE_ID,
     machine_id: 'a'.repeat(32),
-    device_id_source: 'aha',
+    device_id_source: 'exchange-bound-device-id',
     nickname: '测试',
     ...overrides,
   }

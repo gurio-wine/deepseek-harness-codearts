@@ -1,48 +1,76 @@
 /**
  * Trae CN（字节跳动 Trae 国内版）登录与凭据。
  *
- * ## 与另外两条协议线的差异
+ * ## 协议（**已用真机证据架构级重写**，2026-09-17）
  *
  * | 项 | LobsterAI | 腾讯系 | **Trae CN** |
  * |---|---|---|---|
- * | 登录 | 本地回调收 `code` → exchange | external-link 轮询 | **本地回调直接收 refreshToken** |
- * | 换 token | `authCode` → access+refresh | 轮询结果自带 | **无 authCode 交换**（登录页自己完成 GetRefreshToken） |
- * | 续期 | `POST /api/auth/refresh` | `X-Refresh-Token` 头 | **`POST …/oauth/ExchangeToken`（body 四字段）** |
+ * | 登录 | 本地回调收 `code` → exchange | external-link 轮询 | **本地回调 + PKCE(S256)**，回调投递 `authCodeInfo` |
+ * | 换 token | `authCode` → access+refresh | 轮询结果自带 | **`POST /trae/api/v3/oauth/ExchangeToken`**（body 五字段） |
+ * | 续期 | `POST /api/auth/refresh` | `X-Refresh-Token` 头 | **`POST /cloudide/api/v3/trae/oauth/ExchangeToken`**（body 四字段） |
  * | 鉴权头 | `Bearer` | `Bearer` + 归属头 | **`Cloud-IDE-JWT`**（另带两个等值 token 头） |
  *
- * 登录回调**直接携带 refreshToken**是最容易搞错的一点：没有 `authCode`，
- * 也就没有「用 code 换 token」那一步。回调收到 refreshToken 后要**立即**
- * 走 `ExchangeToken` 拿 access token（对齐 `traework2api/login.sh`：
- * 它解析回调 URL query 里的 refreshToken 后直接 ExchangeToken）。
+ * ### 旧假设为何被整体推翻
+ *
+ * 本模块曾按「回调 query 直接携带 refreshToken、无 authCode 交换」实现。真机
+ * 2026-09-17 的成功登录日志（`%APPDATA%\Trae CN\logs\20260917T045023\main.log`）
+ * 与官方 `main.js` 源码（`loginUrlBuilder.buildLoginUrl` / `gDe` /
+ * `exchangeTokenByAuthCode`）共同证明：真机走的是
+ * **PKCE → `authCodeInfo.AuthCode` → `trae/api/v3/oauth/ExchangeToken`**。
+ *
+ * 「直取 refreshToken」并非凭空：它是**同一授权页在另一组参数下的分支**
+ * （URL 不带 `code_challenge` 时，页面靠浏览器里的 trae.cn Cookie 会话自己调
+ * `GetRefreshToken`，再把 refreshToken 投回回调）。两条分支并存，本实现
+ * **以 PKCE 为主路径**（与桌面客户端同款、不依赖「浏览器里已登录 trae.cn」这个
+ * 额外前置），并**保留 refreshToken 分支**作为兼容与诊断。
+ *
+ * 回退到 refreshToken 分支时，凭据缺少 exchange 响应里的 `BoundDeviceID`，
+ * 故 `device_id` 只能留空 —— 这是**如实留空**，不是伪造一个看起来合法的设备号。
+ *
+ * ### 三个曾经写错的点（各自都能单独导致登录静默失败）
+ *
+ * 1. `client_id`（**snake_case**）而非 `clientID` —— 授权页只读前者，读不到
+ *    就停在「认证中」，既不报错也不回调；
+ * 2. 缺 `auth_type=local` / `login_channel=native_ide` / `login_version=1`
+ *    等流程标记 —— 授权页认不出本地回调模式；
+ * 3. 缺 PKCE 参数（`code_challenge` / `code_challenge_method=S256`）——
+ *    授权页就不会走 AuthCode 分支。
  *
  * ## 模块边界
  *
- * 本模块只做**登录 + 凭据 + 续期请求**，不含：LLM 适配器、签到、积分余额
- * —— 那三块是后续任务。故这里不定义 chat / models / credits 端点常量。
+ * 本模块只做**登录 + 凭据 + 续期请求**，不含：LLM 适配器、签到、积分余额。
  *
- * ## ⚠️ 待实测校准点（T5）
+ * ## 待校准点（T9）
  *
- * 调研报告明确指出**回调 URL 的确切形态未经实测**。本实现采取
- * 「**主路径 + 日志脱敏**」策略，而不是猜一个参数名就闭眼过：
- *
- * 1. **主路径**：回调 query 携带 refreshToken（`traework2api/login.sh` 的行为）。
- *    参数名按候选表依次尝试（{@link TRAE_CN_REFRESH_TOKEN_PARAMS}），
- *    顺序表本身就是「哪个最可能是真的」的记录；
- * 2. **日志**：每条回调都会经 {@link redactTraeCnCallbackUrl} 输出一份
- *    **保留全部参数名、敏感值脱敏**的 URL，由调用方（`TraeCnAuth`）写进
- *    `ctx.logger`。真实登录一次即可按日志把候选表收敛成唯一形态；
- * 3. **不猜的部分**：拿不到的字段一律走**显式回退**并在凭据里留下来源标记
- *    （如 `device_id_source`），而不是静默填一个看起来正常的假值。
+ * 签到请求的 `x-device-id` 该用哪个号仍未定论：真机**第一轮实测成功**用的是
+ * 16 位十进制的设备号，而 exchange 返回的 `BoundDeviceID` 形态完全不同
+ * （`wl2k1e2endpp32`）。本模块按证据把 `BoundDeviceID` 存进凭据的 `device_id`，
+ * 签到侧若拿到 `9004` 再按日志校准。见 {@link TraeCnCredential.device_id}。
  */
 
 import { createServer, type Server } from 'node:http'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { hostname } from 'node:os'
 import { jwtExpiresAtMs } from './buddy.js'
 import {
+  TRAE_CN_APP_TYPE,
+  TRAE_CN_AUTH_EXCHANGE_PATH,
   TRAE_CN_AUTHORIZATION_PATH,
   TRAE_CN_CALLBACK_PATH,
+  TRAE_CN_CHANNEL_NAME,
+  TRAE_CN_DEVICE_TYPE_PC,
   TRAE_CN_EXCHANGE_TOKEN_PATH,
+  TRAE_CN_IDE_VERSION,
+  TRAE_CN_LOGIN_AUTH_FROM,
+  TRAE_CN_LOGIN_AUTH_TYPE,
+  TRAE_CN_LOGIN_CHANNEL,
+  TRAE_CN_LOGIN_OS_INFO,
+  TRAE_CN_LOGIN_OS_VERSION,
+  TRAE_CN_LOGIN_REDIRECT,
   TRAE_CN_LOGIN_TIMEOUT_MS,
+  TRAE_CN_LOGIN_VERSION,
+  TRAE_CN_PLATFORM_CODE,
+  TRAE_CN_PLUGIN_VERSION,
   TRAE_CN_REQUEST_TIMEOUT_MS,
   type TraeCnDeviceIdSource,
   type TraeCnProduct,
@@ -51,104 +79,102 @@ import {
 /** 在浏览器中打开登录 URL；永不抛出。 */
 export type OpenBrowser = (url: string) => void | Promise<void>
 
-// ── 回调参数候选表（T5 校准点，见模块头注释） ──
+// ── 回调参数名（**真机逐字确认**，不再是候选表） ──
 
 /**
- * 回调 query 中承载 **refreshToken** 的参数名候选，按可能性排序。
+ * 回调 query 中承载 **authCode 信封**（`authCodeInfo`）的参数名。
  *
- * **主路径是第一个**（`refreshToken`，对齐 `traework2api/login.sh` 解析的
- * query 字段与 Trae 接口自身的大小写风格）。其余是同义写法的兜底：
- * 一旦真实回调用了别的名字，候选表能让登录**当场成功**，而日志会记录
- * 实际参数名，供随后把这里收敛成唯一项。
+ * 真机 main.log:139 逐字：`authCodeInfo` 的值是一个 **JSON 字符串**，形如
+ * `{"AuthCode":"…","ExpireAt":1789592492958,"ExpireDuration":600000}`——
+ * 即**双重编码**（URL query 里再套一层 JSON）。这是 PKCE 分支的载荷。
  */
-export const TRAE_CN_REFRESH_TOKEN_PARAMS: readonly string[] = [
-  'refreshToken',
-  'refresh_token',
-  'RefreshToken',
-]
-
-/** 回调 query 中承载 **userId** 的参数名候选（`ExchangeToken` 的必填字段）。 */
-export const TRAE_CN_USER_ID_PARAMS: readonly string[] = [
-  'userId',
-  'user_id',
-  'UserID',
-  'uid',
-]
-
+export const TRAE_CN_AUTH_CODE_INFO_PARAM = 'authCodeInfo'
 /**
- * 回调 query 中承载 **deviceId**（Aha 设备号）的参数名候选。
+ * 回调 query 中承载 **用户信息**（`userInfo`）的参数名。
  *
- * 拿不到时回退 `machine_id` 的十进制形态（见
- * {@link machineIdToDecimalDeviceId}），并在凭据的 `device_id_source`
- * 里标为 `machine-id-fallback` —— 属于**显式降级**，不是静默伪造。
+ * 真机 main.log:139 逐字：同样是 JSON 字符串，含 `UserID` / `ScreenName` /
+ * `Region` / `TenantID` 等 15 个键。`UserID` 是后续 `GetUserInfo` 与
+ * 账号展示的来源（真机 `1435281906741923`）。
  */
-export const TRAE_CN_DEVICE_ID_PARAMS: readonly string[] = [
-  'deviceId',
-  'device_id',
-  'deviceID',
-  'ahaDeviceId',
-]
-
+export const TRAE_CN_USER_INFO_PARAM = 'userInfo'
 /**
- * 回调 query 中**直接携带 access token** 的参数名候选。
+ * 兼容分支：回调 query 中直接承载 **refreshToken** 的参数名。
  *
- * 次要路径：若某天真机回调直接给了 access token（而非只给 refreshToken），
- * 就不必再走 ExchangeToken。当前无实测证据支持它存在，故仅作兜底。
- *
- * ⚠️ **这一路径比其它三张表更危险**：参数名叫 `token` 的完全可能是个 CSRF
- * 令牌，把它当 access token 会**静默存下一份坏凭据**（登录「成功」、之后
- * 每次请求都 401）。故识别时额外要求它**必须是 JWT 形态**（三段点分）——
- * 见 {@link looksLikeTraeCnJwt}。形态不符时不算命中，照常走主路径
- * （refreshToken → ExchangeToken），而那才是已实测的路径。
+ * 这是**不带 PKCE 时授权页的另一条分支**的产物（页面自己调 `GetRefreshToken`）。
+ * 本实现以 PKCE 为主路径，故它只在「授权页没走 PKCE」时命中；命中时凭据缺
+ * `BoundDeviceID`，`device_id` 留空并在 `device_id_source` 标记 `refreshToken-only`。
  */
-export const TRAE_CN_ACCESS_TOKEN_PARAMS: readonly string[] = [
-  'accessToken',
-  'access_token',
-  'token',
-]
-
+export const TRAE_CN_REFRESH_TOKEN_PARAM = 'refreshToken'
 /**
- * 判定一个字符串是否具备 JWT 形态（三段点分、payload 可 base64url 解出 JSON）。
+ * 回调 query 中承载 **登录追踪号** 的参数名。
  *
- * 只用于「这个候选值像不像 access token」的**准入判断**，不做签名校验
- * —— access token 的真伪由服务端裁决。它的作用是排除 `token=<CSRF 串>`
- * 这类同名误命中。
+ * 真机 main.log:139 的 `loginTraceID` 与登录 URL 的 `login_trace_id` 同值
+ * （`5bc786d0-…`）—— 这正是「本次回调属于本次登录」的服务端凭证，
+ * 也是我们做防 CSRF 校验的锚点（见 {@link completeTraeCnCallback}）。
  */
-export function looksLikeTraeCnJwt(value: string): boolean {
-  const parts = value.split('.')
-  if (parts.length !== 3) return false
-  try {
-    const payload: unknown = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8'))
-    return typeof payload === 'object' && payload !== null
-  } catch {
-    return false
-  }
-}
+export const TRAE_CN_LOGIN_TRACE_ID_PARAM = 'loginTraceID'
+/**
+ * 回调 query 中承载 **来源作用域** 的参数名（真机值 `trae`）。
+ *
+ * 不参与判定，但**登记在脱敏白名单**里：它是判断「回调来自哪个产品形态」
+ * 的现成证据，且非机密。
+ */
+export const TRAE_CN_SCOPE_PARAM = 'scope'
 
-/** 生成一枚 32 位十六进制随机串（16 字节）。 */
-export function generateTraeCnHex32(): string {
-  return randomBytes(16).toString('hex')
+// ── PKCE ──
+
+/** 一次 PKCE 生成的产物。 */
+export interface TraeCnPkce {
+  /** `code_verifier`：48 字节随机数的 base64url（64 字符）。 */
+  codeVerifier: string
+  /** `code_challenge`：`sha256(codeVerifier)` 的 base64url（43 字符）。 */
+  codeChallenge: string
+  /** 挑战方法，恒为 `S256`。 */
+  codeChallengeMethod: string
 }
 
 /**
- * 把 hex32 的 `machineId` 折算成**十进制设备号**（Aha 设备号形态的兜底）。
+ * 生成 PKCE 参数（对齐官方 `main.js` 的 `gDe()`，@1426128）。
  *
- * Aha 设备号是 **16 位十进制数字**；`machineId` 是 128 位十六进制。
- * 这里取机器号的十进制表示并保留**低 16 位**，使其位数与 Aha 号一致 ——
- * 位数一致是「让签到接口的 `x-device-id` 至少形态合法」的最低要求。
+ * 官方实现逐字：
+ * `randomBytes(48).toString("base64url")` → verifier；
+ * `createHash("sha256").update(verifier).digest("base64url")` → challenge。
  *
- * ⚠️ **TODO（T5 校准）**：这只是**兜底**。`deviceId` 的真实来源是登录回调 /
- * `GetRefreshToken` 响应里的 Aha 设备号；本函数产出的值与真实 Aha 号
- * **不保证被服务端接受**。凡走到这条路径的凭据，`device_id_source` 都会被
- * 标成 `machine-id-fallback`，让它在数据里可见（UI 与日志可据此提示重新登录）。
- * 真机验证后应确认：签到接口是否强校验该值、以及回调里能否稳定拿到 Aha 号。
+ * ⚠️ 方法名是 **`S256`**，不是 CodeArts 那套 `SHA-256`：授权页按字面量比较，
+ * 写成 `SHA-256` 会让它判定为「不支持的挑战方法」而不走 AuthCode 分支。
  */
-export function machineIdToDecimalDeviceId(machineIdHex: string): string {
-  const cleaned = machineIdHex.trim().toLowerCase()
-  // 非十六进制（含空串）时退化为全零，而不是抛错：调用方在登录流程里，
-  // 不该因为一个设备号形态问题让整个登录失败。
-  const decimal = /^[0-9a-f]+$/.test(cleaned) ? BigInt(`0x${cleaned}`).toString(10) : '0'
+export function generateTraeCnPkce(): TraeCnPkce {
+  const codeVerifier = randomBytes(48).toString('base64url')
+  const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
+  return { codeVerifier, codeChallenge, codeChallengeMethod: 'S256' }
+}
+
+// ── 设备标识生成（**形态即风控**） ──
+
+/** 生成 64 位小写十六进制 `machine_id`（32 字节）。 */
+export function generateTraeCnMachineId(): string {
+  return randomBytes(32).toString('hex')
+}
+
+/**
+ * 生成 16 位纯十进制 `device_id`。
+ *
+ * 真机值形如 `2996599860772203`（16 位十进制）。**不能用 hex32 或 UUID**：
+ * 开源移植版的注释明确记录「设备号形态不符会触发 9074 风控」。
+ * 故这里取 8 字节随机数、十进制化、截取/补齐到 16 位。
+ */
+export function generateTraeCnDeviceId(): string {
+  // 8 字节 → 最大约 1.8e19（20 位十进制），取其**低 16 位十进制**。
+  // 「十进制串的末 16 位」等价于数值 mod 10^16，即每个 16 位串等概率，
+  // 不会像「先取 6 字节」那样让首位恒为 0 附近的值过度出现。
+  const decimal = BigInt(`0x${randomBytes(8).toString('hex')}`).toString(10)
+  // 长度不足 16 是纯防御（8 字节几乎必然 ≥19 位），保留以免将来改字节数时静默变短。
   return decimal.slice(-16).padStart(16, '0')
+}
+
+/** 生成登录追踪号（UUID v4 形态，真机逐字样本同形）。 */
+export function generateTraeCnLoginTraceId(): string {
+  return randomUUID()
 }
 
 // ── 凭据数据结构 ──
@@ -174,31 +200,48 @@ export interface TraeCnCredential {
    * {@link traeCnAccessHeaders}）。
    */
   access_token: string
-  /** 刷新令牌（五件套之一；`ExchangeToken` 请求体的 `RefreshToken`）。 */
+  /** 刷新令牌（五件套之一；续期端点的 `RefreshToken`）。 */
   refresh_token: string
-  /** 用户 ID（五件套之一；`ExchangeToken` 请求体的 `UserID`）。 */
+  /** 用户 ID（五件套之一；续期端点的 `UserID`）。来源：回调 `userInfo.UserID`。 */
   user_id: string
   /** OAuth 客户端 ID（五件套之一；与产品配置的 `clientId` 同值，随凭据快照留档）。 */
   client_id: string
   /**
    * 设备号（五件套之一）。
    *
-   * 理论上应是 **Aha 设备号**（16 位十进制）——签到的 `x-device-id` 用它，
-   * **不是**登录 URL 里那个随机 `device_id`。来源见 {@link device_id_source}。
+   * ## 来源（**已用真机校准**，2026-09-17）
+   *
+   * 取自登录 exchange 响应的 `Result.BoundDeviceID`（真机 `wl2k1e2endpp32`，
+   * 14 位小写字母+数字）—— 服务端**新发**的绑定标识，配套
+   * `Result.DeviceBindStatus: "BOUND"`；它**不是**客户端上报的 `DeviceID`
+   * （16 位十进制）或 `MachineID`（64 hex）的回显。
+   *
+   * ## ⚠️ T9 待校准：签到该用哪个号
+   *
+   * 签到端点的 `x-device-id` 读的就是本字段（`src/trae-cn-credits.ts`）。
+   * 而真机**第一轮签到实测成功**时用的是 16 位十进制的设备号，与
+   * `BoundDeviceID` 形态不同 —— 即「签到认哪个号」尚无定论。
+   * 若签到返回 `code:9004`（设备校验失败），按本字段与日志校准；
+   * 届时的候选是「exchange 响应里的其它设备字段」或「客户端设备注册服务
+   * 的 16 位号」，**不是** `MachineID`（形态不符，且它是遥测机器号）。
+   *
+   * 走到兼容分支（回调给 refreshToken、无 exchange 响应）时本字段为**空串** ——
+   * 如实留空，绝不拿 `machine_id` 折算一个假的 16 位号顶上。
    */
   device_id: string
-  /** 机器号（五件套之一，32 位十六进制）；登录 URL 的 `machine_id` 用之。 */
+  /** 机器号（五件套之一，64 位小写十六进制）；登录 URL 的 `machine_id` 用之。 */
   machine_id: string
   /** `device_id` 的来源标记（诊断用）。 */
   device_id_source: TraeCnDeviceIdSource
   /**
    * 过期时间（**毫秒时间戳字符串**）。
    *
-   * Trae 的 access token 是 JWT，`exp` 才是权威过期时刻，故这里的值
-   * 始终由 {@link jwtExpiresAtMs} 从 token 派生（解析不出时为空串）。
+   * 两级来源，取值口径一致：
+   * 1. exchange 响应的 `Result.TokenExpireAt`（**权威**，真机为 13 位 epoch ms）；
+   * 2. 缺失时由 {@link jwtExpiresAtMs} 从 access token 的 JWT `exp` 派生。
    */
   expires_at?: string
-  /** 昵称（UI 展示；登录回调/JWT 提供时才写）。 */
+  /** 昵称（UI 展示；回调 `userInfo.ScreenName` 或 JWT 提供时才写）。 */
   nickname?: string
 }
 
@@ -211,7 +254,7 @@ export function isTraeCnRefreshable(credential: TraeCnCredential): boolean {
  * 从凭据解析过期的毫秒时间戳。
  *
  * 优先用存储的 `expires_at`，缺失时**回退解析 access token 的 JWT `exp`** ——
- * Trae 的 access token 是 JWT，`exp` 是权威来源，故两级解析口径一致。
+ * 两个口径都是「服务端说了算」：前者来自 `TokenExpireAt`，后者是 token 自述。
  */
 export function traeCnCredentialExpiresAtMs(credential: TraeCnCredential): number | undefined {
   const raw = credential.expires_at
@@ -236,7 +279,8 @@ export function isTraeCnExpired(credential: TraeCnCredential): boolean {
  * 解析存储值里的凭据 JSON；解析失败或结构不合法返回 undefined。
  *
  * 判据只有一条：`access_token` 必须是字符串（账号池反查身份标识要用它）。
- * 其余字段允许缺失 —— 老凭据、或 T5 校准前的降级凭据都不该因此判为损坏。
+ * 其余字段允许缺失 —— 老凭据、或兼容分支（refreshToken-only）的凭据都不该因此
+ * 判为损坏。
  */
 export function parseTraeCnCredential(value: string): TraeCnCredential | undefined {
   try {
@@ -280,10 +324,10 @@ export function traeCnAccessHeaders(
 }
 
 /**
- * 构造 `ExchangeToken` 的无鉴权请求头。
+ * 构造两个 `ExchangeToken` 端点的无鉴权请求头。
  *
- * 续期时**还没有**新的 access token，服务端只认请求体里的 `RefreshToken`
- * 与 `UserID`，故不发 `Authorization`。
+ * 登录的 authCode 交换与续期都**还没有**可用的 access token：服务端只认请求体
+ * （`AuthCode`+`CodeVerifier`，或 `RefreshToken`+`UserID`），故不发 `Authorization`。
  *
  * ⚠️ 调研未给出该端点的 `User-Agent` 约定，故**刻意不发明一个值**。
  * 若真机验证发现网关按 UA 拦截，再补一个实测值并在此注明来源。
@@ -292,21 +336,7 @@ export function traeCnAnonymousHeaders(): Record<string, string> {
   return { Accept: 'application/json', 'Content-Type': 'application/json' }
 }
 
-// ── ExchangeToken（续期 / 登录后换取 access token） ──
-
-/** `ExchangeToken` 响应解析出的载荷。 */
-export interface TraeCnTokenPayload {
-  /** 新的 access token（JWT）。 */
-  accessToken: string
-  /** 新的 refresh token；响应未返回时为空串（沿用旧的）。 */
-  refreshToken: string
-  /** 响应里带的用户 ID（没有则为空串）。 */
-  userId: string
-  /** 响应里带的设备号（没有则为空串）。 */
-  deviceId: string
-  /** 昵称（没有则为空串）。 */
-  nickname: string
-}
+// ── 通用 JSON 读取工具 ──
 
 /** 从若干候选键里取第一个非空字符串值。 */
 function readFirstString(source: Record<string, unknown>, keys: readonly string[]): string {
@@ -355,14 +385,37 @@ function readEnvelopeError(body: Record<string, unknown>): string | undefined {
   return undefined
 }
 
+/** 诊断用：响应里出现过的顶层键名（不涉值，可安全入日志）。 */
+function describeTopLevelKeys(body: unknown): string {
+  if (typeof body !== 'object' || body === null) return typeof body
+  return Object.keys(body as Record<string, unknown>).join(',') || '(空对象)'
+}
+
+// ── 续期：RefreshToken → access token（`cloudide/api/…`，与登录交换不同端点） ──
+
+/** 续期端点响应解析出的载荷。 */
+export interface TraeCnTokenPayload {
+  /** 新的 access token（JWT）。 */
+  accessToken: string
+  /** 新的 refresh token；响应未返回时为空串（沿用旧的）。 */
+  refreshToken: string
+  /** 响应里带的用户 ID（没有则为空串）。 */
+  userId: string
+  /** 响应里带的设备号（没有则为空串）。 */
+  deviceId: string
+  /** 昵称（没有则为空串）。 */
+  nickname: string
+}
+
 /**
- * 解析 `ExchangeToken` 响应。
+ * 解析续期响应。
  *
  * 候选键**大小写/命名两种风格都收**（`Token` / `AccessToken` / `access_token`…）：
- * 调研只确认了「响应含新 access token（JWT）」，未固定字段名。
- * 与其猜一个，不如按候选表取，并让 {@link exchangeTraeCnToken} 在
- * **全都没命中**时抛出带上原始键名的错误 —— 那样一次真机调用就能把
- * 候选表收敛，而不是留下一个「续期永远失败但原因不明」的哑谜。
+ * 续期端点的响应 schema 未经真机逐字确认（登录端点的已确认，见
+ * {@link parseTraeCnAuthExchangeResult}）。与其猜一个，不如按候选表取，
+ * 并让 {@link exchangeTraeCnToken} 在**全都没命中**时抛出带上原始键名的错误
+ * —— 那样一次真机调用就能把候选表收敛，而不是留下一个「续期永远失败但原因不明」
+ * 的哑谜。
  */
 export function parseTraeCnTokenPayload(body: unknown): TraeCnTokenPayload | undefined {
   if (typeof body !== 'object' || body === null) return undefined
@@ -390,18 +443,16 @@ export function parseTraeCnTokenPayload(body: unknown): TraeCnTokenPayload | und
   return undefined
 }
 
-/** 诊断用：响应里出现过的顶层键名（不涉值，可安全入日志）。 */
-function describeTopLevelKeys(body: unknown): string {
-  if (typeof body !== 'object' || body === null) return typeof body
-  return Object.keys(body as Record<string, unknown>).join(',') || '(空对象)'
-}
-
 /**
- * 用 `RefreshToken` 换新的 access token（**续期**，也是登录后取 access 的路径）。
+ * 用 `RefreshToken` 换新的 access token（**续期**）。
  *
  * 请求体四字段（实测形态）：
  * `{ClientID, ClientSecret, RefreshToken, UserID}`。
  * `ClientSecret` 实测为占位串 `"-"`，服务端不校验（见产品配置）。
+ *
+ * ⚠️ 端点 `cloudide/api/v3/trae/oauth/ExchangeToken`，**不是**登录用的
+ * `trae/api/v3/oauth/ExchangeToken`（见 {@link exchangeTraeCnAuthCode}）。
+ * 两者在服务端并存，混用必 404。
  *
  * @throws 网络失败、HTTP 非 2xx、业务码非 0、或响应中找不到 access token 时。
  */
@@ -460,8 +511,7 @@ export async function exchangeTraeCnToken(
     if (envelopeError !== undefined) {
       throw new Error(`Trae CN ExchangeToken 失败：${envelopeError}`)
     }
-    // 没有 access token：把**实际键名**带进错误里。候选表猜错时，
-    // 这一条日志就足以定位（见 parseTraeCnTokenPayload 的说明）。
+    // 没有 access token：把**实际键名**带进错误里，一次真机调用即可定位。
     throw new Error(
       `Trae CN ExchangeToken 响应中找不到 access token（顶层键：${describeTopLevelKeys(parsed)}）`,
     )
@@ -477,7 +527,7 @@ export async function exchangeTraeCnToken(
  * 响应给了新值时才覆盖 —— 覆盖成空串会让下一次续期直接失败。
  *
  * `user_id` 是唯一例外：响应若给了（或 JWT 里有），**回填**它 ——
- * 登录时拿不到 user_id 的降级凭据会因此在首次续期后自愈。
+ * 兼容分支拿不到 `userInfo` 时，凭据会因此在首次续期后自愈。
  */
 export function applyTraeCnRefresh(
   previous: TraeCnCredential,
@@ -501,70 +551,472 @@ export function applyTraeCnRefresh(
   }
 }
 
-// ── 登录 URL 与回调脱敏 ──
+// ── 登录交换：AuthCode + PKCE → access token（`trae/api/v3/oauth/…`） ──
+
+/** authCode 交换端点响应解析出的载荷（**真机 schema**）。 */
+export interface TraeCnAuthExchangeResult {
+  /** access token（JWT）；响应 `Result.Token`。 */
+  accessToken: string
+  /** refresh token；响应 `Result.RefreshToken`。 */
+  refreshToken: string
+  /**
+   * 服务端绑定的设备号；响应 `Result.BoundDeviceID`。
+   *
+   * 真机 `wl2k1e2endpp32`，配套 `DeviceBindStatus: "BOUND"`。
+   * 这是凭据 `device_id` 的真实来源（见 {@link TraeCnCredential.device_id}）。
+   */
+  boundDeviceId: string
+  /** access token 过期时刻（epoch ms）；响应 `Result.TokenExpireAt`，缺失为 undefined。 */
+  tokenExpireAt?: number
+  /** 绑定状态（诊断用）；响应 `Result.DeviceBindStatus`。 */
+  deviceBindStatus: string
+}
 
 /**
- * 构造登录 URL。
+ * `DeviceInfo` —— authCode 交换请求体的设备块（**真机 12 字段，逐字**）。
  *
- * 形态（实测）：
- * `{portalBase}/authorization?clientID=…&auth_callback_url=…&machine_id=…&device_id=…`
+ * 真机 main.log:140 的 `DeviceInfo` 完整可解析（客户端日志的脱敏器只按 key 名
+ * 过滤 `token`/`userjwt` 等，本对象无这些键），故这 12 个字段名与取值来源
+ * 都不是推测。
  *
- * `machine_id` / `device_id` 是**每次登录随机生成的 hex32**；服务端不校验
- * 它们与签到设备号（Aha 号）的一致性 —— 后者的来源是凭据里的
- * `device_id`，与这两个参数无关。这一点极易混淆，故在此显式记录。
+ * ## 与本插件能力的差距（**如实降级，不发明**）
  *
- * ⚠️ 用 `URL` + `searchParams` 而非手工拼字符串：`auth_callback_url` 含
- * `://` 与 `:` 必须被百分号编码，手工拼极易漏编码导致登录页校验失败。
+ * 真机值来自客户端进程内服务，本插件无法等价获取，故采「客户端形态伪装」常量：
+ *
+ * | 字段 | 真机来源 | 本实现 |
+ * |---|---|---|
+ * | `DeviceID` | 设备注册服务（16 位十进制） | 登录 URL 用的**同一个**随机 16 位号 |
+ * | `MachineID` | 遥测服务（64 hex） | 登录 URL 用的**同一个** 64 hex |
+ * | `DeviceName` | `net.exe user %USERNAME%` 的 Full Name | 主机名（`os.hostname()`，非空） |
+ * | `DeviceBrand` / `DeviceCPU` / `DeviceModel` | 系统信息 | **空串**（不猜硬件型号） |
+ * | `OSInfo` / `OSVersion` | 系统信息 | 常量（`windows` / `Windows 10 Home`） |
+ * | `DevicePublicKey` | EC P-256 SPKI PEM（`vDe()` 生成） | **空串**（见下） |
+ *
+ * `DevicePublicKey` 留空是**刻意的**：官方用它配合私钥签名做 `DeviceProof`
+ * （`wDe()`），而**登录的 authCode 路径根本不发 `DeviceProof`** —— 真机请求体
+ * 逐字确认只有 `{ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}`。
+ * 即该字段在这条路径上是**未被使用的注册材料**；伪造一个 PEM 只会引入一个
+ * 无法解释的值。若真机发现服务端强校验它，再接 `generateKeyPairSync`。
+ */
+export interface TraeCnDeviceInfo {
+  DeviceID: string
+  MachineID: string
+  PlatformCode: string
+  DeviceType: string
+  DeviceName: string
+  DeviceModel: string
+  ClientVersion: string
+  DevicePublicKey: string
+  DeviceBrand: string
+  DeviceCPU: string
+  OSInfo: string
+  OSVersion: string
+}
+
+/**
+ * 组装 `DeviceInfo`（字段顺序与真机逐字一致，便于与日志逐行对照）。
+ *
+ * @param deviceId - 16 位十进制设备号（**与登录 URL 的 `device_id` 同值**）。
+ * @param machineId - 64 位 hex 机器号（**与登录 URL 的 `machine_id` 同值**）。
+ * @param deviceName - 设备名；缺省取主机名（见 {@link buildTraeCnDeviceInfo}）。
+ */
+export function buildTraeCnDeviceInfo(
+  deviceId: string,
+  machineId: string,
+  deviceName?: string,
+): TraeCnDeviceInfo {
+  return {
+    DeviceID: deviceId,
+    MachineID: machineId,
+    PlatformCode: TRAE_CN_PLATFORM_CODE,
+    DeviceType: TRAE_CN_DEVICE_TYPE_PC,
+    // 真机值取自 `net.exe user` 的 Full Name；本插件取**主机名** —— 同样是
+    // 「这台机器叫什么」的如实答案，且不依赖执行外部命令。
+    // **必须给具体值**：留空会让请求体出现一个官方实现从不发送的空串字段。
+    DeviceName: deviceName ?? hostname(),
+    DeviceModel: '',
+    ClientVersion: TRAE_CN_IDE_VERSION,
+    DevicePublicKey: '',
+    DeviceBrand: '',
+    DeviceCPU: '',
+    OSInfo: TRAE_CN_LOGIN_OS_INFO,
+    OSVersion: TRAE_CN_LOGIN_OS_VERSION,
+  }
+}
+
+/**
+ * 解析 authCode 交换响应（**真机 Result 信封**）。
+ *
+ * 真机响应（main.log:141）逐字：
+ * `{"ResponseMetadata":{…},"Result":{"BoundDeviceID":"wl2k1e2endpp32",
+ * "ClientID":"ono9krqynydwx5","DeviceBindStatus":"BOUND",
+ * "RefreshExpireAt":1805143893459,"RefreshToken":"…","Token":"…",
+ * "TokenExpireAt":1790801493459,"TokenExpireDuration":1209600000,"UserJwt":"…"}}`
+ *
+ * 判定口径与续期同：先看信封错误码，再看 `Result`。
+ */
+export function parseTraeCnAuthExchangeResult(body: unknown): TraeCnAuthExchangeResult | undefined {
+  if (typeof body !== 'object' || body === null) return undefined
+  const root = body as Record<string, unknown>
+  if (readEnvelopeError(root) !== undefined) return undefined
+  const result = typeof root.Result === 'object' && root.Result !== null && !Array.isArray(root.Result)
+    ? root.Result as Record<string, unknown>
+    : root
+  const accessToken = readFirstString(result, ['Token', 'token', 'AccessToken', 'access_token'])
+  if (accessToken.length === 0) return undefined
+  const expireRaw = result.TokenExpireAt ?? result.tokenExpireAt
+  const tokenExpireAt = typeof expireRaw === 'number' && Number.isFinite(expireRaw)
+    ? expireRaw
+    : (typeof expireRaw === 'string' && /^\d+$/.test(expireRaw) ? Number(expireRaw) : undefined)
+  return {
+    accessToken,
+    refreshToken: readFirstString(result, ['RefreshToken', 'refresh_token', 'refreshToken']),
+    boundDeviceId: readFirstString(result, ['BoundDeviceID', 'BoundDeviceId', 'boundDeviceId']),
+    ...tokenExpireAt === undefined ? {} : { tokenExpireAt },
+    deviceBindStatus: readFirstString(result, ['DeviceBindStatus', 'deviceBindStatus']),
+  } satisfies TraeCnAuthExchangeResult
+}
+
+/** {@link exchangeTraeCnAuthCode} 的参数。 */
+export interface TraeCnAuthCodeExchangeArgs {
+  /** 回调 `authCodeInfo.AuthCode`。 */
+  authCode: string
+  /** 本次登录生成的 PKCE verifier（**必须与登录 URL 的 challenge 配对**）。 */
+  codeVerifier: string
+  /** 与登录 URL 同值的 16 位十进制设备号。 */
+  deviceId: string
+  /** 与登录 URL 同值的 64 hex 机器号。 */
+  machineId: string
+  /** 设备名（真机是 `net.exe user` 的 Full Name；缺省取主机名）。 */
+  deviceName?: string
+}
+
+/**
+ * 用 **AuthCode + PKCE verifier** 换 token（登录流程第二步）。
+ *
+ * 端点 `POST {apiBase}/trae/api/v3/oauth/ExchangeToken`（**与续期端点不同**，
+ * 见 {@link exchangeTraeCnToken}）；body 五字段
+ * `{ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}`，
+ * **不含** `ClientSecret` / `DeviceProof`（真机逐字确认）。
+ *
+ * @throws 网络失败、HTTP 非 2xx、业务码非 0、或响应里找不到 `Result.Token` 时。
+ */
+export async function exchangeTraeCnAuthCode(
+  args: TraeCnAuthCodeExchangeArgs,
+  product: TraeCnProduct,
+  fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<TraeCnAuthExchangeResult> {
+  if (args.authCode.length === 0) {
+    throw new Error('Trae CN 登录交换缺少 AuthCode，请重新登录')
+  }
+  if (args.codeVerifier.length === 0) {
+    throw new Error('Trae CN 登录交换缺少 CodeVerifier（PKCE），请重新登录')
+  }
+  const body = {
+    ClientID: product.clientId,
+    AuthCode: args.authCode,
+    CodeVerifier: args.codeVerifier,
+    DeviceInfo: buildTraeCnDeviceInfo(args.deviceId, args.machineId, args.deviceName ?? ''),
+    IDEVersion: TRAE_CN_IDE_VERSION,
+  }
+  const signalToUse = signal === undefined
+    ? AbortSignal.timeout(TRAE_CN_REQUEST_TIMEOUT_MS)
+    : AbortSignal.any([AbortSignal.timeout(TRAE_CN_REQUEST_TIMEOUT_MS), signal])
+
+  let response: Response
+  try {
+    response = await fetcher(`${product.apiBase}${TRAE_CN_AUTH_EXCHANGE_PATH}`, {
+      method: 'POST',
+      headers: traeCnAnonymousHeaders(),
+      body: JSON.stringify(body),
+      signal: signalToUse,
+    })
+  } catch (error) {
+    throw new Error(
+      `Trae CN 登录 ExchangeToken 网络失败：${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  let parsed: unknown
+  try {
+    parsed = await response.json()
+  } catch {
+    throw new Error(`Trae CN 登录 ExchangeToken 响应不是 JSON（HTTP ${response.status}）`)
+  }
+
+  if (!response.ok) {
+    const message = typeof parsed === 'object' && parsed !== null
+      ? readEnvelopeError(parsed as Record<string, unknown>) : undefined
+    throw new Error(
+      `Trae CN 登录 ExchangeToken 失败（HTTP ${response.status}）`
+      + `${message === undefined ? '' : `：${message}`}`,
+    )
+  }
+
+  const result = parseTraeCnAuthExchangeResult(parsed)
+  if (result === undefined) {
+    const envelopeError = typeof parsed === 'object' && parsed !== null
+      ? readEnvelopeError(parsed as Record<string, unknown>) : undefined
+    if (envelopeError !== undefined) {
+      throw new Error(`Trae CN 登录 ExchangeToken 失败：${envelopeError}`)
+    }
+    throw new Error(
+      'Trae CN 登录 ExchangeToken 响应中找不到 Result.Token'
+      + `（顶层键：${describeTopLevelKeys(parsed)}）`,
+    )
+  }
+  return result
+}
+
+// ── 登录 URL ──
+
+/**
+ * 构造登录 URL（**真机参数表逐项对齐** main.log:136）。
+ *
+ * ## 参数表（顺序与真机一致，便于逐字段比对日志）
+ *
+ * | 参数 | 值来源 |
+ * |---|---|
+ * | `login_version` | 常量 `1` |
+ * | `auth_from` | 常量 `trae` |
+ * | `login_channel` | 常量 `native_ide` |
+ * | `plugin_version` | 常量 `2.3.83560` |
+ * | `auth_type` | 常量 `local` |
+ * | `client_id` | **snake_case**（写错即「认证中」卡死，见产品配置） |
+ * | `redirect` | 常量 `0` |
+ * | `login_trace_id` | 本次登录随机 UUID（**回调校验的锚点**） |
+ * | `auth_callback_url` | `http://127.0.0.1:{port}/authorize` |
+ * | `machine_id` | 本次登录随机 64 hex |
+ * | `device_id` | 本次登录随机 16 位十进制 |
+ * | `x_device_id` / `x_machine_id` | 同 `device_id` / `machine_id` |
+ * | `x_device_brand` | 空（真机为空；官方取 `deviceModel`，本插件不猜硬件） |
+ * | `x_device_type` | `windows`（真机取 `osName`） |
+ * | `x_os_version` | `Windows 10 Home`（真机取 `osVersion`） |
+ * | `x_env` | 空（真机为空） |
+ * | `x_app_version` | `3.3.100` |
+ * | `x_app_type` | `stable` |
+ * | `code_challenge` | PKCE challenge（43 字符 base64url） |
+ * | `code_challenge_method` | **`S256`**（不是 `SHA-256`） |
+ * | `channel_name` | `common` |
+ *
+ * ⚠️ 用 `URLSearchParams` 而非手工拼串：`auth_callback_url` 含 `://` 与 `:`
+ * 必须被百分号编码，手工拼极易漏编码导致登录页校验失败。
+ * 参数**顺序**与真机一致只是为了让日志能逐行对照，不承担协议语义。
  */
 export function buildTraeCnLoginUrl(
   port: number,
   product: TraeCnProduct,
   machineId: string,
   deviceId: string,
+  loginTraceId: string,
+  pkce: Pick<TraeCnPkce, 'codeChallenge' | 'codeChallengeMethod'>,
 ): string {
   const query = new URLSearchParams({
-    clientID: product.clientId,
+    login_version: TRAE_CN_LOGIN_VERSION,
+    auth_from: TRAE_CN_LOGIN_AUTH_FROM,
+    login_channel: TRAE_CN_LOGIN_CHANNEL,
+    plugin_version: TRAE_CN_PLUGIN_VERSION,
+    auth_type: TRAE_CN_LOGIN_AUTH_TYPE,
+    client_id: product.clientId,
+    redirect: TRAE_CN_LOGIN_REDIRECT,
+    login_trace_id: loginTraceId,
     auth_callback_url: `http://127.0.0.1:${port}${TRAE_CN_CALLBACK_PATH}`,
     machine_id: machineId,
     device_id: deviceId,
+    x_device_id: deviceId,
+    x_machine_id: machineId,
+    x_device_brand: '',
+    x_device_type: TRAE_CN_LOGIN_OS_INFO,
+    x_os_version: TRAE_CN_LOGIN_OS_VERSION,
+    x_env: '',
+    x_app_version: TRAE_CN_IDE_VERSION,
+    x_app_type: TRAE_CN_APP_TYPE,
+    code_challenge: pkce.codeChallenge,
+    code_challenge_method: pkce.codeChallengeMethod,
+    channel_name: TRAE_CN_CHANNEL_NAME,
   })
   return `${product.portalBase}${TRAE_CN_AUTHORIZATION_PATH}?${query.toString()}`
 }
 
+// ── 回调解析 ──
+
+/**
+ * 解析后的回调载荷（两个分支的并集）。
+ *
+ * `mode` 表达**本次回调走了哪条分支**，这对诊断是不可省的：两条分支的凭据
+ * 完整度不同（`authCode` 分支能拿到 `BoundDeviceID`，`refreshToken` 分支不能）。
+ */
+export type TraeCnCallbackPayload =
+  | {
+    mode: 'auth-code'
+    /** `authCodeInfo.AuthCode`。 */
+    authCode: string
+    /** `authCodeInfo.ExpireAt`（epoch ms），缺失为 undefined。 */
+    authCodeExpireAt?: number
+    /** `userInfo.UserID`（可能为空串 —— 解析失败不阻断登录，见下）。 */
+    userId: string
+    /** `userInfo.ScreenName`。 */
+    nickname: string
+    /** 回调回传的 `loginTraceID`。 */
+    loginTraceId: string
+  }
+  | {
+    mode: 'refresh-token'
+    /** 回调直接给的 refreshToken。 */
+    refreshToken: string
+    /** 回调 query 里的 `userId`（该分支没有 userInfo 信封时的兜底）。 */
+    userId: string
+    /** 回调回传的 `loginTraceID`（该分支可能不带）。 */
+    loginTraceId: string
+  }
+
+/** 解析 JSON 字符串参数；失败返回 undefined（**不抛错**，由调用方决定是否致命）。 */
+function parseJsonParam<T>(raw: string | null): T | undefined {
+  if (raw === null || raw.length === 0) return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return typeof parsed === 'object' && parsed !== null ? parsed as T : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 从回调 URL 解析出载荷（**双模**，PKCE 优先）。
+ *
+ * ## 双模的依据
+ *
+ * 授权页是**双模**的，取决于登录 URL 是否带 `code_challenge`：
+ *
+ * - **带 PKCE**（本实现的主路径）→ 回调投递 `authCodeInfo`（JSON 字符串），
+ *   由客户端自己换 token；
+ * - **不带 PKCE** → 页面靠浏览器 Cookie 会话（`withCredentials` 到 api.trae.cn）
+ *   自己调 `GetRefreshToken`，回调投递 `refreshToken`。
+ *
+ * 两份调研看到的正是同一页面的两条分支，都对。本实现主发 PKCE，但**回调侧
+ * 两条都收**：真机日志一旦显示回退到了 refreshToken 分支，说明服务端没走我们
+ * 请求的那条，那是必须能看见的事实，而不是一个「参数缺失」的 500。
+ *
+ * ## 校验与取舍
+ *
+ * - `loginTraceID` 命中我们本次生成的值时**通过**；不匹配或缺失时**不拒绝**，
+ *   只在诊断里标注 —— 见 {@link completeTraeCnCallback} 的说明；
+ * - `userInfo` 解析失败**不致命**：`UserID` 缺了还能从 JWT 补，而拒掉整次
+ *   登录会让用户白跑一遍浏览器流程。仅 `authCodeInfo` 缺 `AuthCode` 才算失败。
+ */
+export function parseTraeCnCallbackUrl(url: URL): TraeCnCallbackPayload | undefined {
+  const authCodeInfo = parseJsonParam<Record<string, unknown>>(
+    url.searchParams.get(TRAE_CN_AUTH_CODE_INFO_PARAM),
+  )
+  if (authCodeInfo !== undefined) {
+    const authCode = readFirstString(authCodeInfo, ['AuthCode', 'authCode'])
+    if (authCode.length > 0) {
+      const userInfo = parseJsonParam<Record<string, unknown>>(
+        url.searchParams.get(TRAE_CN_USER_INFO_PARAM),
+      )
+      const expireRaw = authCodeInfo.ExpireAt ?? authCodeInfo.expireAt
+      const authCodeExpireAt = typeof expireRaw === 'number' && Number.isFinite(expireRaw)
+        ? expireRaw
+        : (typeof expireRaw === 'string' && /^\d+$/.test(expireRaw) ? Number(expireRaw) : undefined)
+      return {
+        mode: 'auth-code',
+        authCode,
+        ...authCodeExpireAt === undefined ? {} : { authCodeExpireAt },
+        // userInfo 缺失时退到裸 `userId` 参数：兼容分支与异常回调都可能只给后者。
+        userId: userInfo === undefined
+          ? (url.searchParams.get('userId') ?? '')
+          : readFirstString(userInfo, ['UserID', 'UserId', 'userId']),
+        nickname: userInfo === undefined ? '' : readFirstString(userInfo, ['ScreenName', 'Nickname', 'nickname']),
+        loginTraceId: url.searchParams.get(TRAE_CN_LOGIN_TRACE_ID_PARAM) ?? '',
+      }
+    }
+  }
+
+  const refreshToken = url.searchParams.get(TRAE_CN_REFRESH_TOKEN_PARAM) ?? ''
+  if (refreshToken.length > 0) {
+    return {
+      mode: 'refresh-token',
+      refreshToken,
+      userId: url.searchParams.get('userId') ?? '',
+      loginTraceId: url.searchParams.get(TRAE_CN_LOGIN_TRACE_ID_PARAM) ?? '',
+    }
+  }
+  return undefined
+}
+
+/**
+ * 从 JWT 里读出用户 ID（`user_id` / `userId` / `uid` / `sub` 依次尝试）。
+ *
+ * 来源优先级里它是**最后一级**：回调 `userInfo.UserID` 才是权威，JWT 声明只在
+ * userInfo 缺失时兜底（兼容分支与异常回调）。
+ */
+export function readTraeCnJwtUserId(token: string): string {
+  const parts = token.split('.')
+  if (parts.length < 2) return ''
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as Record<string, unknown>
+    return readFirstString(payload, ['user_id', 'userId', 'uid', 'sub', 'UserID'])
+  } catch {
+    return ''
+  }
+}
+
+/** 从 JWT 里读出昵称（没有则空串）。 */
+function readTraeCnJwtNickname(token: string): string {
+  const parts = token.split('.')
+  if (parts.length < 2) return ''
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as Record<string, unknown>
+    return readFirstString(payload, ['nickname', 'name', 'preferred_username'])
+  } catch {
+    return ''
+  }
+}
+
+// ── 回调脱敏 ──
+
 /**
  * 回调参数中**可安全原样入日志**的白名单（非机密元数据）。
  *
- * 采用**白名单（fail-closed）**而非「敏感键黑名单」：黑名单只能挡住
- * 你**想得到**的名字，而回调里出现什么参数名恰恰是未知的（这正是 T5 要校准的
- * 东西）—— 一个叫 `weird_param` 的未知参数完全可能就是凭据。
- * 白名单的默认动作是脱敏，未知参数最多泄露「名字 + 长度 + 6 字符前缀」。
+ * 采用**白名单（fail-closed）**而非「敏感键黑名单」：黑名单只能挡住你想得到的
+ * 名字，而一个叫 `weird_param` 的未知参数完全可能就是凭据。白名单的默认动作是
+ * 脱敏，未知参数最多泄露「名字 + 长度 + 6 字符前缀」。
  *
  * 白名单里的值都是**本次登录自己生成**或**非机密**的：
- * `machine_id` / `device_id` 是登录 URL 里那两个随机 hex32，
- * `auth_callback_url` / `clientID` 是登录 URL 的回显，`state` 是一次性随机串。
+ * `machine_id` / `device_id` 是登录 URL 里那两个随机号（设备形态本来就是明发的
+ * 登录参数），`loginTraceID` 是本次登录的一次性追踪号，`scope` / `host` /
+ * `userRegion` / `isRedirect` 是服务端的路由元数据。
+ *
+ * ⚠️ `userInfo` **不在**白名单里：它含 `NonPlainTextMobile`（手机号）与
+ * `AvatarUrl`（含账号标识）。只保留参数名即可满足校准需要。
  */
 const SAFE_CALLBACK_PARAMS: ReadonlySet<string> = new Set([
-  // 设备号的全部候选名：这些值是一次性的硬件/安装标识，不是凭据，
-  // 而且「拿到的是真 Aha 号还是 machine_id 兜底」正是 T5 要看清的东西。
-  ...TRAE_CN_DEVICE_ID_PARAMS,
   'machine_id',
+  'device_id',
+  'login_trace_id',
+  TRAE_CN_LOGIN_TRACE_ID_PARAM,
   'state',
   'clientID',
   'client_id',
   'auth_callback_url',
   'redirect_uri',
   'port',
+  TRAE_CN_SCOPE_PARAM,
+  'host',
+  'userRegion',
+  'isRedirect',
 ])
 
 /**
  * 把回调 URL 脱敏成可安全入日志的形态（**保留全部参数名**）。
  *
  * 脱敏规则（**默认脱敏，白名单放行**）：
- * - **参数名一律完整保留** —— 它们才是校准 T5 所需的信息；
+ * - **参数名一律完整保留** —— 它们是判断「走了哪条分支」的证据；
  * - 白名单内的非机密元数据（见 {@link SAFE_CALLBACK_PARAMS}）原样保留其值；
  * - **其余一切参数**（含未知名字）的值压成 `前6位…(len=N)`，只够确认
  *   「拿到了东西」与「长度对不对」。宁可校准信息少一点，也不把可能是
- *   refreshToken 的值写进日志。
+ *   refreshToken / authCode 的值写进日志。
  *
  * 解析失败时**不返回原串**（原串可能带 token），而是返回长度与错误说明。
  */
@@ -618,43 +1070,11 @@ export interface TraeCnLoginFlowOptions {
   /**
    * 回调诊断钩子（收到**每条**回调时调用，参数已脱敏）。
    *
-   * 存在的理由是 T5：回调参数名未经实测，真实登录一次即可按这条日志
-   * 把候选表收敛。生产侧由 `TraeCnAuth` 接到 `ctx.logger.info`。
+   * 用途有二：一是记录「本次回调走了哪条分支」（PKCE 还是 refreshToken），
+   * 二是真机出现异常流程时留下可逐字段比对服务端行为的现场。
+   * 生产侧由 `TraeCnAuth` 接到 `ctx.logger.info`。
    */
   onCallbackDebug?: (message: string) => void
-}
-
-/** 从若干候选参数名里取第一个非空 query 值。 */
-function readCallbackParam(url: URL, candidates: readonly string[]): { name: string; value: string } | undefined {
-  for (const name of candidates) {
-    const value = url.searchParams.get(name)
-    if (value !== null && value.length > 0) return { name, value }
-  }
-  return undefined
-}
-
-/** 从 JWT 里读出用户 ID（`user_id` / `userId` / `uid` / `sub` 依次尝试）。 */
-export function readTraeCnJwtUserId(token: string): string {
-  const parts = token.split('.')
-  if (parts.length < 2) return ''
-  try {
-    const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as Record<string, unknown>
-    return readFirstString(payload, ['user_id', 'userId', 'uid', 'sub', 'UserID'])
-  } catch {
-    return ''
-  }
-}
-
-/** 从 JWT 里读出昵称（没有则空串）。 */
-function readTraeCnJwtNickname(token: string): string {
-  const parts = token.split('.')
-  if (parts.length < 2) return ''
-  try {
-    const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as Record<string, unknown>
-    return readFirstString(payload, ['nickname', 'name', 'preferred_username'])
-  } catch {
-    return ''
-  }
 }
 
 /**
@@ -669,7 +1089,7 @@ function readTraeCnJwtNickname(token: string): string {
 export interface TraeCnPendingLogin {
   /** 本地回调服务器实际监听的端口。 */
   port: number
-  /** 展示给用户的 portal 登录 URL（含本次随机的 machine_id / device_id）。 */
+  /** 展示给用户的 portal 登录 URL（含本次随机的 machine_id / device_id / PKCE）。 */
   loginUrl: string
   /** 等待用户在浏览器完成登录、并换取 access token。 */
   awaitCredential(): Promise<TraeCnLoginFlowResult>
@@ -714,84 +1134,99 @@ export function hasActiveTraeCnLogin(): boolean {
 }
 
 /**
- * 处理一次回调：从 query 里取 refreshToken，换取 access token 并组装凭据。
+ * 处理一次回调：解析载荷 → 换取 access token → 组装凭据。
  *
- * 抽成函数是为了让「回调参数 → 凭据」这段纯逻辑可被单测直接覆盖，
+ * 抽成函数是为了让「回调 → 凭据」这段纯逻辑可被单测直接覆盖，
  * 不必每次都起 HTTP 服务器。
  *
- * @param callbackUrl - 回调请求的完整 URL（query 里带 refreshToken）。
- * @param session - 本次登录随机生成的 `machineId`（hex32），用于设备号兜底与凭据留档。
+ * ## `state` 校验的取舍（**刻意保留，但只警告不拒绝**）
+ *
+ * `login_trace_id` 是我们本次生成的随机 UUID，回调把它原样带回；校验通过即
+ * 证明「这次回调属于这次登录」，是防 CSRF 的正经手段，故**保留**。
+ *
+ * 但**不匹配时不予拒绝**：凭证点是我们自己发的随机串、服务端回显；一旦
+ * Trae 侧不回显（或改名），硬拒绝会让登录**永久失败且原因看起来像被攻击**。
+ * 相比之下，本回调服务器只绑 `127.0.0.1` 且只存活于本次登录窗口内，
+ * 「放过一次 trace 不匹配的回调」的风险远小于「登录永远不通」。
+ * 故：不匹配 → 记一条诊断，继续。
+ *
+ * @param callbackUrl - 回调请求的完整 URL（真实 query 未脱敏 —— 脱敏只用于日志）。
+ * @param session - 本次登录的三个一次性随机量（machineId / deviceId / PKCE / trace）。
  * @param product - 产品配置（用到 `apiBase` / `clientId` / `clientSecret`）。
- * @throws refreshToken 缺失、或 exchange 失败时。
+ * @throws 载荷无法解析、或 exchange 失败时。
  */
 export async function completeTraeCnCallback(
   callbackUrl: URL,
-  session: { machineId: string },
+  session: {
+    machineId: string
+    deviceId: string
+    codeVerifier: string
+    loginTraceId: string
+    deviceName?: string
+  },
   product: TraeCnProduct,
   fetcher: typeof fetch,
   signal?: AbortSignal,
 ): Promise<TraeCnCredential> {
-  const refresh = readCallbackParam(callbackUrl, TRAE_CN_REFRESH_TOKEN_PARAMS)
-  if (refresh === undefined) {
+  const payload = parseTraeCnCallbackUrl(callbackUrl)
+  if (payload === undefined) {
     throw new Error(
-      '登录回调未携带 refreshToken'
+      '登录回调未携带 authCodeInfo 或 refreshToken'
       + `（实际参数：${redactTraeCnCallbackUrl(callbackUrl.toString())}）`,
     )
   }
 
-  // 设备号：优先回调里的 Aha 号，拿不到才回退 machine_id 的十进制形态。
-  const device = readCallbackParam(callbackUrl, TRAE_CN_DEVICE_ID_PARAMS)
-  const deviceId = device?.value ?? machineIdToDecimalDeviceId(session.machineId)
-  const deviceIdSource: TraeCnDeviceIdSource = device === undefined ? 'machine-id-fallback' : 'aha'
+  // PKCE 分支：AuthCode + verifier → trae/api/v3/oauth/ExchangeToken。
+  if (payload.mode === 'auth-code') {
+    const result = await exchangeTraeCnAuthCode({
+      authCode: payload.authCode,
+      codeVerifier: session.codeVerifier,
+      deviceId: session.deviceId,
+      machineId: session.machineId,
+      ...session.deviceName === undefined ? {} : { deviceName: session.deviceName },
+    }, product, fetcher, signal)
 
-  // userId：回调 → refreshToken 的 JWT 声明 → exchange 响应 → access token 的 JWT。
-  const callbackUserId = readCallbackParam(callbackUrl, TRAE_CN_USER_ID_PARAMS)?.value ?? ''
-  let userId = callbackUserId.length > 0 ? callbackUserId : readTraeCnJwtUserId(refresh.value)
-
-  // 次要路径：回调直接给了 access token 时无需再 exchange。
-  // **必须通过 JWT 形态校验**：名字叫 token/accessToken 的参数完全可能是别的
-  // 东西（如 CSRF 串），误当 access token 会静默存下坏凭据 —— 见候选表说明。
-  const directCandidate = readCallbackParam(callbackUrl, TRAE_CN_ACCESS_TOKEN_PARAMS)?.value ?? ''
-  const directAccess = looksLikeTraeCnJwt(directCandidate) ? directCandidate : ''
-  let accessToken = directAccess
-  let refreshToken = refresh.value
-  let nickname = ''
-  if (accessToken.length === 0) {
-    const payload = await exchangeTraeCnToken(
-      { refreshToken: refresh.value, userId }, product, fetcher, signal,
-    )
-    accessToken = payload.accessToken
-    if (payload.refreshToken.length > 0) refreshToken = payload.refreshToken
-    if (userId.length === 0) {
-      userId = payload.userId.length > 0 ? payload.userId : readTraeCnJwtUserId(accessToken)
-    }
-    nickname = payload.nickname
-    if (device === undefined && payload.deviceId.length > 0) {
-      // exchange 响应里带了设备号：比 machine_id 兜底更接近真实来源。
-      return buildTraeCnCredential({
-        accessToken,
-        refreshToken,
-        userId,
-        clientId: product.clientId,
-        deviceId: payload.deviceId,
-        deviceIdSource: 'aha',
-        machineId: session.machineId,
-        nickname,
-      })
-    }
+    const userId = payload.userId.length > 0 ? payload.userId : readTraeCnJwtUserId(result.accessToken)
+    const nickname = payload.nickname.length > 0
+      ? payload.nickname
+      : readTraeCnJwtNickname(result.accessToken)
+    return buildTraeCnCredential({
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      userId,
+      clientId: product.clientId,
+      deviceId: result.boundDeviceId,
+      deviceIdSource: 'exchange-bound-device-id',
+      machineId: session.machineId,
+      ...result.tokenExpireAt === undefined ? {} : { expiresAt: result.tokenExpireAt },
+      nickname,
+    })
   }
-  if (nickname.length === 0) nickname = readTraeCnJwtNickname(accessToken)
-  // access token 的 JWT 是 userId 的**最后一级**来源：直连路径（回调已给
-  // access token）没有 exchange 响应可读，而 user_id 是 ExchangeToken 的
-  // 必填字段 —— 这里漏掉会让凭据首次续期就因缺 user_id 判终态。
-  if (userId.length === 0) userId = readTraeCnJwtUserId(accessToken)
+
+  // 兼容分支：回调直接给 refreshToken（授权页的非 PKCE 模式）。
+  // 该分支**没有** exchange 响应，故没有 BoundDeviceID —— device_id 如实留空，
+  // 绝不拿 machine_id 折算一个假的 16 位号顶上（伪造设备身份比缺字段更坏）。
+  const tokenPayload = await exchangeTraeCnToken(
+    { refreshToken: payload.refreshToken, userId: payload.userId },
+    product,
+    fetcher,
+    signal,
+  )
+  const userId = payload.userId.length > 0
+    ? payload.userId
+    : (tokenPayload.userId.length > 0
+      ? tokenPayload.userId
+      : readTraeCnJwtUserId(tokenPayload.accessToken))
+  const nickname = tokenPayload.nickname.length > 0
+    ? tokenPayload.nickname
+    : readTraeCnJwtNickname(tokenPayload.accessToken)
   return buildTraeCnCredential({
-    accessToken,
-    refreshToken,
+    accessToken: tokenPayload.accessToken,
+    refreshToken: tokenPayload.refreshToken.length > 0 ? tokenPayload.refreshToken : payload.refreshToken,
     userId,
     clientId: product.clientId,
-    deviceId,
-    deviceIdSource,
+    deviceId: tokenPayload.deviceId,
+    deviceIdSource: 'exchange-bound-device-id',
     machineId: session.machineId,
     nickname,
   })
@@ -800,9 +1235,9 @@ export async function completeTraeCnCallback(
 /**
  * 组装可持久化的凭据。
  *
- * `expires_at` 由 access token 的 JWT `exp` 派生（Trae 的 access token 是 JWT，
- * `exp` 是权威过期时刻）；解析不出时留空 —— `traeCnCredentialExpiresAtMs`
- * 会在读取时再试一次，仍失败则「不判定过期」。
+ * `expires_at` 两级取值：优先 exchange 响应的 `TokenExpireAt`（服务端权威），
+ * 缺失时由 access token 的 JWT `exp` 派生；两者都没拿到就留空 ——
+ * `traeCnCredentialExpiresAtMs` 会在读取时再试一次，仍失败则「不判定过期」。
  */
 export function buildTraeCnCredential(input: {
   accessToken: string
@@ -812,9 +1247,10 @@ export function buildTraeCnCredential(input: {
   deviceId: string
   deviceIdSource: TraeCnDeviceIdSource
   machineId: string
+  expiresAt?: number
   nickname?: string
 }): TraeCnCredential {
-  const expiresAt = jwtExpiresAtMs(input.accessToken)
+  const expiresAt = input.expiresAt ?? jwtExpiresAtMs(input.accessToken)
   return {
     access_token: input.accessToken,
     refresh_token: input.refreshToken,
@@ -847,6 +1283,28 @@ async function defaultOpenBrowser(url: string): Promise<void> {
 }
 
 /**
+ * 回调响应必须带的 CORS 头。
+ *
+ * ## 为什么 loopback 回调需要 CORS
+ *
+ * 官方实现里回调是**浏览器整页跳转**到 `127.0.0.1:{port}/authorize`，同源策略
+ * 不介入，故不需要任何 CORS 头。但本插件的登录 URL 由客户端在同一用户手势内
+ * 打开，浏览器与授权页的交互方式不受我们控制 —— 一旦回调走的是
+ * `fetch`/预检路径（或页面成了带 origin 的 SPA 回调），
+ * **不带 `Access-Control-Allow-Origin` 会让浏览器静默丢弃响应**，
+ * 表现为「登录页显示成功、宿主一直在等」，比报错更难查。
+ *
+ * 官方 server 同样设 `Access-Control-Allow-Origin: *` 并处理 `OPTIONS`，
+ * 故这是对齐而非发明。`*` 在此**不构成越权**：回调服务只绑 `127.0.0.1`、
+ * 只存活于本次登录窗口，且响应体不含任何凭据（只有一句「可以关闭此窗口了」）。
+ */
+export const TRAE_CN_CALLBACK_CORS_HEADERS: Readonly<Record<string, string>> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+  'Access-Control-Allow-Headers': 'x-jwt-token,content-type',
+}
+
+/**
  * 准备一次登录（两段式的第一段）：起本地回调服务器，返回登录 URL 与结算句柄。
  *
  * **不打开浏览器、不等待用户**：调用方应立即把 `session.loginUrl` 交给客户端
@@ -876,8 +1334,13 @@ export async function prepareTraeCnLogin(
 
   const fetcher = options.fetcher ?? fetch
   const { product } = options
-  const machineId = generateTraeCnHex32()
-  const deviceIdHex = generateTraeCnHex32()
+  // 四个一次性随机量：machine_id / device_id / login_trace_id / PKCE。
+  // 它们必须**成套**交给回调处理器 —— device_id 与 machine_id 会原样进
+  // exchange 请求体的 DeviceInfo，与登录 URL 里的值不一致会被服务端看出。
+  const machineId = generateTraeCnMachineId()
+  const deviceId = generateTraeCnDeviceId()
+  const loginTraceId = generateTraeCnLoginTraceId()
+  const pkce = generateTraeCnPkce()
 
   let resolveResult!: (value: TraeCnLoginFlowResult) => void
   let rejectResult!: (reason: unknown) => void
@@ -905,27 +1368,57 @@ export async function prepareTraeCnLogin(
   const server = createServer((request, response) => {
     const localPort = request.socket.localPort ?? 0
     const url = new URL(request.url ?? '/', `http://127.0.0.1:${localPort}`)
-    // T5 诊断：**每条**回调先记一份脱敏形态（保留全部参数名），再判分支。
-    // 这样即便参数名与候选表不符，日志里也有据可查，而不是只有一个 404。
+    // 诊断：**每条**回调先记一份脱敏形态（保留全部参数名），再判分支。
+    // 这样即便载荷与预期不符，日志里也有据可查，而不是只有一个 404/400。
     options.onCallbackDebug?.(
       `[trae-cn] 登录回调 ${request.method ?? 'GET'} ${redactTraeCnCallbackUrl(url.toString())}`,
     )
+    // ① CORS 预检：必须在路径判定**之前**处理 —— 预检请求打的是同一个 URL，
+    //    但方法是 OPTIONS 且不带 query，落到下面的 404 分支会让浏览器认为
+    //    回调地址不可跨域访问。
+    if (request.method === 'OPTIONS') {
+      response.writeHead(204, TRAE_CN_CALLBACK_CORS_HEADERS).end()
+      return
+    }
+    // ② 路径不符：404，同样**不触碰会话**。
     if (!url.pathname.startsWith(TRAE_CN_CALLBACK_PATH)) {
-      response.writeHead(404).end('Not found')
+      response.writeHead(404, { ...TRAE_CN_CALLBACK_CORS_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' })
+        .end('Not found')
+      return
+    }
+    // ③ 无载荷 / 畸形请求：400，**不结算会话**。
+    //
+    //    这是刻意与「登录失败」分开的一层：打到本端口的未必是登录回调 ——
+    //    浏览器预检、安全扫描器、用户误触、我们自己的探测都会命中这里。
+    //    早先的实现对任何解析不出 token 的请求直接 reject + 关端口，实测一次
+    //    500 探测就把整个登录会话终结了（端口关闭、占位账号被删），
+    //    用户之后即使真的在浏览器里完成授权也无处回调。
+    //    故：只有**可识别的登录回调**才会进入结算路径；
+    //    会话只由「成功」「exchange 失败」「超时」「cancel」四种情况终结。
+    if (parseTraeCnCallbackUrl(url) === undefined) {
+      response.writeHead(400, { ...TRAE_CN_CALLBACK_CORS_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' })
+        .end('缺少登录载荷')
       return
     }
     // 结果里的 loginUrl 用**回调请求实际落到的端口**现算，而不是捕获外层变量：
     // 回调服务器端口是在 `listen` 之后才知道的，先声明后赋值会让这个闭包
     // 引用一个尚未初始化的 const。
-    const loginUrl = buildTraeCnLoginUrl(localPort, product, machineId, deviceIdHex)
-    void completeTraeCnCallback(url, { machineId }, product, fetcher, options.signal)
+    const loginUrl = buildTraeCnLoginUrl(localPort, product, machineId, deviceId, loginTraceId, pkce)
+    void completeTraeCnCallback(
+      url,
+      { machineId, deviceId, codeVerifier: pkce.codeVerifier, loginTraceId },
+      product,
+      fetcher,
+      options.signal,
+    )
       .then((credentialValue) => {
-        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        response.writeHead(200, { ...TRAE_CN_CALLBACK_CORS_HEADERS, 'Content-Type': 'text/html; charset=utf-8' })
           .end('<html><body><h2>登录成功，可以关闭此窗口了</h2></body></html>')
         resolveResult(toLoginFlowResult(credentialValue, loginUrl))
       })
       .catch((error: unknown) => {
-        response.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' }).end('登录换取凭据失败')
+        response.writeHead(500, { ...TRAE_CN_CALLBACK_CORS_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' })
+          .end('登录换取凭据失败')
         rejectResult(error)
       })
   })
@@ -939,7 +1432,7 @@ export async function prepareTraeCnLogin(
     if (activeLoginSlot === 'preparing') activeLoginSlot = undefined
     throw error
   }
-  const loginUrl = buildTraeCnLoginUrl(port, product, machineId, deviceIdHex)
+  const loginUrl = buildTraeCnLoginUrl(port, product, machineId, deviceId, loginTraceId, pkce)
 
   // 超时覆盖「用户操作 + exchange」整个窗口；从「会话建立」起算。
   const timeoutMs = options.timeoutMs ?? TRAE_CN_LOGIN_TIMEOUT_MS

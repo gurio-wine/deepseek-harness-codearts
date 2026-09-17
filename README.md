@@ -494,8 +494,10 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
    `{"req_source":1}`）。
 
 > **Trae 的签到必须带设备头**（与腾讯系、LobsterAI 都不同）：`x-device-id`
-> 取自凭据里的 **Aha 设备号**（16 位十进制），另带 `x-device-type: windows` /
-> `x-os-version` / `x-app-version`。claim 严格校验，缺了直接回 `code:9004`。
+> 取自凭据里的 `device_id`（= 登录 exchange 返回的 `BoundDeviceID`），另带
+> `x-device-type: windows` / `x-os-version` / `x-app-version`。claim 严格校验，
+> 缺了直接回 `code:9004`。⚠️ **T9 待校准**：真机第一轮签到成功时用的是 16 位
+> 十进制设备号，与 `BoundDeviceID` 形态不同，详见「Trae CN provider」章节。
 > 幂等判据是 **`checked_in`（账号级当日）**，**不是** `did_checked_in`
 > ——后者是设备级语义，换台设备仍为 false，拿它判幂等会对已领账号重复发请求。
 > 无 auth 时服务端返回的是 **HTTP 200 + `code:1001` + `enable:false`**
@@ -583,26 +585,105 @@ Bearer `access_token` 鉴权。
 
 | 项 | 腾讯系 | LobsterAI | **Trae CN** |
 |---|---|---|---|
-| 登录 | 轮询后端 API | 本地回调收 `authCode` → exchange | **本地回调直接收 refreshToken** |
-| 换 token | 轮询结果自带 | `authCode` 换 access+refresh | **无 authCode 交换**（登录页自己完成 `GetRefreshToken`） |
-| 续期 | `X-Refresh-Token` 头 | `POST /api/auth/refresh` | **`POST …/oauth/ExchangeToken`（body 四字段）** |
+| 登录 | 轮询后端 API | 本地回调收 `authCode` → exchange | **本地回调 + PKCE(S256)，回调投递 `authCodeInfo`** |
+| 换 token | 轮询结果自带 | `authCode` 换 access+refresh | **`POST /trae/api/v3/oauth/ExchangeToken`（body 五字段）** |
+| 续期 | `X-Refresh-Token` 头 | `POST /api/auth/refresh` | **`POST /cloudide/api/v3/trae/oauth/ExchangeToken`（body 四字段）** |
 | 鉴权 | `Bearer` + 归属头 | `Bearer` | **`Cloud-IDE-JWT`**（另带两个等值 token 头） |
 
-### 登录机制（两段式）
+> ✅ **登录协议已用真机校准（2026-09-17）**。三条独立证据一致：官方 `main.js`
+> 源码只读提取（`buildLoginUrl` / `gDe` / `exchangeTokenByAuthCode` /
+> `_buildDeviceInfo`）、本机**成功**登录日志
+> `%APPDATA%\Trae CN\logs\20260917T045023\main.log:136/139/140/141`（登录 URL /
+> 回调载荷 / exchange 请求体 / 响应体，四段逐字）、与授权页 chunk 的行为解剖。
+> 此前「回调 query 直接携带 refreshToken、无 authCode 交换」的假设**已被整体证伪**：
+> 真机走 PKCE。那套假设曾让登录**静默失败**（页面停在「认证中」），根因见下。
 
-第一段起本地 loopback 服务器（随机端口），构造登录 URL：
+### 登录机制（两段式 + PKCE）
+
+第一段起本地 loopback 服务器（随机端口），构造登录 URL（**22 个参数，逐项对齐
+真机** main.log:136）：
 
 ```
-https://www.trae.cn/authorization?clientID=…&auth_callback_url=http://127.0.0.1:{port}/authorize
-                                &machine_id={hex32}&device_id={hex32}
+https://www.trae.cn/authorization?login_version=1&auth_from=trae&login_channel=native_ide
+  &plugin_version=2.3.83560&auth_type=local&client_id=ono9krqynydwx5&redirect=0
+  &login_trace_id={uuid}&auth_callback_url=http://127.0.0.1:{port}/authorize
+  &machine_id={64hex}&device_id={16位十进制}&x_device_id=…&x_machine_id=…
+  &x_device_brand=&x_device_type=windows&x_os_version=Windows%2010%20Home&x_env=
+  &x_app_version=3.3.100&x_app_type=stable
+  &code_challenge={43字符}&code_challenge_method=S256&channel_name=common
 ```
 
-`machine_id` / `device_id` 每次登录随机生成 hex32。**注意它们与签到用的设备号
-无关** —— 签到的 `x-device-id` 取自凭据里的 Aha 设备号（16 位十进制），
-服务端不校验这两者的一致性。
+**三个曾经写错的点，每一个都能单独让登录静默失败**（页面既不报错也不回调，
+只在首屏显示「认证中」——从外部看完全像网络问题）：
 
-第二段：用户在浏览器完成登录后，登录页回调本地服务器（**回调 query 直接携带
-refreshToken**，而非 authCode），随后立即调 `ExchangeToken` 换取 access token。
+1. **`client_id` 是 snake_case**。授权页只读 `client_id`，读不到就停在「认证中」
+   （这就是用户报障的根因）。`src/trae-cn-product.ts` 的注释曾把这条写反
+   （「URL 用 `clientID`」），现已显式写死两个方向防回归。
+2. **缺流程标记** `auth_type=local` / `login_channel=native_ide` /
+   `login_version=1`：授权页认不出本地回调模式。
+3. **缺 PKCE**（`code_challenge` + `code_challenge_method=S256`）：授权页
+   不会走 AuthCode 分支，我们也就拿不到 `authCodeInfo`。
+   方法名是 **`S256`**，不是 CodeArts 那套 `SHA-256`。
+
+`machine_id` 是 **64 位 hex**（生成随机即可，服务端不校验其真实性）；
+`device_id` 是 **16 位纯十进制**（**不能用 hex32/UUID** —— 形态不符会触发 9074 风控）。
+`login_trace_id` 是本次登录的 UUID，回调把它原样带回，是「这次回调属于这次登录」的
+现成凭证。
+
+第二段：用户在浏览器完成授权后，登录页回调本地服务器，投递
+**`authCodeInfo` + `userInfo` 两个双重编码的 JSON 字符串**（URL query 里再套一层
+JSON），随后立即调交换端点换取 access token：
+
+```
+POST https://api.trae.cn/trae/api/v3/oauth/ExchangeToken
+body {ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}   ← 五字段
+```
+
+⚠️ **交换端点有两套**，都在服务端并存，混用必 404：
+登录用 `trae/api/v3/oauth/ExchangeToken`（鉴权靠 `AuthCode` + PKCE verifier，
+body **不含** `ClientSecret` / `DeviceProof`）；续期用
+`cloudide/api/v3/trae/oauth/ExchangeToken`（body 四字段，含 `ClientSecret`）。
+真实响应是 `Result` 信封：
+
+```json
+{"ResponseMetadata":{…},
+ "Result":{"BoundDeviceID":"wl2k1e2endpp32","DeviceBindStatus":"BOUND",
+           "RefreshToken":"…","Token":"…","TokenExpireAt":1790801493459}}
+```
+
+`DeviceInfo` 是**真机 12 字段**（`DeviceID` / `MachineID` / `PlatformCode`
+/ `DeviceType` / `DeviceName` / `DeviceModel` / `ClientVersion`
+/ `DevicePublicKey` / `DeviceBrand` / `DeviceCPU` / `OSInfo` / `OSVersion`）。
+本插件能如实提供的只有前四项与 `ClientVersion`/`OSInfo`/`OSVersion`；
+`DeviceBrand`/`DeviceCPU`/`DeviceModel`/`DevicePublicKey` 一律**留空**——
+不猜硬件型号、不伪造 PEM（该字段在 authCode 路径上未被使用，真机请求体里
+根本没有 `DeviceProof`）。`DeviceName` 取主机名（真机取 `net.exe user` 的 Full Name）。
+
+**回调分层**（畸形请求不得终结登录）：
+
+| 请求 | 响应 | 对会话的影响 |
+|---|---|---|
+| 带 `authCodeInfo` / `refreshToken` | 200 / 500 | 结算（成功 / 交换失败） |
+| `OPTIONS` 预检 | 204 + CORS 头 | 无 |
+| 路径不符 | 404 + CORS 头 | 无 |
+| 无载荷 / 畸形 | 400（不回显请求内容） | **无** —— 会话继续等真回调 |
+
+早先实现把「解析不出凭据」当成登录失败（reject + 关端口），实测一次 500 探测
+就终结了整个会话（端口关闭、占位账号被删），用户之后即使真的完成授权也无处回调。
+现在只有「成功」「交换失败」「超时」「cancel」四种情况终结会话。
+
+回调服务器**带 CORS 头**（`Access-Control-Allow-Origin: *` 与 OPTIONS 处理）：
+官方实现里回调是整页跳转、同源策略不介入，但我们的登录页由客户端开窗，
+一旦回调走 `fetch`/预检路径，缺 CORS 头会让浏览器**静默丢弃响应**
+（表现为「登录页显示成功、宿主一直在等」）。
+
+**兼容分支**：授权页是双模的 —— URL 不带 `code_challenge` 时它靠浏览器 Cookie
+会话自己调 `GetRefreshToken`，回调投递 `refreshToken`。本实现**主发 PKCE**
+（与桌面客户端同款、不依赖「浏览器里已登录 trae.cn」这个额外前置），回调侧
+**两条都收**并把走了哪条写进日志。走兼容分支时没有 exchange 响应、也就没有
+`BoundDeviceID`，凭据的 `device_id` **如实留空** —— 绝不拿 `machine_id` 折算
+一个假的 16 位号顶上（伪造设备身份比缺字段更坏，缺字段至少能被发现）。
+
 `prepareLogin()` 立即返回 `loginUrl`，由客户端在同一用户手势内开窗；
 `login()` 保留为阻塞式便捷封装。
 
@@ -610,15 +691,16 @@ refreshToken**，而非 authCode），随后立即调 `ExchangeToken` 换取 acc
 
 | 字段 | 说明 |
 |---|---|
-| `refresh_token` | 刷新令牌（`ExchangeToken` 的 `RefreshToken`） |
-| `user_id` | 用户 ID（`ExchangeToken` 的 `UserID`，**必填**，续期缺它只能重新登录） |
+| `refresh_token` | 刷新令牌（续期端点的 `RefreshToken`） |
+| `user_id` | 用户 ID（续期端点的 `UserID`，**必填**，续期缺它只能重新登录；来源是回调 `userInfo.UserID`） |
 | `client_id` | OAuth 客户端 ID（`ono9krqynydwx5`） |
-| `device_id` | Aha 设备号（16 位十进制；签到用） |
-| `machine_id` | 机器号（hex32；登录 URL 用） |
+| `device_id` | **登录 exchange 返回的 `BoundDeviceID`**（真机 `wl2k1e2endpp32`，14 位字母数字） |
+| `machine_id` | 机器号（64 位 hex；登录 URL 用） |
 
 - 单账号 ref：`TRAE_CN_ACCESS_TOKEN`；多账号：`TRAE_CN_ACCOUNT_<SUFFIX>`；
 - access token 用法：`Authorization: Cloud-IDE-JWT <access>`，另带
   `X-Ide-Token` 与 `X-Cloudide-Token`（三个头同值）；
+- 过期时间取 exchange 响应的 `TokenExpireAt`（服务端权威），缺失时回退 token 的 JWT `exp`；
 - 续期：`POST /cloudide/api/v3/trae/oauth/ExchangeToken`，
   body `{ClientID, ClientSecret, RefreshToken, UserID}` —— `ClientSecret`
   实测为占位串 `"-"`，服务端不校验。
@@ -632,14 +714,16 @@ provider id 是 `trae-cn`（带连字符，对齐用户与生态叫法），但 
 （见 `src/trae-cn-product.ts` 的 `serviceName`）。理由是带连字符的属性名
 无法用点号语法访问，且与另外四个 provider 的命名风格不一致。
 
-> **待校准项（T5）**：回调 URL 的**确切形态**尚未真机实测。当前实现把
-> 「回调 query 携带 refreshToken」作为主路径，参数名按候选表
-> （`TRAE_CN_REFRESH_TOKEN_PARAMS` 等）依次尝试，并对**每条**回调输出
-> 一份**保留全部参数名、值已脱敏**的日志（脱敏采用白名单，
-> 白名单之外一律压成 `前6位…(len=N)`）。真机登录一次即可按日志把候选表
-> 收敛成唯一形态。设备号同理：拿不到 Aha 号时回退 `machine_id` 的十进制形态，
-> 并在凭据的 `device_id_source` 里标为 `machine-id-fallback`（**显式降级，
-> 不静默伪造**）。
+> ✅ **T5（回调 URL 形态）已用真机日志校准**（2026-09-17 main.log:136/139），
+> 不再是候选表：参数名、编码形态、回调载荷结构（`authCodeInfo` / `userInfo`）
+> 全部逐字确认，`device_id` 的来源也已查清（exchange 响应的 `BoundDeviceID`）。
+> 旧的 `machine-id-fallback` 降级路径与 `aha` 来源标记已**删除**。
+>
+> ⚠️ **待校准项（T9）：签到设备号的来源**。签到端点的 `x-device-id` 读的是凭据里的
+> `device_id`（= `BoundDeviceID`），但真机**第一轮签到实测成功**时用的是 16 位
+> 十进制设备号，与 `BoundDeviceID` 形态不同 —— 「签到认哪个号」尚无定论。
+> 若签到返回 `code:9004`，按凭据里的值与宿主日志校准（候选是 exchange 响应里的
+> 其它设备字段或客户端设备注册服务的 16 位号，**不是** `MachineID`）。
 
 ### 模型路由（LLM 适配器）
 
@@ -733,14 +817,15 @@ event:error         data:{"code":4008,"message":…}  ← 失败（HTTP 仍为 2
 ```
 Origin:  https://www.trae.cn
 Referer: https://www.trae.cn
-x-device-id:   <凭据里的 Aha 设备号，16 位十进制>
+x-device-id:   <凭据里的 device_id（= 登录 exchange 的 BoundDeviceID，T9 待校准）>
 x-device-type: windows
 x-os-version:  Windows 10.0.22631
 x-app-version: 3.3.100
 ```
 
 - 设备四件套是 **claim 的硬要求**，缺失时服务端回 `code:9004`。
-  `x-device-id` **取自凭据**（`device_id` 字段），不是登录 URL 里那个随机 hex32；
+  `x-device-id` **取自凭据**（`device_id` 字段），不是登录 URL 里那个随机生成的
+  16 位号 —— 后者只参与登录握手与风控形态校验，不是设备身份；
 - `Origin` / `Referer` 取编译期常量 `product.portalBase`，**不从凭据推断**
   （与 `X-Domain` 那条约定同因）；
 - `req_source:1` 照抄**唯一次实测成功**的组合。调研未定论 `{}` 与

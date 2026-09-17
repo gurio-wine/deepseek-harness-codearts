@@ -59,9 +59,9 @@ function makeCredential(overrides: Partial<TraeCnCredential> = {}): TraeCnCreden
     refresh_token: 'RT-1',
     user_id: 'u-1',
     client_id: 'ono9krqynydwx5',
-    device_id: '0000123456789012',
+    device_id: 'wl2k1e2endpp32',
     machine_id: 'a'.repeat(32),
-    device_id_source: 'aha',
+    device_id_source: 'exchange-bound-device-id',
     expires_at: String(Date.now() + 7_200_000),
     nickname: '测试账号',
     ...overrides,
@@ -142,7 +142,7 @@ describe('TraeCnAuth 续期', () => {
     // 身份字段必须保留 —— 丢了会让下一次续期失败。
     expect(stored.user_id).toBe('u-1')
     expect(stored.client_id).toBe('ono9krqynydwx5')
-    expect(stored.device_id).toBe('0000123456789012')
+    expect(stored.device_id).toBe('wl2k1e2endpp32')
     expect(stored.machine_id).toBe('a'.repeat(32))
   })
 
@@ -458,6 +458,9 @@ describe('TraeCnAuth 登录与凭据管理', () => {
     expect(stored.client_id).toBe('ono9krqynydwx5')
     expect(stored.machine_id).toBe('b'.repeat(32))
     expect(stored.expires_at).toBeTruthy()
+    // 续期端点不返回 BoundDeviceID，故 device_id 为空 —— **如实留空**，
+    // 绝不拿 machine_id 折算一个假的 16 位设备号顶上（那是伪造设备身份）。
+    expect(stored.device_id).toBe('')
   })
 
   it('loginWithRefreshToken 可登记进账号池', async () => {
@@ -551,7 +554,7 @@ describe('TraeCnAuth 登录与凭据管理', () => {
       refresh_token: 'RT-1',
       user_id: 'u-1',
       client_id: 'ono9krqynydwx5',
-      device_id: '0000123456789012',
+      device_id: 'wl2k1e2endpp32',
     })
   })
 

@@ -5,8 +5,8 @@
  *
  * 三者是**三条互不相干的协议线**：CodeBuddy 系走腾讯的 external-link 轮询登录 +
  * `X-Product-Code` 归属头；LobsterAI 走本地回调 + `authCode` 换 token + keyfrom
- * 身份载荷；Trae CN 走**回调 query 直接携带 refreshToken**（无 authCode 交换）+
- * `ExchangeToken` 续期 + `Cloud-IDE-JWT` 鉴权。三个类型的字段集合几乎不相交
+ * 身份载荷；Trae CN 走**本地回调 + PKCE（S256）+ authCode 换 token** +
+ * `Cloud-IDE-JWT` 鉴权。三个类型的字段集合几乎不相交
  * （`productCode` / `apiDomain` / `userAgentByModelFamily` 对 Trae CN 全部无意义；
  * `clientSecret` / `machineId` 语义对前两者无意义），合并只会让调用方拿到联合类型
  * 后再也不得不做类型收窄。
@@ -22,16 +22,27 @@
  *
  * ## 数据来源
  *
- * - 端点与请求体：调研报告实测确认（`POST /cloudide/api/v3/trae/oauth/ExchangeToken`，
- *   body `{ClientID, ClientSecret, RefreshToken, UserID}`）；
- * - `clientId` / `clientSecret`：Trae CN 桌面客户端内置的公开 OAuth 客户端标识
- *   （`clientSecret` 实测为占位串 `"-"`，服务端不校验它）；
- * - 登录 URL 形态：`traework2api/login.sh` 的做法 —— 起 loopback 服务器，
- *   登录页自行完成 `GetRefreshToken`，回调 URL 的 query 里带最终 refreshToken。
+ * **登录协议已用真机校准（2026-09-17）**，三条独立证据一致：
  *
- * ⚠️ **回调 URL 的确切形态待实测校准**（调研报告 T5）：当前实现把
- * 「回调 query 携带 refreshToken」作为**主路径**，并对回调 URL 打日志（脱敏）
- * 以便真实验证时校准。详见 `src/trae-cn-oauth.ts` 的 `TRAE_CN_CALLBACK_PATH`。
+ * 1. 官方 `main.js` 源码只读提取（`loginUrlBuilder.buildLoginUrl` @1640193、
+ *    `gDe()` @1426128、`exchangeTokenByAuthCode` @1430351、
+ *    `_buildDeviceInfo` @1430476）；
+ * 2. 本机真实**成功**登录日志
+ *    `%APPDATA%\Trae CN\logs\20260917T045023\main.log:136/139/140/141`
+ *    （登录 URL / 回调载荷 / exchange 请求体 / exchange 响应体，四段逐字）；
+ * 3. 授权页 chunk 的行为解剖（两条流程分支、`get("client_id")` 只读 snake_case）。
+ *
+ * 此前「回调 query 直接携带 refreshToken、无 authCode 交换」的假设**已被整体
+ * 证伪**：真机走的是 PKCE(S256) → `authCodeInfo.AuthCode` → `trae/api/v3/oauth/ExchangeToken`。
+ * 「直取 refreshToken」是**同一授权页在另一个参数组合下的分支**（不带
+ * `code_challenge` 时页面自己调 `GetRefreshToken`，依赖浏览器里的 trae.cn
+ * Cookie 会话），本实现**保留它作为兼容分支**并记录日志，但**主路径是 PKCE**。
+ * 依据见 `src/trae-cn-oauth.ts` 的模块头注释。
+ *
+ * ## 仍未校准的部分
+ *
+ * 签到设备的来源已确认（`BoundDeviceID`），但**签到该用哪个号**仍未定论 ——
+ * 见 {@link TraeCnDeviceIdSource}。
  */
 
 /**
@@ -39,6 +50,12 @@
  *
  * 与 portal 分开成两个字段：登录页在 `www.trae.cn`，OpenAPI 在 `api.trae.cn`，
  * 两者是不同域名（实测确认），不排除未来进一步分离部署。
+ *
+ * ⚠️ 真机回调载荷里的 `host` 字段是 `https://api.trae.com.cn`（**`.com.cn`**），
+ * 而 exchange 请求实际打到 `https://api.trae.cn`（**`.cn`**）—— 两个域名并存。
+ * 本常量取**实际请求**的那个，绝不从回调载荷的 `host` 推断 baseURL
+ * （与本插件「baseURL 是编译期常量」那条约定同因；回调载荷是服务端可变的
+ * 声明，不是我们的配置）。
  */
 export const TRAE_CN_API_BASE = 'https://api.trae.cn'
 
@@ -49,29 +66,59 @@ export const TRAE_CN_PORTAL_BASE = 'https://www.trae.cn'
  * OAuth 客户端 ID。
  *
  * 取自 Trae CN 桌面客户端的内置值（公开标识，非机密）。它同时是：
- * - 登录 URL 的 `clientID` query 参数；
- * - `ExchangeToken` 请求体的 `ClientID` 字段（**大小写不同，刻意保留各自形态**：
- *   登录 URL 用 `clientID`，请求体用 `ClientID`）。
+ * - 登录 URL 的 **`client_id`** query 参数（**snake_case**）；
+ * - 两个 `ExchangeToken` 端点的请求体字段 **`ClientID`**（**PascalCase**）。
+ *
+ * ## ⚠️ 两侧拼写方向相反，写错就是「认证中」卡死（真机根因，2026-09-17）
+ *
+ * | 位置 | 形态 | 举证 |
+ * |---|---|---|
+ * | 登录 URL query | `client_id`（snake_case） | 真机 main.log:136 逐字 |
+ * | 授权页读取 | `get("client_id")` —— 读不到 `clientID` | 授权页源码 |
+ * | JSON body | `ClientID`（PascalCase） | main.log:140 逐字 |
+ *
+ * 本文件曾把这条注释写反（「URL 用 `clientID`」），而它正是那次登录失败的
+ * **思想源头**：授权页拿不到 `client_id` 后既不报错也不回调，页面停在
+ * 「认证中」，从外部看完全像网络问题。故这里显式写死两个方向防回归 ——
+ * `tests/unit/trae-cn-oauth.spec.ts` 另有逐项断言锁住两侧拼写。
  */
 export const TRAE_CN_CLIENT_ID = 'ono9krqynydwx5'
 
 /**
  * OAuth 客户端密钥。
  *
- * 实测值为占位串 `"-"`：服务端**不校验**该字段（调研报告已确认）。
+ * 实测值为占位串 `"-"`：服务端**不校验**该字段。仅用于**续期**端点
+ * （`cloudide/api/v3/trae/oauth/ExchangeToken`，body 含 `ClientSecret`）；
+ * 登录的 authCode 交换端点 body **不含**该字段。
  * 照抄原值而非留空 —— 空串可能被服务端当成「缺字段」而拒绝，
  * 而 `"-"` 是客户端实际发送的值。
  */
 export const TRAE_CN_CLIENT_SECRET = '-'
 
 /**
- * `ExchangeToken` 端点路径（续期）。
+ * `ExchangeToken` 端点路径 —— **续期**（`RefreshToken` + `UserID`）。
  *
  * 全路径 `https://api.trae.cn/cloudide/api/v3/trae/oauth/ExchangeToken`。
  * 这是 REFRESH_CONTRACT.cn 的实测形态：用 `RefreshToken` + `UserID` 换新
  * access token（JWT）。
+ *
+ * ⚠️ **与登录时的 authCode 交换不是同一个端点**（路径首段不同：本端点
+ * `cloudide/api/…`，登录端点 `trae/api/…`）。两者在服务端**并存**，
+ * 见 {@link TRAE_CN_AUTH_EXCHANGE_PATH}。混用会让登录/续期之一 404。
  */
 export const TRAE_CN_EXCHANGE_TOKEN_PATH = '/cloudide/api/v3/trae/oauth/ExchangeToken'
+
+/**
+ * `ExchangeToken` 端点路径 —— **登录后的 AuthCode 交换**（PKCE 流程第二步）。
+ *
+ * 全路径 `https://api.trae.cn/trae/api/v3/oauth/ExchangeToken`，真机实测
+ * （main.log:140 的 `[exchangeTokenByAuthCode] request`）逐字确认。
+ *
+ * body 五字段：`{ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}` ——
+ * **没有** `ClientSecret`、**没有** `DeviceProof`（那两者属于 `cloudide/api/…`
+ * 那条续期路径）。
+ */
+export const TRAE_CN_AUTH_EXCHANGE_PATH = '/trae/api/v3/oauth/ExchangeToken'
 
 /**
  * 登录回调路径。
@@ -79,13 +126,95 @@ export const TRAE_CN_EXCHANGE_TOKEN_PATH = '/cloudide/api/v3/trae/oauth/Exchange
  * 登录 URL 的 `auth_callback_url` 为 `http://127.0.0.1:{port}/authorize`，
  * 故本地 loopback 服务器只接受这个路径的回调。
  *
- * ⚠️ **待 T5 校准**：调研报告指出回调 URL 的**确切形态未经实测**。当前实现
- * 假设「回调 query 携带 `refreshToken`」（这是 `traework2api/login.sh` 的行为：
- * 它解析回调 URL query 里的 refreshToken，再直接 ExchangeToken，说明登录页
- * 自己完成了 `GetRefreshToken`）。校准前，本模块的回调处理器会对**每条**回调
- * 记录脱敏后的原始 URL，便于真实登录时按日志修正参数名。
+ * ✅ **已用真机日志校准（T5，2026-09-17 main.log:136）**：回调路径与
+ * `auth_callback_url` 形态均与实测一致，不再是假设。
  */
 export const TRAE_CN_CALLBACK_PATH = '/authorize'
+
+/**
+ * 登录 URL 上的客户端流程常量（**全部取自真机** main.log:136 逐字）。
+ *
+ * ## 为什么这四个字面量值得做成常量
+ *
+ * 它们的共同点是「服务端/授权页按存在性判流程分支，缺失时的表现是**静默**的」：
+ * 页面既不报错也不回调，只在首屏显示「认证中」。少任何一个都无法从错误信息
+ * 反推原因 —— 这就是本 provider 首次真机登录失败的机型（见 {@link TRAE_CN_CLIENT_ID}）。
+ *
+ * - {@link TRAE_CN_LOGIN_VERSION}：登录协议版本（授权页据此选解析分支）；
+ * - {@link TRAE_CN_LOGIN_AUTH_FROM}：来源标识，真机 `trae`（SOLO 形态为 `solo`，
+ *   本 provider 只走 `trae`）；
+ * - {@link TRAE_CN_LOGIN_CHANNEL}：`native_ide` —— 声明「本地 IDE 回调」这一
+ *   登录通道，授权页据此决定**是否**调 `GetRefreshToken` 与投递何种载荷；
+ * - {@link TRAE_CN_LOGIN_AUTH_TYPE}：`local` —— **缺它是失败的直接原因**：
+ *   授权页认不出本地回调模式便一直停在「认证中」。
+ */
+export const TRAE_CN_LOGIN_VERSION = '1'
+/** 登录 URL 的 `auth_from`（真机 `trae`；SOLO 形态的 `solo` 不适用本 provider）。 */
+export const TRAE_CN_LOGIN_AUTH_FROM = 'trae'
+/** 登录 URL 的 `login_channel`（真机 `native_ide`）。 */
+export const TRAE_CN_LOGIN_CHANNEL = 'native_ide'
+/** 登录 URL 的 `auth_type`（真机 `local`；缺失时授权页停在「认证中」）。 */
+export const TRAE_CN_LOGIN_AUTH_TYPE = 'local'
+/**
+ * 插件版本（登录 URL 的 `plugin_version`）。
+ *
+ * 取自本机客户端 `main.js` 尾部 sourcemap 注释
+ * （`/stable/2.3.83560/win32/x64/main.js.map`）与真机 main.log:136，
+ * 两处一致。官方实现取的是 `productService.tronBuildVersion` ——
+ * 即**客户端插件版本**，与 {@link TRAE_CN_IDE_VERSION} 是两个不同的号。
+ */
+export const TRAE_CN_PLUGIN_VERSION = '2.3.83560'
+/**
+ * IDE 版本（登录 URL 的 `x_app_version`，也是 `DeviceInfo.ClientVersion`
+ * 与 exchange body 的 `IDEVersion`）。
+ *
+ * 真机值与签到设备头的 `x-app-version` 相同（均为 `3.3.100`），
+ * 故本常量与 `TRAE_CN_APP_VERSION` 同值；**刻意分成两个常量**，
+ * 因为它们是两条独立的协议线（登录 URL / 签到头），任一变动不应牵动另一个。
+ */
+export const TRAE_CN_IDE_VERSION = '3.3.100'
+/** 登录 URL 的 `x_app_type`（真机 `stable`）。 */
+export const TRAE_CN_APP_TYPE = 'stable'
+/**
+ * 登录 URL 的 `channel_name`（真机 `common`）。
+ *
+ * 官方实现在 `productService.channelName` 存在时才追加；本 provider 恒发 `common`
+ * （真机实测值），不做条件分支 —— 少一个参数就多一种静默失败形态。
+ */
+export const TRAE_CN_CHANNEL_NAME = 'common'
+/**
+ * `redirect` 参数值（真机 `0`）。
+ *
+ * 官方实现是 `redirect || 0`，即「未指定时填 0」。本 provider 无重定向需求，
+ * 恒为 `0`。
+ */
+export const TRAE_CN_LOGIN_REDIRECT = '0'
+/**
+ * `DeviceInfo.PlatformCode` —— 真机 `IDE_PC`（官方实现按 SOLO/IDE 二分，
+ * 本 provider 恒为 IDE 形态）。
+ */
+export const TRAE_CN_PLATFORM_CODE = 'IDE_PC'
+/**
+ * `DeviceInfo.DeviceType` —— 真机字面量 `PC`。
+ */
+export const TRAE_CN_DEVICE_TYPE_PC = 'PC'
+/**
+ * 登录 URL 的 `x_device_type` / `DeviceInfo.OSInfo` —— 真机值 `windows`。
+ *
+ * 与 `TRAE_CN_DEVICE_TYPE`（签到头的 `x-device-type`）同值但**刻意分开**：
+ * 两条协议线的取值来源不同，任一侧调整都不该牵动另一侧。
+ */
+export const TRAE_CN_LOGIN_OS_INFO = 'windows'
+/**
+ * 登录 URL 的 `x_os_version` / `DeviceInfo.OSVersion` —— 真机逐字值
+ * `Windows 10 Home`（该机器上 `getSystemInformation().osVersion` 的输出）。
+ *
+ * ⚠️ 这是**真机取值**而非发明：官方实现取系统信息，本插件无法等价获取，
+ * 故采「客户端形态伪装」常量（与签到头的 `TRAE_CN_OS_VERSION` 同一约定）。
+ * 注意两者形态不同：这里是**市场营销名**（`Windows 10 Home`），
+ * 签到头用的是**构建号**（`Windows 10.0.22631`）—— 别互相替换。
+ */
+export const TRAE_CN_LOGIN_OS_VERSION = 'Windows 10 Home'
 
 /** 登录页授权端点路径（拼在 `portalBase` 之后）。 */
 export const TRAE_CN_AUTHORIZATION_PATH = '/authorization'
@@ -153,11 +282,20 @@ export const TRAE_CN_LOGIN_TIMEOUT_MS = 10 * 60 * 1000
 /**
  * 凭据对象里持久化的设备号来源标记（诊断用，不影响鉴权）。
  *
- * `deviceId` 的理论来源是 Aha 设备号（签到请求的 `x-device-id` 就是它）。
- * 拿不到时回退用 `machineId` 的十进制形态，并在凭据里标记来源，
- * 让「真实来源待校准」这件事在数据里可见，而不是悄悄用一个假设备号。
+ * ## 值域已按真机证据收敛（2026-09-17）
+ *
+ * `device_id` 的来源**已经查清**：它是登录 exchange 响应的
+ * `Result.BoundDeviceID`（真机 `wl2k1e2endpp32`，14 位小写字母+数字）。
+ * 这**不是**客户端上报的 `DeviceID`（16 位十进制）或 `MachineID`（64 hex）
+ * 的回显 —— 服务端新发了一个绑定标识，`DeviceBindStatus: "BOUND"` 与之配套。
+ *
+ * 故旧的 `machine-id-fallback` 降级路径已**删除**：登录 URL 里的 `device_id`
+ * 是我们随机生成的临时值（仅参与登录握手与风控形态校验），把它折算成设备号
+ * 存进凭据是**伪造设备身份**，比缺字段更坏 —— 缺字段至少能被发现。
+ *
+ * @see TraeCnDeviceIdSource
  */
-export type TraeCnDeviceIdSource = 'aha' | 'machine-id-fallback'
+export type TraeCnDeviceIdSource = 'exchange-bound-device-id'
 
 /**
  * Trae CN 产品配置。
@@ -209,8 +347,9 @@ export interface TraeCnProduct {
 /**
  * Trae CN provider 配置。
  *
- * 登录方式与腾讯系、LobsterAI 都不同：**两段式 loopback 回调**，
- * 回调 URL 的 query 直接携带 refreshToken（无 authCode 交换步骤）。
+ * 登录方式与腾讯系、LobsterAI 都不同：**两段式 loopback 回调 + PKCE(S256)**，
+ * 回调投递 `authCodeInfo`（AuthCode 模式），再由本插件调
+ * `trae/api/v3/oauth/ExchangeToken` 换 token。
  */
 export const TRAE_CN: TraeCnProduct = {
   id: 'trae-cn',

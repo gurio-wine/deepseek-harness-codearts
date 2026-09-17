@@ -29,7 +29,7 @@ function credentialOf(deviceId: string, nickname: string): TraeCnCredential {
     client_id: 'ono9krqynydwx5',
     device_id: deviceId,
     machine_id: 'a'.repeat(32),
-    device_id_source: 'aha',
+    device_id_source: 'exchange-bound-device-id',
     nickname,
   }
 }
