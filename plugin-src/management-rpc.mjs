@@ -1,5 +1,5 @@
 /**
- * Jet Hub 管理 API 调用函数。
+ * Account Hub 管理 API 调用函数。
  *
  * Host 侧通过 connection.fetch.register() 注册 HTTP API 端点，
  * Client 侧通过 connection.rpc.call() 调用。
@@ -12,7 +12,7 @@
 const ENDPOINT = 'jet-hub'
 
 /**
- * 调用 Jet Hub 管理 API。
+ * 调用 Account Hub 管理 API。
  *
  * @param {import('@deepseek-ai/dsh-connection').Connection} connection
  * @param {string} channel  通道名（如 '/jet-hub'，用于识别）
@@ -37,7 +37,7 @@ export function callManagementRpc(connection, channel, method, payload, signal) 
 export function unwrapRpcResult(result) {
   if (result?.ok === true) return result.value
   if (result?.ok === false) {
-    const error = new Error(result.error?.message || 'Jet Hub API 请求失败')
+    const error = new Error(result.error?.message || 'Account Hub API 请求失败')
     error.code = result.error?.code
     throw error
   }

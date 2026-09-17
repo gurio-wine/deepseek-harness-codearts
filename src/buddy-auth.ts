@@ -273,7 +273,7 @@ export class BuddyAuth extends Service {
    *
    * 与 {@link refresh} 的区别（这是修复既有缺陷的关键）：
    * - `refresh()` 读写的是本实例的**默认单凭据 ref**（如 `BUDDY_ACCESS_TOKEN`），
-   *   而 Jet Hub 的账号卡片对应的是 `BUDDY_ACCOUNT_XXX` ——
+   *   而 Account Hub 的账号卡片对应的是 `BUDDY_ACCOUNT_XXX` ——
    *   用 `refresh()` 去刷账号池里的账号，实际刷的是另一个凭据；
    * - 本方法也**不触碰** `refreshTokenInvalid` / `lastRefreshError` / 调度器：
    *   那些状态属于「单凭据路径」，被多账号操作污染会让 UI 显示错误的失效提示。

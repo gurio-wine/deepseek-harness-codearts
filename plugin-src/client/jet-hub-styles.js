@@ -1,5 +1,5 @@
 /**
- * Jet Hub 设置页面样式 —— 对齐 dsh-im 设计。
+ * Account Hub 设置页面样式 —— 对齐 dsh-im 设计。
  */
 
 const STYLES = `

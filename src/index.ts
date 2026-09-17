@@ -21,7 +21,7 @@ export const name = 'codearts-auth'
 // 里永久 pending，进而让整个 profile 以
 // "plugin tree failed to load: 1 entry did not activate" 启动失败
 // —— chicheng-cron 的 skill/agent 任务正是通过 `dsh --profile headless` 运行的，
-// 会因此全部 exit 1。Jet Hub 的 RPC 端点在 Web 下通过 apply 内的可选注入挂载，
+// 会因此全部 exit 1。Account Hub 的 RPC 端点在 Web 下通过 apply 内的可选注入挂载，
 // 其余 profile 只是不注册该端点。
 export const inject = ['credentials', 'commands', 'llm']
 
@@ -276,7 +276,7 @@ export function apply(ctx: Context): void {
   })
 
   // ===== Buddy (腾讯 CodeBuddy) 服务 =====
-  // 不注册斜杠命令：登录/状态/续期都在 Jet Hub 设置页完成（多账号 + 账号池），
+  // 不注册斜杠命令：登录/状态/续期都在 Account Hub 设置页完成（多账号 + 账号池），
   // 命令式的单凭据入口已无必要。
   const buddy = new BuddyAuth(ctx)
   registerBuddyLlm(ctx, {
@@ -296,7 +296,7 @@ export function apply(ctx: Context): void {
   // 与 CodeBuddy 同源（同后端、同协议），差异全部由 product 配置承载。
   // 服务名由 BuddyAuth 依 product.id 派生，故两个产品分别注册为
   // ctx.buddyAuth / ctx.workbuddyAuth，互不覆盖。
-  // 同样不注册斜杠命令：入口在 Jet Hub 的 WorkBuddy 面板。
+  // 同样不注册斜杠命令：入口在 Account Hub 的 WorkBuddy 面板。
   const workbuddy = new BuddyAuth(ctx, { product: WORKBUDDY })
   registerBuddyLlm(ctx, {
     credentialRef: credentialRef(WORKBUDDY.defaultCredentialRef),
@@ -316,7 +316,7 @@ export function apply(ctx: Context): void {
   // 第三个产品线，但协议与腾讯系**完全不同**：不走 external-link 轮询登录，
   // 而是本地回调 + authCode 换 token（见 src/lobsterai-oauth.ts）。
   // 服务名由 LobsteraiAuth 依 product.id 派生，注册为 ctx.lobsteraiAuth。
-  // 与其他 provider 一样不注册斜杠命令：入口在 Jet Hub 的 LobsterAI 面板。
+  // 与其他 provider 一样不注册斜杠命令：入口在 Account Hub 的 LobsterAI 面板。
   const lobsterai = new LobsteraiAuth(ctx)
   // 与 resolveCredential 共用同一个选号器：两者必须挑到**同一个**账号，
   // 否则「刷新的是解析凭据时所用的那个账号」这条不变量会被打破
@@ -339,7 +339,7 @@ export function apply(ctx: Context): void {
       // `LOBSTERAI_ACCESS_TOKEN`。两者错配的后果是 —— 适配器检测到池凭据
       // 过期 → 调 refresh → 成功回写到**另一个** ref → 再 resolve 仍取到
       // 那份未更新的过期凭据 → 带着过期 token 发请求 → 401。
-      // 用户看到的是「刚在 Jet Hub 登录好，却一直认证失败」，
+      // 用户看到的是「刚在 Account Hub 登录好，却一直认证失败」，
       // 而日志里续期全是成功的，极难排查。
       //
       // 与 Go 一致：`handler.go:197-209` 也是先 Pick 出账号、再对该账号
@@ -401,7 +401,7 @@ export function apply(ctx: Context): void {
     lobsterai.stop()
   }, 'codearts-auth.scheduler (legacy)')
 
-  // ===== Jet Hub RPC 注册 =====
+  // ===== Account Hub RPC 注册 =====
   registerJetHubRpc(ctx, pool, service, buddy, workbuddy, lobsterai)
   ctx.provide('accountPool', pool)
 }

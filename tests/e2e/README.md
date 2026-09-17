@@ -12,7 +12,7 @@
 | `buddy-pool-probe.e2e.spec.ts` | `DSH_BUDDY_POOL_E2E=1` + `DSH_BUDDY_POOL_E2E_CONFIRM=yes` | 用账号池凭据走完整 LLM 链路 |
 | `buddy-ratelimit-probe.e2e.spec.ts` | `DSH_BUDDY_RATELIMIT_E2E=1` + `DSH_BUDDY_RATELIMIT_E2E_CONFIRM=yes` | 对记录「限额重置」的账号实发一次请求，**判定是否真限流** |
 
-> LobsterAI **没有**发 chat 请求的 e2e —— 它的对话链路可在 Jet Hub 里人工验证
+> LobsterAI **没有**发 chat 请求的 e2e —— 它的对话链路可在 Account Hub 里人工验证
 > （选一个模型发一句话即可），单独写探针的边际价值低于维护成本。
 > 认证与签到已有只读探针（见下表）。
 
@@ -64,7 +64,7 @@ pnpm test:e2e:lobsterai-claim
 
 ## 限流真实性判定
 
-`buddy-ratelimit-probe.e2e.spec.ts` 回答一个运维问题：Jet Hub 账号卡片显示
+`buddy-ratelimit-probe.e2e.spec.ts` 回答一个运维问题：Account Hub 账号卡片显示
 「限额重置」时，**该账号此刻到底还受不受限**。
 
 徽章只比较 `modelRateLimits[model] > Date.now()`，是**历史事件的快照**，
@@ -82,7 +82,7 @@ pnpm test:e2e:lobsterai-claim
 
 ## 设置页的「重测 / 重置」
 
-同一套判定也提供在设置页（Jet Hub）上，无需跑 e2e：
+同一套判定也提供在设置页（Account Hub）上，无需跑 e2e：
 
 | 按钮 | 行为 | 是否发请求 |
 |------|------|-----------|

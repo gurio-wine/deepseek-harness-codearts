@@ -194,7 +194,7 @@ export class CodeArtsAuth extends Service {
    *
    * 与 {@link refresh} 的区别（与 `BuddyAuth.refreshAccountCredential` 同因）：
    * `refresh()` 读写的是 `CODEARTS_ACCESS_TOKEN` 这个**默认单凭据 ref**，
-   * 而 Jet Hub 账号卡片对应的是 `CODEARTS_ACCOUNT_XXX` ——
+   * 而 Account Hub 账号卡片对应的是 `CODEARTS_ACCOUNT_XXX` ——
    * 用 `refresh()` 去刷账号池里的账号，实际刷的是另一个凭据。
    *
    * 同样**不触碰** `refreshTokenInvalid` / `lastRefreshError` / 调度器：

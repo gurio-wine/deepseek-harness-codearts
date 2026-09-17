@@ -4,7 +4,7 @@
  * 与 `src/credits.ts`（CodeBuddy 版）**刻意分开**：两者协议没有一处共用，
  * 硬合并只会让那个文件出现大量 `if (provider === 'lobsterai')` 分支。
  * 但**复用它的两个类型**（`ClaimOutcome` / `CheckinStatus` 风格的判别联合），
- * 让 `computeClaimSummary` 与 Jet Hub 的结果摘要 UI 一行都不用改。
+ * 让 `computeClaimSummary` 与 Account Hub 的结果摘要 UI 一行都不用改。
  *
  * ## 协议（三步，来源 `lobsterai2api/sigin.py:51-67`）
  *
@@ -194,7 +194,7 @@ export async function fetchLobsteraiActivityContext(
  * 执行每日签到领取。
  *
  * 完整三步流程，返回与 `credits.ts` 同构的 {@link ClaimOutcome}
- * 判别联合 —— 这样 `computeClaimSummary` 与 Jet Hub 的结果摘要 UI 无需改动。
+ * 判别联合 —— 这样 `computeClaimSummary` 与 Account Hub 的结果摘要 UI 无需改动。
  *
  * 判定顺序（把「业务正常状态」与「真失败」严格分开）：
  * 1. 槽位查询失败 → `failed`；

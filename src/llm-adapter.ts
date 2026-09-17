@@ -781,14 +781,14 @@ export class CodeArtsAdapter extends LlmAdapter {
   async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
     // 必须 await：ensureRemoteModels 是异步的，早期实现用 `void` 丢弃 Promise，
     // 冷缓存时远端目录尚未落地就走静态兜底表，模型选择器会短暂显示错误的
-    // 模型集合（Jet Hub 的模型开关也据此渲染，会造成"关掉的模型又冒出来"）。
+    // 模型集合（Account Hub 的模型开关也据此渲染，会造成"关掉的模型又冒出来"）。
     await this.ensureRemoteModels()
     const source = this.remoteModels ?? DEFAULT_MODELS.map((id) => ({ id, name: id }))
     // 屏蔽视觉（VL）多模态模型（id 含 -VL- 或以 -VL 结尾，如 Qwen3-VL-235B）：
     // 这类模型上下文小（32768 tokens）、不支持工具调用（vLLM 未启用
     // auto-tool-choice，发 tools 会 400），不适合当 agent 主模型，故从列表隐藏。
     const visible = source.filter((m) => !/-VL-/i.test(m.id) && !/-VL$/i.test(m.id))
-    // 用户在 Jet Hub 关闭的模型（黑名单制：不在表里即默认打开）。
+    // 用户在 Account Hub 关闭的模型（黑名单制：不在表里即默认打开）。
     // 只影响此处对外播报的模型目录，不改变 resolveModel/stream 的路由能力
     // ——与 DSH 对 listModels 的约定一致（目录是建议性的，缺省不构成拒绝）。
     const disabled = this.options.accountPool?.disabledModelsFor(PROVIDER)
@@ -1591,7 +1591,7 @@ export function isQuotaExhausted(body: string): boolean {
  *
  * ⚠️ 这个近似的可见后果：UI 的限流/冷却徽章会显示在**当前模型**上，而不是整个
  * 账号上；账号下其它模型不会被挡（下次换个模型仍会试到这个空账号）。用户可在
- * Jet Hub 账号卡片上手动「重置」清掉这个标记。
+ * Account Hub 账号卡片上手动「重置」清掉这个标记。
  */
 export function parseQuotaExhausted(
   body: string,

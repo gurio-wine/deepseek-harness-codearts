@@ -18,7 +18,7 @@ import {
 } from './workbuddy-credential.js'
 import type { LobsteraiCredential } from '../../src/lobsterai.js'
 
-/** ref 匹配模式：Jet Hub 多账号登录生成的 `LOBSTERAI_ACCOUNT_XXXXXXXX`。 */
+/** ref 匹配模式：Account Hub 多账号登录生成的 `LOBSTERAI_ACCOUNT_XXXXXXXX`。 */
 const LOBSTERAI_ACCOUNT_REF = /^[ \t]*(LOBSTERAI_ACCOUNT_[A-Z0-9]+):/gm
 /** 单账号回退 ref（无账号池时的默认入口）。 */
 const LOBSTERAI_DEFAULT_REF = 'LOBSTERAI_ACCESS_TOKEN'

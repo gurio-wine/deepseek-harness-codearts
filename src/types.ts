@@ -68,7 +68,7 @@ export interface ProviderAccountStatus extends ProviderAccountEntry {
   source?: string
 }
 
-/** Jet Hub 在 ctx.settings 中的 schema */
+/** Account Hub 在 ctx.settings 中的 schema */
 export interface JetHubConfig {
   accounts: ProviderAccountEntry[]
   /**

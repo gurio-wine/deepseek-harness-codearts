@@ -43,7 +43,7 @@ refresh: () => lobsterai.refresh(),   // ② 刷新的是 LOBSTERAI_ACCESS_TOKEN
 = `LOBSTERAI_ACCESS_TOKEN`。而 ① 在账号池非空时返回的是**账号卡片的凭据**
 （`LOBSTERAI_ACCOUNT_XXX`）。二者是不同的 ref。
 
-**触发条件**：Jet Hub 里通过「+ 新建账号」登录（凭据落在 `LOBSTERAI_ACCOUNT_*`），
+**触发条件**：Account Hub 里通过「+ 新建账号」登录（凭据落在 `LOBSTERAI_ACCOUNT_*`），
 且该凭据过期。适配器检测到过期 → 调 `refresh()` → 刷新并回写 `LOBSTERAI_ACCESS_TOKEN`
 → 再次 `resolveCredential()` **仍从池取到那条未更新的过期凭据** → 带着过期 token 发请求。
 

@@ -1,4 +1,4 @@
-# dsh-codearts-auth
+# dsh-account-hub
 
 deepseek-harness 插件：执行 CodeArts（华为云）登录流程，默认走新式 IAM OAuth
 （portal `/authorize` 授权 → 本地 `/oauth/callback` 回调 → STS token 端点换取含
@@ -14,14 +14,14 @@ deepseek-harness 插件：执行 CodeArts（华为云）登录流程，默认走
 - **lobsterai（有道 LobsterAI / 龙虾）** — 见 [LobsterAI provider](#lobsterai-provider)；
   另支持「一键领取积分」（每日签到）。
 
-四个 provider 的 Jet Hub 面板都提供「**显示列表**」按钮，可逐个开关模型以控制其
+四个 provider 的 Account Hub 面板都提供「**显示列表**」按钮，可逐个开关模型以控制其
 是否出现在对话框的模型选择里（黑名单制，默认全部显示）——
 见 [模型列表开关](#模型列表开关黑名单)。
 
 ## 仓库来源
 
 本仓库是**独立维护**的 GitHub 仓库
-（[gurio-wine/deepseek-harness-codearts](https://github.com/gurio-wine/deepseek-harness-codearts)），
+（[gurio-wine/dsh-account-hub](https://github.com/gurio-wine/dsh-account-hub)），
 也是安装与升级的**唯一上游**。它的原始来源是 Gitee 上的
 [iJetLi/deepseek-harness-codearts](https://gitee.com/iJetLi/deepseek-harness-codearts)：
 早期为镜像同步，现已脱离该仓库独立演进，功能与修复不再回传。谨向原始作者致谢。
@@ -42,13 +42,13 @@ deepseek-harness 插件：执行 CodeArts（华为云）登录流程，默认走
 
 ```yaml
 allowBuilds:
-  dsh-codearts-auth@git+https://github.com/gurio-wine/deepseek-harness-codearts.git: true
+  dsh-account-hub@git+https://github.com/gurio-wine/dsh-account-hub.git: true
 ```
 
 再用 `dsh plugin add` 从 GitHub 拉取并安装：
 
 ```sh
-dsh plugin --profile <name> add "https://github.com/gurio-wine/deepseek-harness-codearts.git"
+dsh plugin --profile <name> add "https://github.com/gurio-wine/dsh-account-hub.git"
 ```
 
 `add` 以 `git+https` 方式安装，pnpm 会运行 `prepare` 脚本自动构建 `lib/`，无需
@@ -66,12 +66,34 @@ dsh plugin --profile <name> install <path-to-this-repo>
 
 > `dsh plugin install` 以 `link:` 方式安装，pnpm 不会为 `link:` 依赖运行
 > `prepare` 脚本，因此必须先手动执行 `pnpm build:all` 生成 `lib/`，否则 dsh 启动时
-> 报 `ERR_MODULE_NOT_FOUND: ... dsh-codearts-auth/lib/index.js`。
+> 报 `ERR_MODULE_NOT_FOUND: ... dsh-account-hub/lib/index.js`。
 > 注意必须用 `build:all` 而非 `build`：后者只编译宿主侧，不产出
 > `lib/client/jet-hub.js`。
 
 每次修改 `src/` 或 `plugin-src/` 后都需要重新执行 `pnpm build:all`——dsh 启动时
 不会自动重建。
+
+### 从 dsh-codearts-auth 迁移
+
+本插件原名 `dsh-codearts-auth`，设置页品牌为旧名，现统一更名为
+`dsh-account-hub`（设置页显示 "Account Hub"）。**只有品牌层改名**，代码标识符与
+存储键一律未动，因此迁移不丢数据。
+
+已安装旧包的用户按两步走：
+
+```sh
+dsh plugin --profile <name> remove dsh-codearts-auth
+dsh plugin --profile <name> add "https://github.com/gurio-wine/dsh-account-hub.git"
+```
+
+别忘了同步 profile 的 `pnpm-workspace.yaml`：`allowBuilds` 里旧包的整行替换为新包名
+（即上面「方式一」那段）。GitHub 对旧地址有自动重定向，但仍建议直接写新地址。
+
+> **账号与模型开关不会丢。** 账号索引与 `disabledModels` 模型开关存在 settings 的
+> `jet-hub` 命名空间里，凭据存在 `ctx.credentials` 中（ref 如
+> `CODEARTS_ACCESS_TOKEN` / `BUDDY_ACCOUNT_XXX`）。这些**都是代码标识符，改名时刻意
+> 保持原样** —— 变的只有包名与界面文案，所以重装后账号池、登录状态与显示列表设置
+> 直接续用，无需重新登录。
 
 ### 通用说明
 
@@ -158,7 +180,7 @@ Tokens 福利）。
 - `pnpm build` — 用 tsc 将 `src/` 编译到 `lib/`（生成 `.js`、`.d.ts` 和 source
   map）。插件**宿主侧**入口是 `lib/index.js`。
 - `pnpm build:client` — 用 esbuild 将 `plugin-src/client/` 打包为
-  `lib/client/jet-hub.js`（Jet Hub 设置页的客户端 bundle，由 `exports["./client"]`
+  `lib/client/jet-hub.js`（Account Hub 设置页的客户端 bundle，由 `exports["./client"]`
   引用）。它**不在** `tsc` 的编译范围内，必须单独构建。
 - `pnpm build:all` — 依次执行上面两步（`build` + `build:client`），是完整的构建。
 - `pnpm typecheck` — 只做类型检查（`tsc --noEmit`），不产出文件，可在构建前快速
@@ -166,7 +188,7 @@ Tokens 福利）。
 
 `lib/` 已被 gitignore，因此构建是安装或运行前的必需步骤。只执行 `pnpm build`
 会漏掉客户端 bundle，dsh 启动时会因 `exports["./client"]` 指向的文件不存在而
-加载失败（Jet Hub 设置页不显示），请改用 `pnpm build:all`。
+加载失败（Account Hub 设置页不显示），请改用 `pnpm build:all`。
 
 每次修改 `src/` 或 `plugin-src/` 后都需要重新执行 `pnpm build:all`——dsh 启动时
 不会自动重建。
@@ -210,7 +232,7 @@ bundle）。
 5. 续期：`POST /v2/plugin/auth/token/refresh`，通过 `X-Refresh-Token` 头提交
    refresh_token。
 
-- **登录入口：Jet Hub 设置页的 CodeBuddy 面板**（支持多账号与账号池自动切换）。
+- **登录入口：Account Hub 设置页的 CodeBuddy 面板**（支持多账号与账号池自动切换）。
   已不再注册斜杠命令 —— 设置面板已覆盖登录、状态查看与续期，命令式入口冗余。
 - 编程式调用：`ctx.buddyAuth.login()` / `status()` / `refresh()` / `logout()` /
   `fetchModels()`。
@@ -251,34 +273,34 @@ bundle）。
 `workbuddy`，`X-Domain` 随 `apiDomain` 切换为 `www.workbuddy.ai`。
 
 **没有每日签到积分**：国际版后端不提供**签到**接口（内核中只有
-`/v2/billing/meter/get-dosage-notify` 用量通知），因此 Jet Hub 的 WorkBuddy
+`/v2/billing/meter/get-dosage-notify` 用量通知），因此 Account Hub 的 WorkBuddy
 面板**不显示「一键领取积分」按钮**；签到领取在 CodeBuddy 面板完成。
 
 > **但积分余额（Credits Balance）可以查。** 签到与余额是两项独立能力：国际版
 > 确实没有签到，但**有**积分余额查询接口，见下节。不要因为"没有签到"就推断
 > 也查不到余额。
 
-- **登录入口：Jet Hub 设置页的 WorkBuddy 面板**（支持多账号与账号池自动切换）。
+- **登录入口：Account Hub 设置页的 WorkBuddy 面板**（支持多账号与账号池自动切换）。
   同样不注册斜杠命令。
 - 编程式调用：`ctx.workbuddyAuth.login()` / `status()` / `refresh()` / `logout()` /
   `fetchModels()`。
 - 凭据 ref：
   - 单账号：`WORKBUDDY_ACCESS_TOKEN`，值为含 `access_token` / `refresh_token` /
     `expires_at` 的 JSON 字符串（与 `BUDDY_ACCESS_TOKEN` 同构）。
-  - 多账号：`WORKBUDDY_ACCOUNT_<UUID_SHORT>`，由 Jet Hub 设置页「+ 新建账号」
+  - 多账号：`WORKBUDDY_ACCOUNT_<UUID_SHORT>`，由 Account Hub 设置页「+ 新建账号」
     登录时自动生成并登记到账号池；每条账号记录带 `provider: 'workbuddy'`，
     与 CodeBuddy 的 `BUDDY_ACCOUNT_*` 相互隔离，不会串用凭据或限流标记。
 - **从中国版升级**：本插件早期版本把 `workbuddy` 指向中国版
   （`copilot.tencent.com`）。启动时会自动清理凭据 `domain` 与当前
   `apiDomain` 不符的旧账号（这类凭据在新端点必然失败），清理结果记入日志，
-  请在 Jet Hub 重新登录。
+  请在 Account Hub 重新登录。
 - 续期：与 CodeBuddy 共用同一套机制，插件启动后每 30 分钟对可续期账号静默刷新
   （`refresh_token` 经 `X-Refresh-Token` 头提交），无需重新打开浏览器。
 - 请求头、模型列表拉取与流式工具调用 id 处理均与 CodeBuddy 一致，详见上一节。
 
-### 与 Jet Hub 设置页的关系
+### 与 Account Hub 设置页的关系
 
-Jet Hub（设置页）的账号面板按 provider 分组展示，WorkBuddy 是其中一栏：
+Account Hub（设置页）的账号面板按 provider 分组展示，WorkBuddy 是其中一栏：
 
 - 面板提供账号列表、新建账号（浏览器登录入池）、启用/停用、删除，以及「重测 /
   重测所有 / 重置 / 重置所有」限流标记操作，行为与 CodeBuddy 面板一致，但
@@ -294,7 +316,7 @@ Jet Hub（设置页）的账号面板按 provider 分组展示，WorkBuddy 是�
 
 ### 模型列表开关（黑名单）
 
-Jet Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的**全部模型**，每个模型
+Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的**全部模型**，每个模型
 后面带一个开关，**默认打开**。关闭后该模型不再出现在对话框的模型选择列表里。
 
 采用**黑名单制**：只有被显式关闭的模型会被隐藏，未记录的模型（含服务端后续新增的
@@ -360,7 +382,7 @@ Jet Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的**�
 实现各自独立）。CodeArts 是华为云账号体系不参与；WorkBuddy
 国际版后端没有签到接口，故其面板也不显示。
 
-在 Jet Hub 对应面板标题栏点击「**一键领取积分**」，插件会对该面板下
+在 Account Hub 对应面板标题栏点击「**一键领取积分**」，插件会对该面板下
 **全部账号**顺序执行每日签到领取：
 
 > **含已停用账号。** 停用只影响账号池的自动选择与限流切换，不改变账号本身
@@ -429,13 +451,13 @@ Bearer `access_token` 鉴权。
 | 图片输入 | 支持 | **不支持**（`inputModalities` 仅 `text`） |
 | 思考等级 | 支持（按模型声明档位） | **不声明**（是否支持未实测） |
 
-- **登录入口：Jet Hub 设置页的 LobsterAI 面板**（支持多账号与账号池自动切换）。
+- **登录入口：Account Hub 设置页的 LobsterAI 面板**（支持多账号与账号池自动切换）。
   不注册斜杠命令。
 - 编程式调用：`ctx.lobsteraiAuth.login()` / `status()` / `refresh()` / `logout()` /
   `fetchModels()` / `resolveClientVersion()`。
 - 凭据 ref：
   - 单账号：`LOBSTERAI_ACCESS_TOKEN`；
-  - 多账号：`LOBSTERAI_ACCOUNT_<UUID_SHORT>`，由 Jet Hub「+ 新建账号」生成。
+  - 多账号：`LOBSTERAI_ACCOUNT_<UUID_SHORT>`，由 Account Hub「+ 新建账号」生成。
 - 凭据结构（JSON 字符串）：除 `access_token` / `refresh_token` / `expires_at` 外，
   还持久化 `uuid` / `first_keyfrom` / `latest_keyfrom` 三个**身份字段** ——
   它们是续期请求体的必填项，丢失会导致静默续期失败、只能重新登录。

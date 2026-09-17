@@ -782,10 +782,10 @@ export function JetHubPage({ close, rpcCall }) {
     setVersion(v => v + 1);
   };
 
-  return React.createElement('section', { className: 'dim-jh-page', 'aria-label': 'Jet Hub Provider 设置' },
+  return React.createElement('section', { className: 'dim-jh-page', 'aria-label': 'Account Hub 账号管理' },
     React.createElement('header', { className: 'dim-jh-header' },
       React.createElement('div', { className: 'dim-jh-brand' },
-        React.createElement('strong', { className: 'dim-jh-brandName' }, 'Jet Hub'),
+        React.createElement('strong', { className: 'dim-jh-brandName' }, 'Account Hub'),
         React.createElement('p', { className: 'dim-jh-brandDesc' }, 'Provider 凭据管理与多账号支持')),
       close ? React.createElement('button', {
         className: 'dim-jh-btn',

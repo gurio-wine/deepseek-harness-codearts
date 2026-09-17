@@ -6,7 +6,7 @@
  * 1. **workbuddy 分支缺失**：原实现只判 `codearts` / `buddy`，workbuddy 落入
  *    else 抛 `Unknown provider` —— 即 WorkBuddy 账号卡片的「刷新」按钮一直是坏的。
  * 2. **刷错凭据**：原实现调 `service.refresh()`，而该方法读写的是该 provider 的
- *    **默认单凭据 ref**（如 `BUDDY_ACCESS_TOKEN`），Jet Hub 账号卡片对应的却是
+ *    **默认单凭据 ref**（如 `BUDDY_ACCESS_TOKEN`），Account Hub 账号卡片对应的却是
  *    `BUDDY_ACCOUNT_XXX` —— 于是「刷新这个账号」实际刷的是另一个凭据。
  *
  * 这两个缺陷都无法靠 `collect*` 那类纯函数测试发现（它们不在那条代码路径上），

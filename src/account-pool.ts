@@ -15,7 +15,7 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/** Jet Hub schema namespace（必须在 ctx.settings 中注册后才能读写） */
+/** Account Hub schema namespace（必须在 ctx.settings 中注册后才能读写） */
 export const JET_HUB_NS = 'jet-hub'
 
 /**
@@ -47,7 +47,7 @@ interface SettingsServiceLike {
 }
 
 /**
- * Jet Hub 的 settings schema。
+ * Account Hub 的 settings schema。
  *
  * 必须是 **schemastery schema**，不能是裸函数。schemastery 对象既可调用
  * （`schema(value)` 解析，满足 SettingsProvider.resolve 的用法），又有
@@ -279,7 +279,7 @@ export class AccountPool {
    * 用途：WorkBuddy provider 从中国版（copilot.tencent.com）改造为国际版
    * （www.workbuddy.ai）后，旧账号存的仍是中国版凭据 —— 它们的
    * `token.domain` 指向旧端点，用新 endpoint 发请求必然失败（且会一直续期失败）。
-   * 这类条目已无修复价值，直接删除，让用户在 Jet Hub 重新登录。
+   * 这类条目已无修复价值，直接删除，让用户在 Account Hub 重新登录。
    *
    * 判据是**凭据里记录的 domain 与产品配置的 apiDomain 不一致**（而不是简单按
    * provider 名删），这样只清理真正失配的条目，不会误删已在新端点登录的账号。

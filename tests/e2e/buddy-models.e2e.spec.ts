@@ -66,7 +66,7 @@ const MODELS = [
  * 解析真实凭据：优先从 DSH_BUDDY_CREDENTIAL_JSON 环境变量读取
  * （JSON 字符串，与 BUDDY_ACCESS_TOKEN 存储值同构），其次从
  * DSH_BUDDY_ACCESS_TOKEN / DSH_BUDDY_REFRESH_TOKEN 拼装。
- * 两种方式都要求调用方先在 Jet Hub 的 CodeBuddy 面板完成登录并把凭据注入环境。
+ * 两种方式都要求调用方先在 Account Hub 的 CodeBuddy 面板完成登录并把凭据注入环境。
  */
 function loadCredentialFromEnv(): BuddyCredential {
   const json = process.env.DSH_BUDDY_CREDENTIAL_JSON
@@ -86,7 +86,7 @@ function loadCredentialFromEnv(): BuddyCredential {
     }
   }
   throw new Error(
-    'e2e 用例需要真实 CodeBuddy 凭据。请先在 Jet Hub 的 CodeBuddy 面板登录，然后设置 '
+    'e2e 用例需要真实 CodeBuddy 凭据。请先在 Account Hub 的 CodeBuddy 面板登录，然后设置 '
       + 'DSH_BUDDY_CREDENTIAL_JSON（推荐，与 BUDDY_ACCESS_TOKEN 存储值同构的 JSON 字符串）'
       + '或 DSH_BUDDY_ACCESS_TOKEN / DSH_BUDDY_REFRESH_TOKEN 环境变量。',
   )

@@ -197,7 +197,7 @@ export class LobsteraiAuth extends Service {
    * 运行完整登录流程并持久化凭据。
    *
    * `accountId` + `pool` 同时提供时，登录成功后自动把账号登记进账号池
-   * （Jet Hub 的「+ 新建账号」路径）。
+   * （Account Hub 的「+ 新建账号」路径）。
    */
   async login(
     flowOptions: { refName?: string; accountId?: string; pool?: AccountPool } & Partial<LobsteraiLoginFlowOptions> = {},
@@ -347,7 +347,7 @@ export class LobsteraiAuth extends Service {
    *
    * 与 {@link refresh} 的区别（与 `BuddyAuth.refreshAccountCredential` 同因）：
    * `refresh()` 读写本实例的默认单凭据 ref（`LOBSTERAI_ACCESS_TOKEN`），
-   * 而 Jet Hub 账号卡片对应的是 `LOBSTERAI_ACCOUNT_XXX` ——
+   * 而 Account Hub 账号卡片对应的是 `LOBSTERAI_ACCOUNT_XXX` ——
    * 用 `refresh()` 刷账号池里的账号，实际刷的是另一个凭据。
    *
    * 同样**不触碰** `refreshTokenInvalid` / `lastRefreshError` / 调度器：

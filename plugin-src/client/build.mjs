@@ -6,7 +6,7 @@ import { build } from 'esbuild';
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(sourceDirectory, '../..');
 const outputPath = resolve(packageRoot, 'lib/client/jet-hub.js');
-const loaderId = 'dsh-codearts-auth';
+const loaderId = 'dsh-account-hub';
 
 const result = await build({
   entryPoints: [resolve(sourceDirectory, 'index.js')],

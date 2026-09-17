@@ -284,7 +284,7 @@ const WORKBUDDY_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
  * - `prefixPath` = "/plugin"（与中国版相同）
  *
  * 该产品**没有**每日签到积分接口（内核中只有 `/v2/billing/meter/get-dosage-notify`），
- * 因此 Jet Hub 不为其渲染「一键领取积分」按钮；积分领取在 CodeBuddy 侧完成。
+ * 因此 Account Hub 不为其渲染「一键领取积分」按钮；积分领取在 CodeBuddy 侧完成。
  */
 export const WORKBUDDY: BuddyProduct = {
   id: 'workbuddy',

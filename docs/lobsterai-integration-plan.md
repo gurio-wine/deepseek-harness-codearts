@@ -1,7 +1,7 @@
 # LobsterAI 接入方案（feat/lobsterai）
 
-> 目标：把有道 LobsterAI 作为第四个 LLM provider 接入本插件（`dsh-codearts-auth`），
-> 复用现有的账号池、Jet Hub 设置页、限流切换、模型黑名单等全部能力。
+> 目标：把有道 LobsterAI 作为第四个 LLM provider 接入本插件（`dsh-account-hub`），
+> 复用现有的账号池、Account Hub 设置页、限流切换、模型黑名单等全部能力。
 >
 > 参考实现：`E:\Workplace\APP\dsh-plugin\lobsterai2api`（Go，反向桥接服务）
 > 签到参考：`E:\Workplace\APP\dsh-plugin\lobsterai2api\sigin.py`
@@ -142,7 +142,7 @@ TypeScript 适配器**，而不是把 Go 二进制作为前置依赖跑起来。
 
 收益：
 - 少一个进程、少一个端口、少一份配置（`config.json` / `auths/` 目录 / `state.json`）；
-- 账号池与 Jet Hub 复用现成实现，不出现「两套账号池各管一半」；
+- 账号池与 Account Hub 复用现成实现，不出现「两套账号池各管一半」；
 - 凭据进 `ctx.credentials`（走 DSH 的凭据服务），而不是散落在 `auths/*.json`；
 - 签到不再依赖 `python3`（`sigin.py`）与 shell（`login.sh`/`credit.sh`）；
 - Windows 上 `login.sh` 本来就跑不了（bash + `docker ps` + `python3`）。
@@ -169,7 +169,7 @@ TypeScript 适配器**，而不是把 Go 二进制作为前置依赖跑起来。
 
 ## 1. 两个项目的定位差异
 
-| 维度 | `lobsterai2api`（Go） | `dsh-codearts-auth`（本插件，TS） |
+| 维度 | `lobsterai2api`（Go） | `dsh-account-hub`（本插件，TS） |
 |------|----------------------|--------------------------------|
 | 形态 | 独立 HTTP 服务，监听 `:8367` | DSH 宿主内插件，进程内 `ctx` 服务 |
 | 对外协议 | 自己实现 OpenAI 兼容 `/v1/chat/completions` | 由 `ctx.llm` 承担，插件只注册 Adapter |
@@ -284,7 +284,7 @@ export const CODEBUDDY: BuddyProduct = {
 ```ts
 export interface LobsteraiProduct {
   id: 'lobsterai'
-  /** 展示名（Jet Hub 面板标题 / 模型设置页） */
+  /** 展示名（Account Hub 面板标题 / 模型设置页） */
   displayName: string
   /** 登录 portal 基址（实测 https://lobsterai.youdao.com，见 §0.2b） */
   portalBase: string
@@ -405,7 +405,7 @@ POST {serverBase}/api/auth/exchange
 | `/tmp/lb2api-login-state.json`（跨进程状态） | 进程内 `Promise`（`src/login.ts:165-168` 的 `result`） | ❌ |
 | `python3` 解析 JSON | JS 原生 `JSON.parse` | ❌ |
 | `docker restart` 加载账号 | `ctx.credentials.set()` 即时生效，账号池读的是进程内副本 | ❌ |
-| `read -rp` 人工确认「按 y」 | Jet Hub 弹窗轮询 `login.poll`（`jet-hub-rpc.ts:478-488`） | ❌ |
+| `read -rp` 人工确认「按 y」 | Account Hub 弹窗轮询 `login.poll`（`jet-hub-rpc.ts:478-488`） | ❌ |
 | `LB2A_LOGIN_PORTAL` / `LB2A_UPSTREAM_BASE` env | 写进 `LobsteraiProduct` 常量（§3.1-C） | ❌ |
 
 → 这正是 §0.3「不需要跑那个反代」在**具体依赖**层面的体现：
@@ -450,7 +450,7 @@ return listenOnCallbackPort(server).then((port) => ({ port, server, result }))
 `src/buddy-oauth.ts:468-508` `runBuddyLoginFlow`：
 `fetchAuthState` → 打开浏览器 → `loopGetToken`（1 秒间隔轮询）→ `getAccount`。
 
-**Jet Hub 的两步式封装**（`src/jet-hub-rpc.ts:376-438` `account.create`）：
+**Account Hub 的两步式封装**（`src/jet-hub-rpc.ts:376-438` `account.create`）：
 - 第一步：同步取 `state` + `loginUrl` 返回给前端弹窗；
 - 第二步：用**同一个 state** 后台异步跑完 `runBuddyLoginFlow`，
   成功写 `ctx.credentials`、失败则删除占位账号。
@@ -500,7 +500,7 @@ export interface LobsteraiLoginFlowResult {
 7. **响应信封**：`{code, msg, data}`，`code !== 0` 或 `data` 非对象即失败
    （对齐 `main.go:147-149` 与 `sigin.py:44-48` 的双重校验）。
 
-8. **Jet Hub 集成**：LobsterAI 走**同步**执行（像 CodeArts 那样）：
+8. **Account Hub 集成**：LobsterAI 走**同步**执行（像 CodeArts 那样）：
 
    ```ts
    } else if (provider === 'lobsterai') {
@@ -948,7 +948,7 @@ export function classifyLobsteraiError(status: number, body: string): LobsteraiE
 
 理由：Go 的自动冷却会**静默停用账号**，用户看不见原因（只在 `/status` 的
 `reason` 字段里）。本插件的哲学是「如实展示 + 用户可主动验证」，
-Jet Hub 面板上有具体账号、限流徽章与重测按钮。把自动禁用搬进来会与这套
+Account Hub 面板上有具体账号、限流徽章与重测按钮。把自动禁用搬进来会与这套
 UI 语义冲突。
 
 **但 `hard-credit` 的识别必须移植** —— 它是 LobsterAI 最主要的失败模式
@@ -1168,7 +1168,7 @@ export async function claimLobsteraiDailyCheckin(
 6. **两步预检查都要做**：`slotState === 'available'` 且有 `activity`；
    `!state.claimedToday` 且 `actions.includes('check_in')`。
 7. **复用 `ClaimOutcome` 判别联合** —— 这样 `computeClaimSummary`
-   与 Jet Hub 的结果摘要 UI **一行都不用改**。
+   与 Account Hub 的结果摘要 UI **一行都不用改**。
 8. **积分余额**：`GET {base}/api/user/profile-summary` →
    `data.totalCreditsRemaining`（`client.go:281-313`、`cmd/credit/main.go:56-101`）。
    注意注释里的坑（`client.go:282-283`）：
@@ -1298,7 +1298,7 @@ pool.listAllAccounts().then(accounts => {
 - `unref()` 避免阻塞进程退出；
 - `ctx.effect()` 注册清理钩子。
 
-**签到没有定时任务** —— `credits.claimAll` 只能由用户在 Jet Hub 点按钮触发。
+**签到没有定时任务** —— `credits.claimAll` 只能由用户在 Account Hub 点按钮触发。
 
 #### C. 推荐做法
 
@@ -1318,7 +1318,7 @@ pool.listAllAccounts().then(accounts => {
 
 ---
 
-### 3.11 Jet Hub UI 与 RPC
+### 3.11 Account Hub UI 与 RPC
 
 #### A. lobsterai2api 怎么做的
 
@@ -1577,9 +1577,9 @@ curl 命令（55-71 行）。
 
 5. **T5 — 签到与余额**
    `src/lobsterai-credits.ts` + RPC 接线
-   产出：Jet Hub 面板的「一键领取积分」与积分余额行。
+   产出：Account Hub 面板的「一键领取积分」与积分余额行。
 
-6. **T6 — Jet Hub UI**
+6. **T6 — Account Hub UI**
    `plugin-src/client/jet-hub.js` + `jet-hub-styles.js`
    产出：第四个 provider tab。
 

@@ -347,7 +347,7 @@ describe('经真实 apply() 接线：请求直接落在未被限流的账号上'
 
       apply(ctx as never)
 
-      // 经插件自己暴露的账号池写入账号（与 Jet Hub 登录后的写入路径一致）。
+      // 经插件自己暴露的账号池写入账号（与 Account Hub 登录后的写入路径一致）。
       const pool = (ctx as unknown as { accountPool: AccountPool }).accountPool
       for (const spec of [
         { id: 'a', token: 'AT-A', limits: { [MODEL]: Date.now() + HOUR } },

@@ -3,7 +3,7 @@
  *
  * ⚠️ 本用例会向 CodeBuddy 后端发起**真实模型请求，消耗账号积分**。
  *
- * 背景：Jet Hub 账号卡片上的「限额重置」徽章只比较
+ * 背景：Account Hub 账号卡片上的「限额重置」徽章只比较
  * `modelRateLimits[model] > Date.now()`——它是一个**历史事件的快照**，
  * 而不是该账号此刻的真实可用性。服务端在重置时间到达前提前放行是常见的，
  * 于是出现「卡片显示超额使用，但发消息能正常回复」。
@@ -41,7 +41,7 @@ const suite = E2E ? describe : describe.skip
 
 const TARGET_MODEL = process.env.DSH_BUDDY_MODEL ?? 'deepseek-v4.1-flash'
 
-/** settings.yaml 里解析出的一个 Jet Hub 账号条目。 */
+/** settings.yaml 里解析出的一个 Account Hub 账号条目。 */
 interface AccountEntry {
   id: string
   provider: string
@@ -194,7 +194,7 @@ suite('限流账号真实性探针', () => {
   it(`对记录受限的账号实发 ${TARGET_MODEL} 请求，判定是否真限流`, async () => {
     const accounts = readAccounts()
     const buddy = accounts.filter((a) => a.provider === 'buddy')
-    console.log('\n===== Jet Hub buddy 账号 =====')
+    console.log('\n===== Account Hub buddy 账号 =====')
     for (const a of buddy) {
       const reset = a.modelRateLimits[TARGET_MODEL]
       const state = reset === undefined

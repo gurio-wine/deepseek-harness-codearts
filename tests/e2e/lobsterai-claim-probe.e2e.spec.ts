@@ -29,7 +29,7 @@ describeGate('LobsterAI 每日签到领取探针（会改动当日签到状态�
   it('至少有一个已登录的 LobsterAI 账号', () => {
     expect(
       credentials.length,
-      '未找到 LobsterAI 凭据。请先在 Jet Hub 的 LobsterAI 面板登录一个账号。',
+      '未找到 LobsterAI 凭据。请先在 Account Hub 的 LobsterAI 面板登录一个账号。',
     ).toBeGreaterThan(0)
   })
 

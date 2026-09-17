@@ -120,7 +120,7 @@ function loadCredential(): BuddyCredential {
   if (stored !== undefined && stored.access_token.length > 0) return stored
   throw new Error(
     'e2e 探针需要真实 CodeBuddy 凭据：设置 DSH_BUDDY_CREDENTIAL_JSON，'
-      + '或先在 Jet Hub 的 CodeBuddy 面板登录，使 ~/.dsh/.credentials.yaml 中存在 BUDDY_ACCESS_TOKEN。',
+      + '或先在 Account Hub 的 CodeBuddy 面板登录，使 ~/.dsh/.credentials.yaml 中存在 BUDDY_ACCESS_TOKEN。',
   )
 }
 

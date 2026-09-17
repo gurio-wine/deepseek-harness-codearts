@@ -364,7 +364,7 @@ export class LobsteraiAdapter extends LlmAdapter {
   async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
     await this.ensureRemoteModels()
     const source = this.remoteModels ?? this.staticFallbackModels()
-    // 用户在 Jet Hub 关闭的模型（黑名单制：不在表里即默认打开）。
+    // 用户在 Account Hub 关闭的模型（黑名单制：不在表里即默认打开）。
     const disabled = this.options.accountPool?.disabledModelsFor(this.product.id)
     const listed = disabled === undefined || disabled.size === 0
       ? source

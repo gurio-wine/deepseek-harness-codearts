@@ -1,5 +1,5 @@
 /**
- * Jet Hub 多账号管理的 RPC 端点注册。
+ * Account Hub 多账号管理的 RPC 端点注册。
  *
  * 使用 DSH 的 connection.fetch.register() 模式注册 HTTP API 端点，
  * 与 dsh-im 的 registerManagementRpc 一致。
@@ -69,7 +69,7 @@ import type {
   RpcModelSetDisabledResponse,
 } from './types.js'
 
-/** Jet Hub RPC API 路径 */
+/** Account Hub RPC API 路径 */
 export const JET_HUB_API_PATH = '/api/jet-hub'
 /** Gateway RPC 端点名（connection.rpc.call 的 endpoint 参数） */
 const JET_HUB_ENDPOINT = 'jet-hub'
@@ -324,7 +324,7 @@ export async function collectCreditBalances<TCredential = BuddyCredential, TProd
 /**
  * 读取 `ctx.llm` 用于枚举 provider 的模型目录。
  *
- * 用 `ctx.get` 而不是 `inject`：Jet Hub 的账号管理是主要职责，模型开关只是
+ * 用 `ctx.get` 而不是 `inject`：Account Hub 的账号管理是主要职责，模型开关只是
  * 附加能力；llm 服务缺失时账号面板仍应可用，只是「显示列表」按钮报错。
  */
 function llmServiceOf(ctx: Context): { listModels(provider: string): Promise<Array<{ id: string; name: string }>> } | undefined {
@@ -334,7 +334,7 @@ function llmServiceOf(ctx: Context): { listModels(provider: string): Promise<Arr
 }
 
 /**
- * 注册 Jet Hub 管理 API 端点。
+ * 注册 Account Hub 管理 API 端点。
  *
  * `connection` 服务只存在于 Web bundle；这里用**惰性注入**而非插件级静态
  * `inject`，因此在 headless / CLI profile 下本模块正常加载、只是不注册端点，
@@ -353,7 +353,7 @@ export function registerJetHubRpc(
   })
 }
 
-/** 注册 Jet Hub 管理 API 端点。使用 ctx.connection.fetch.register() 注册 HTTP POST 端点。 */
+/** 注册 Account Hub 管理 API 端点。使用 ctx.connection.fetch.register() 注册 HTTP POST 端点。 */
 function registerJetHubEndpoints(
   ctx: Context,
   pool: AccountPool,
@@ -397,7 +397,7 @@ function registerJetHubEndpoints(
         || !call || typeof call.method !== 'string'
         || !Object.prototype.hasOwnProperty.call(call, 'payload')
       ) {
-        return reply(rpcId, { ok: false, error: { code: 'gateway/bad-request', message: 'Invalid Jet Hub management request.' } })
+        return reply(rpcId, { ok: false, error: { code: 'gateway/bad-request', message: 'Invalid Account Hub management request.' } })
       }
 
       try {

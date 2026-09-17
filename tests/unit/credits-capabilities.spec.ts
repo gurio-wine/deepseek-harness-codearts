@@ -11,7 +11,7 @@ import {
 /**
  * 积分能力矩阵的回归测试。
  *
- * 真实缺陷（用户报障）：打开 Jet Hub 的 **CodeArts** 面板时控制台必现
+ * 真实缺陷（用户报障）：打开 Account Hub 的 **CodeArts** 面板时控制台必现
  * ```
  * [jet-hub] load credits failed: Error: unsupported provider: codearts
  * ```

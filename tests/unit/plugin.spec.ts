@@ -188,7 +188,7 @@ describe('plugin entry', () => {
 
 describe('buddy plugin entry', () => {
   it('registers the buddyAuth service without slash commands', () => {
-    // 登录/状态/续期都在 Jet Hub 设置页完成，命令式入口已移除。
+    // 登录/状态/续期都在 Account Hub 设置页完成，命令式入口已移除。
     const { ctx, commands } = makeContext()
     apply(ctx)
     expect(ctx.buddyAuth).toBeInstanceOf(BuddyAuth)
@@ -246,14 +246,14 @@ describe('WorkBuddy provider 注册', () => {
     expect(ctx.settings.registeredNamespaces).toContain('llm-workbuddy')
   })
 
-  it('不注册任何 buddy/workbuddy 斜杠命令（入口在 Jet Hub 设置页）', () => {
+  it('不注册任何 buddy/workbuddy 斜杠命令（入口在 Account Hub 设置页）', () => {
     const ctx = createMockContext()
     apply(ctx as never)
     const names = ctx.commands.definitions.map((d) => d.name)
     for (const removed of ['buddy-login', 'buddy-status', 'buddy-refresh', 'workbuddy-login', 'workbuddy-status']) {
       expect(names, removed).not.toContain(removed)
     }
-    // codearts 的三个命令保留（CodeArts 没有 Jet Hub 登录入口的替代品）。
+    // codearts 的三个命令保留（CodeArts 没有 Account Hub 登录入口的替代品）。
     expect(names).toContain('codearts-login')
     expect(names).toContain('codearts-status')
     expect(names).toContain('codearts-refresh')
@@ -324,7 +324,7 @@ describe('WorkBuddy provider 注册', () => {
    * 会全部 exit 1。
    *
    * 正确做法是 `registerJetHubRpc` 内部用惰性注入（`ctx.inject(['connection'], …)`）
-   * 挂载端点：Web 下正常注册，其余 profile 只是不注册 Jet Hub 端点。
+   * 挂载端点：Web 下正常注册，其余 profile 只是不注册 Account Hub 端点。
    *
    * 这条断言锁住的是「**能不能加载**」而非某个功能细节，所以即便日后有人为了
    * 让 UI 更"直接"而把 connection 加回静态 inject，也必须先看到这里失败。
@@ -365,7 +365,7 @@ describe('LobsterAI provider 注册', () => {
     expect(ctx.settings.registeredNamespaces).toContain('llm-lobsterai')
   })
 
-  it('不注册任何 lobsterai 斜杠命令（入口在 Jet Hub 设置页）', () => {
+  it('不注册任何 lobsterai 斜杠命令（入口在 Account Hub 设置页）', () => {
     const ctx = createMockContext()
     apply(ctx as never)
     const names = ctx.commands.definitions.map((d) => d.name)

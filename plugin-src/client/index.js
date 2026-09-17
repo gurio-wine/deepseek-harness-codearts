@@ -1,7 +1,7 @@
 /**
- * Jet Hub 管理页面客户端插件。
+ * Account Hub 管理页面客户端插件。
  *
- * 注册 Jet Hub 设置页面到 DSH settings.section slot。
+ * 注册 Account Hub 设置页面到 DSH settings.section slot。
  */
 
 export const name = 'jet-hub-client'
@@ -23,7 +23,7 @@ export function apply(ctx) {
     name: 'settings.section',
     id: 'jet-hub',
     order: 50,
-    label: () => 'Jet Hub',
+    label: () => 'Account Hub',
     inject: () => ({ rpcCall }),
   }, JetHubPage))
 }

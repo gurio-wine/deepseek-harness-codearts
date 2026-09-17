@@ -661,7 +661,7 @@ describe('CodeArtsAdapter', () => {
   })
 
   /**
-   * 模型黑名单：Jet Hub 的「显示列表」开关关闭某模型后，它必须从
+   * 模型黑名单：Account Hub 的「显示列表」开关关闭某模型后，它必须从
    * listModels 的播报里消失 —— 对话框模型选择器读的正是这份数据。
    */
   it('hides models the user disabled from listModels', async () => {

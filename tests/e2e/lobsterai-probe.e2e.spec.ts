@@ -10,7 +10,7 @@
  * 真正领取的探针见 `lobsterai-claim-probe.e2e.spec.ts`（带二次确认闸门）。
  *
  * 闸门：`DSH_LOBSTERAI_E2E=1`。未设置时整体 skip，不产生任何网络调用。
- * 前置：先在 Jet Hub 的 LobsterAI 面板登录至少一个账号。
+ * 前置：先在 Account Hub 的 LobsterAI 面板登录至少一个账号。
  */
 
 import { describe, expect, it } from 'vitest'
@@ -37,7 +37,7 @@ describeGate('LobsterAI 认证与签到状态探针（不消耗模型积分）',
     // 前置条件缺失时给出可操作的提示，而不是一个费解的断言失败。
     expect(
       credentials.length,
-      '未找到 LobsterAI 凭据。请先在 Jet Hub 的 LobsterAI 面板登录一个账号，'
+      '未找到 LobsterAI 凭据。请先在 Account Hub 的 LobsterAI 面板登录一个账号，'
       + '或确认 DSH profile 的 .credentials.yaml 路径正确。',
     ).toBeGreaterThan(0)
   })

@@ -3,9 +3,9 @@
  *
  * ⚠️ 本用例会向 CodeBuddy 后端发起**真实模型请求，消耗账号积分**。
  *
- * 目的：验证「Jet Hub 启用账号后发送消息」这条链路上，适配器能否用账号池里的
+ * 目的：验证「Account Hub 启用账号后发送消息」这条链路上，适配器能否用账号池里的
  * 凭据正常通信。探针：
- *   1. 读取 Jet Hub 账号列表（直接解析 ~/.dsh/settings.yaml）；
+ *   1. 读取 Account Hub 账号列表（直接解析 ~/.dsh/settings.yaml）；
  *   2. 取一个已启用账号的凭据，直接构造 BuddyAdapter；
  *   3. 调用 listModels / resolveModel / prepareCall，并打印每一步返回值；
  *   4. 真正发一次最小流式请求，打印收到的 chunk 摘要。
@@ -27,7 +27,7 @@ const E2E = process.env.DSH_BUDDY_POOL_E2E === '1'
   && process.env.DSH_BUDDY_POOL_E2E_CONFIRM === 'yes'
 const suite = E2E ? describe : describe.skip
 
-/** 从 settings.yaml 里解析 Jet Hub 的启用账号（不引 yaml 依赖，按行扫描）。 */
+/** 从 settings.yaml 里解析 Account Hub 的启用账号（不引 yaml 依赖，按行扫描）。 */
 function firstEnabledAccount(): { id: string; credentialRef: string } | undefined {
   const path = join(homedir(), '.dsh', 'settings.yaml')
   const text = readFileSync(path, 'utf8')
@@ -65,7 +65,7 @@ function credentialFor(ref: string): BuddyCredential {
 suite('账号池凭据 → Buddy LLM 调用探针', () => {
   it('用启用账号的凭据完成一次最小流式调用', async () => {
     const account = firstEnabledAccount()
-    console.log('\n===== Jet Hub 首个账号 =====')
+    console.log('\n===== Account Hub 首个账号 =====')
     console.log(account ?? '(未找到)')
     expect(account).toBeDefined()
 

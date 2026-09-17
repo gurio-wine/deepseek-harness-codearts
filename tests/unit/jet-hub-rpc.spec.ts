@@ -490,7 +490,7 @@ describe('credits.balances 逐账号余额收集', () => {
 /**
  * model.list / model.setDisabled 端点。
  *
- * 这两个端点是 Jet Hub「显示列表」按钮的唯一数据通道，同时串起三件必须
+ * 这两个端点是 Account Hub「显示列表」按钮的唯一数据通道，同时串起三件必须
  * 一起正确的事：
  * 1. 列表来自 `ctx.llm.listModels()`（对话框模型选择器读的同一份目录）；
  * 2. 黑名单经 AccountPool 持久化；
