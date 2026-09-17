@@ -28,6 +28,9 @@ const STYLES = `
 .dim-jh-providerIcon.buddy { background: white; }
 .dim-jh-providerIcon.workbuddy { background: white; }
 .dim-jh-providerIcon.lobsterai { background: white; }
+/* Trae CN 的品牌标识自带深色圆角底（#1A1B1D），自带底色的图标不该再靠容器配色，
+   故与其余图标一致保持 white：容器只负责留白与投影，深色方块居中显示。 */
+.dim-jh-providerIcon.trae-cn { background: white; }
 
 /* provider 文案：align dsh-im .dim-channelCopy */
 .dim-jh-providerLabel { min-width: 0; display: grid; }
@@ -67,6 +70,9 @@ const STYLES = `
    数值 + 次要说明，而 dd 默认样式是为单行截断文本准备的。 */
 .dim-jh-metaRow dd.dim-jh-creditValue { display: flex; flex-direction: row; align-items: baseline; gap: 6px; overflow: visible; }
 .dim-jh-creditTotal { font-size: 13px; font-weight: 600; color: #1677ff; font-variant-numeric: tabular-nums; }
+/* Work 积分池：刻意用**弱化**色而不是主数字的蓝色 —— chat 只扣通用池，
+   把 Work 也渲染成高亮蓝会让用户以为它同样可用于对话。 */
+.dim-jh-creditWork { font-size: 12px; color: var(--dsw-alias-label-secondary, #646a73); font-variant-numeric: tabular-nums; }
 .dim-jh-creditPackages { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* 已失效额度：弱化的橙色提示，与主数值的蓝色明确区分 */
 .dim-jh-creditExpired { font-size: 11px; color: #b45309; }

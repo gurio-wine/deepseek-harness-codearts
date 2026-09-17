@@ -21,7 +21,7 @@
 
 `trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。它比 `lobsterai` 还要再少一步：**回调 query 直接携带 refreshToken**，没有 authCode 交换；续期走 `POST …/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**产品配置 + 认证 + 模型路由（`src/trae-cn-adapter.ts`）+ 签到与积分余额（`src/trae-cn-credits.ts`）均已实现**。三个关键事实决定了它的适配器与其它 provider 结构不同：**SSE 是具名事件流**（`event:output`，不是 OpenAI 的 `data:{choices}`）、**业务失败发生在 HTTP 200 的 `event:error` 帧里**（故换号循环必须接住流内失败，错误分类按业务码而非状态码，见 `src/trae-cn-errors.ts`）、**签到必须带设备四件套**（见「积分领取」）。回调 URL 形态（T5）、chat 端点路径（T6）与签到/余额的若干字段名（T7 / T8）**尚未真机实测**，实现采「候选表 + 常量」策略，详见 README 的「Trae CN provider」章节。
 
-Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**当前由 CodeBuddy 与 LobsterAI 两个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。Trae CN 的**后端**签到与余额已就绪（`src/trae-cn-credits.ts`），但客户端能力矩阵尚未登记它，故其面板暂时也不显示该按钮（见「积分能力必须在请求前判定」）。
+Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**由 CodeBuddy、LobsterAI 与 Trae CN 三个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。Trae CN 的签到与余额**前后端均已就绪**（`src/trae-cn-credits.ts` + 客户端能力矩阵已登记）。⚠️ **但它的宿主侧接线尚未完成**：`account.create` / `account.refresh` / `account-probe` 三处都还没有 `trae-cn` 分支，`registerJetHubRpc` 也未接收 `traeCn` 实例，故 Trae CN 面板**暂时无法新建账号**（回 `unknown provider: trae-cn`），双池展示拿不到真实数据。详见「积分能力必须在请求前判定」。
 
 - **包名**：`dsh-account-hub`
 - **入口**：`lib/index.js`（宿主侧）、`lib/client/jet-hub.js`（客户端 bundle）
@@ -198,7 +198,7 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 - **Trae CN**：`POST /trae/api/v2/pay/web_user_ent_usage`，body `{"require_usage":true}`
   - 礼包按 **`available_endpoint` 分池**：`0`=通用积分、`1`=Work 积分
   - **展示口径**：通用池（endpoint=0）之和是**主数字**（`total`）；Work 池走**单独的 `workTotal` 字段**，**绝不合并** —— chat 只扣通用池，合并会让用户以为 Work 额度能用来对话
-  - 返回类型 `TraeCnCreditBalance` 是 `CreditBalance` 的**超集**（多 `pools` / `workTotal`），故收集器能直接复用。⚠️ **但 `CreditBalanceRow` 目前只渲染 `total`，还没渲染 `workTotal`** —— 双池在界面上分开展示要等第四步改前端（架构上无法绕过：Card 是固定组件），改动后须 `pnpm build:all` 重建 bundle
+  - 返回类型 `TraeCnCreditBalance` 是 `CreditBalance` 的**超集**（多 `pools` / `workTotal`），故收集器能直接复用。**前端已消费 `workTotal`**：`CreditBalanceRow` 在该字段存在且可解析时渲染「通用 X / Work Y」两段（Work 用弱化色，绝不与通用相加）；其余 provider 的余额对象没有该字段，渲染逐元素不变，由 `tests/unit/jet-hub-credit-balance-row.spec.ts` 的整树深比较守住。改前端后须 `pnpm build:all` 重建 bundle
   - **不要**用 `ug/activity/info` 的活动口径（写 200 work 实到 150 通用，口径陷阱）
   - 包名回退链：`name` → `package_name` → `gift_name` → …（`BALANCE_NAME_FIELDS`）；非通用池的包名在 `packages` 里带 `[Work 积分]` 前缀
   - **字段名 T7 待校准**：礼包数组位置与余额字段用候选表 + 「`available_endpoint` 指纹扫描」兜底，余额取数三级回退（remain 类字段 → 总额−已用 → 把 `total_amount` 当余额并**如实把 total 置 0**）
@@ -219,15 +219,16 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 | `buddy` | ✓ | ✓ |
 | `workbuddy` | ✓ | ✗（国际版后端无签到接口） |
 | `lobsterai` | ✓ | ✓（`client-activities` 三步流程） |
-| `trae-cn` | ✗（**待第四步登记**，后端已就绪） | ✗（同上） |
+| `trae-cn` | ✓（双池，见下） | ✓（`checkin_credits` 两步 + 设备头） |
 
 要点：
 
 - **默认关闭**：未登记的 provider 视为两项全无。新增 provider 忘登记时，最坏结果是暂时看不到积分，而不是每次打开面板都发一个必然失败的请求
-- **`trae-cn` 当前正处于这个「默认关闭」状态**：后端三个积分端点（`src/trae-cn-credits.ts` + `jet-hub-rpc.ts` 分发）已实现并有单测覆盖，但本表尚未登记它，故 Trae CN 面板暂时不显示积分行与两个积分按钮。**这是刻意的分步交付**（第四步任务负责登记），不是缺陷
+- **`trae-cn` 已登记**：三项均已就绪（`src/trae-cn-credits.ts` + `jet-hub-rpc.ts` 分发 + 客户端能力矩阵与 `PROVIDERS` 条目），面板会显示积分行与两个积分按钮。**但宿主侧接线未完成**（见「项目概述」的 ⚠️）：面板无法新建 trae-cn 账号，故双池显示暂时拿不到真实数据
+- **`trae-cn` 的 `balance` 是双池**：`total` 是通用池（chat 实际扣的），Work 池走超集字段 `workTotal`，`CreditBalanceRow` 在该字段存在且可解析时渲染「通用 X / Work Y」，**绝不合并**（合并会让用户以为 Work 额度能用于对话）。其余 provider 的余额对象没有该字段，渲染路径完全不变
 - **门控在发请求之前**，不是在 UI 上吞错误：`loadCredits` / `claimCredits` 函数内部各有一道守卫（按钮不渲染只是 UI 便利，不是安全边界），`AccountCard` 的积分行与「刷新积分」按钮也按能力渲染
 - **历史缺陷**（用户报障）：客户端在面板挂载时对所有 provider 无条件调用 `credits.balances`，CodeArts 面板每次打开都在控制台报 `unsupported provider: codearts`，并把账号卡片的「积分」渲染成「查询失败」。后端 `productById()` 的拒绝是正确契约，不该被当成运行时故障
-- 改动能力矩阵后必须同步 `PROVIDERS` 列表：`tests/unit/credits-capabilities.spec.ts` 有一条断言锁死两者条目集合相等
+- 改动能力矩阵后必须同步 `PROVIDERS` 列表：`tests/unit/credits-capabilities.spec.ts` 有一条断言锁死两者条目集合相等。**该断言的匹配器必须写成 `[a-z-]+` 而不是 `[a-z]+`** —— 后者会让带连字符的 id（`trae-cn`）在 `PROVIDERS` 里隐形，漏登记时断言反而是绿的
 
 ## X-Domain 必须跟随产品，而非凭据
 

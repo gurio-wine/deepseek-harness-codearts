@@ -50,6 +50,28 @@ describe('积分能力矩阵', () => {
     expect(supportsDailyCheckin('lobsterai')).toBe(true)
   })
 
+  it('Trae CN 余额与签到都支持（键名带连字符，与后端 provider 实参一致）', () => {
+    // 余额走 POST /trae/api/v2/pay/web_user_ent_usage（双池），签到走
+    // checkin_credits 两步流程。两项都支持，故面板要渲染积分行与两个按钮。
+    //
+    // 这条断言同时锁死**键名形态**：`trae-cn` 带连字符，写成 `traeCn` / `trae_cn`
+    // 都会让 supportsCreditBalance('trae-cn') 落到「默认关闭」分支 —— 面板静默
+    // 不显示积分，而且不报任何错，是最难发现的一类回归。
+    expect(CREDITS_CAPABILITIES['trae-cn']).toEqual({ balance: true, dailyCheckin: true })
+    expect(supportsCreditBalance('trae-cn')).toBe(true)
+    expect(supportsDailyCheckin('trae-cn')).toBe(true)
+  })
+
+  it('能力矩阵的键与 PROVIDERS 的 id 逐字对齐（含连字符 provider）', () => {
+    // 集合相等那条断言用 PROVIDER_ENTRY_PATTERN 抓 id，而它的字符类必须是
+    // `[a-z-]+`：只认小写字母的话，带连字符的 id 抓不到，于是**漏登记时那条
+    // 断言依然是绿的**（集合两边都不含它）。这里直接锁死匹配器覆盖 `trae-cn`，
+    // 免得将来有人「图省事」把连字符从字符类里去掉。
+    const ids = [...readClientSource().matchAll(PROVIDER_ENTRY_PATTERN)].map((m) => m[1]!)
+    expect(ids).toContain('trae-cn')
+    expect(ids).toContain('lobsterai')
+  })
+
   it('未登记的 provider 默认不支持任何积分能力（默认关闭）', () => {
     // 新增 provider 时若忘记登记，最坏结果是暂时看不到积分，
     // 而不是每次打开面板都发一个必然失败的请求。
@@ -63,7 +85,7 @@ describe('积分能力矩阵', () => {
     // 客户端 PROVIDERS 列表与能力表必须同步：漏登记的 provider 会静默失去
     // 积分能力（默认关闭），而多登记的条目则是死配置。
     const source = readClientSource()
-    const providerIds = [...source.matchAll(/\{\s*id:\s*'([a-z]+)',\s*label:/g)].map((m) => m[1]!)
+    const providerIds = [...source.matchAll(PROVIDER_ENTRY_PATTERN)].map((m) => m[1]!)
     expect(providerIds.length).toBeGreaterThan(0)
     for (const id of providerIds) {
       expect(CREDITS_CAPABILITIES, `缺少 ${id} 的能力登记`).toHaveProperty(id)
@@ -71,6 +93,15 @@ describe('积分能力矩阵', () => {
     expect(Object.keys(CREDITS_CAPABILITIES).sort()).toEqual([...providerIds].sort())
   })
 })
+
+/**
+ * `PROVIDERS` 条目的匹配器。
+ *
+ * `[a-z-]+` 而不是 `[a-z]+`：provider id 允许带连字符（`trae-cn` 就是），
+ * 而只认小写字母的正则会让**带连字符的条目在 `PROVIDERS` 里隐形** ——
+ * 匹配不进 `providerIds`，于是「集合相等」这条断言在漏登记时反而是绿的。
+ */
+const PROVIDER_ENTRY_PATTERN = /\{\s*id:\s*'([a-z-]+)',\s*label:/g
 
 /** 读取客户端 bundle 的源码（未打包的 plugin-src 版本）。 */
 function readClientSource(): string {

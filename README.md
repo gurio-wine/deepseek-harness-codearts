@@ -425,17 +425,22 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 「余额为 0」与「查不到」严格区分：失败时 `balance` 为 `null` 并带 `error`，
 卡片显示原因而非 0。
 
-> **Trae CN 的前端是两步走的，当前只完成了后端。** 三个积分端点的 provider 分发
-> 已实现（`src/trae-cn-credits.ts` + `src/jet-hub-rpc.ts`），但有两件事**尚未**做，
-> 且**都属于第四步**：
-> 1. `plugin-src/client/credits-capabilities.js` 还没登记 `trae-cn`，而该表**默认
->    关闭** —— 故当前 Trae CN 面板不显示「积分」行、也不显示「刷新积分」/
->    「一键领取积分」按钮，后端能力对用户**暂时完全不可见**（这是刻意的默认：
->    宁可暂时看不到积分，也不要每次打开面板就发必然失败的请求）；
-> 2. `CreditBalanceRow` 目前只渲染 `total` 与 `packages`，**还没有**渲染
->    `workTotal` —— 所以「通用 / Work 分开展示」这条口径虽然后端已经算好并返回，
->    在界面上要等第四步改前端才真正落地（届时 Work 池的那一行同样需要
->    `pnpm build:all` 重建客户端 bundle 才生效）。
+> **Trae CN 的前端已登记。** 三个积分端点的 provider 分发在
+> `src/trae-cn-credits.ts` + `src/jet-hub-rpc.ts`，客户端一侧两件事都已落地：
+> 1. `plugin-src/client/credits-capabilities.js` 登记了 `trae-cn`（`balance` ✓、
+>    `dailyCheckin` ✓），`PROVIDERS` 同步加入该 tab —— 面板因此显示「积分」行、
+>    「刷新积分」与「一键领取积分」按钮；
+> 2. `CreditBalanceRow` 见到余额对象带 `workTotal` 时切**双池形态**，显示
+>    「通用 154.22 / Work 2000」；两池**绝不合并**，且 Work 用弱化色（chat 只扣
+>    通用池）。没有 `workTotal` 的 provider 渲染**逐元素不变**，由
+>    `tests/unit/jet-hub-credit-balance-row.spec.ts` 用整树深比较守住。
+>
+> ⚠️ **剩余缺口在宿主侧**（不属于前端登记的范围）：`src/jet-hub-rpc.ts` 的
+> `account.create` 还没有 `trae-cn` 分支，`account.refresh` 的 provider switch 与
+> `account-probe.ts` 的适配器选择同理，且 `registerJetHubRpc` 未接收 `traeCn`
+> 实例。因此 Trae CN 标签页虽然出现、积分能力也已登记，但**暂时无法在该面板里
+> 新建账号**（会得到 `unknown provider: trae-cn`）—— 双池展示要等这几处接上后
+> 才能在真机上看到实际数据。
 
 **CodeArts 不支持**：它是华为云账号体系，没有上述任何一条计费接口。因此 CodeArts
 面板**不显示「积分」行，也不显示「刷新积分」按钮**，且不会发起
@@ -450,12 +455,11 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 
 ### 一键领取积分（每日签到）
 
-**当前由 CodeBuddy 与 LobsterAI 两个面板提供**该按钮。签到在本插件里共有**三套
-互不相通的实现**（CodeBuddy / LobsterAI / Trae CN，协议、端点、幂等判据全不同，
-各自独立成文件）；Trae CN 那套**后端已就绪**，但客户端能力矩阵尚未登记它，
-故其面板**暂时**还不显示该按钮。CodeArts 是华为云账号体系不参与；
-WorkBuddy 国际版后端没有签到接口，故其面板也不显示。
-详见「积分余额」一节末尾的说明。
+**当前由 CodeBuddy、LobsterAI 与 Trae CN 三个面板提供**该按钮。签到在本插件里
+共有**三套互不相通的实现**（CodeBuddy / LobsterAI / Trae CN，协议、端点、幂等
+判据全不同，各自独立成文件）；三者的客户端能力登记均已落地，故三个面板都显示
+该按钮。CodeArts 是华为云账号体系不参与；WorkBuddy 国际版后端没有签到接口，
+故其面板不显示。详见「积分余额」一节末尾的说明。
 
 在 Account Hub 对应面板标题栏点击「**一键领取积分**」，插件会对该面板下
 **全部账号**顺序执行每日签到领取：
@@ -762,10 +766,10 @@ x-app-version: 3.3.100
 故 `collectCreditBalances` 能直接复用；非通用池的包名在 `packages` 里带
 `[Work 积分]` 前缀，避免明细里那个 2000 看起来像通用额度。
 
-> ⚠️ **UI 尚未消费 `workTotal`**（第四步的工作）：`CreditBalanceRow` 只会渲染
-> `total`，所以「通用 / Work 分开展示」目前**只是后端口径**，界面上还看不到 ——
-> 见「积分余额」一节末尾的说明。改动前端后必须 `pnpm build:all` 重建客户端
-> bundle 才生效。
+> ✅ **UI 已消费 `workTotal`**：`CreditBalanceRow` 在该字段存在且可解析时渲染
+> 「通用 X / Work Y」两段，Work 用弱化色且**绝不与通用相加**。其余 provider 的
+> 余额对象没有该字段，渲染逐元素不变（`tests/unit/jet-hub-credit-balance-row.spec.ts`）。
+> 改动前端后必须 `pnpm build:all` 重建客户端 bundle 才生效。
 
 **判定一律以 body `code` 为准，不看 HTTP 状态**（对齐 CodeBuddy 既有约定）：
 无 auth 时服务端返回的是 **HTTP 200 + `code:1001` + `enable:false`**，按状态码判

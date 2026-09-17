@@ -25,14 +25,24 @@
  * | `buddy`     | ✓                   | ✓                            |
  * | `workbuddy` | ✓                   | ✗ 国际版后端无签到接口        |
  * | `lobsterai` | ✓                   | ✓ `client-activities` 三步流程 |
+ * | `trae-cn`   | ✓ 双池（通用 / Work） | ✓ `checkin_credits` 两步 + 设备头 |
  *
  * - `balance`：CodeBuddy 系走 `POST /v2/billing/meter/get-user-resource`，该端点
  *   在 CodeBuddy 与 WorkBuddy 国际版**通用**（仅 baseURL 随 `product.endpoint`
- *   切换）；LobsterAI 走 `GET /api/user/profile-summary`。见 README「积分余额」。
+ *   切换）；LobsterAI 走 `GET /api/user/profile-summary`；Trae CN 走
+ *   `POST /trae/api/v2/pay/web_user_ent_usage`，并按 `available_endpoint`
+ *   **分池**（通用池是主数字、Work 池单独一项，见下）。见 README「积分余额」。
  * - `dailyCheckin`：CodeBuddy 系是 `checkin-activity-status` + `daily-checkin`，
  *   **仅 CodeBuddy 中国版**有；WorkBuddy 国际版内核里只有 `get-dosage-notify`
  *   （用量通知），没有签到接口，故其面板不渲染「一键领取积分」。LobsterAI 是
- *   `client-activities` 三步流程（`src/lobsterai-credits.ts`），故支持。
+ *   `client-activities` 三步流程（`src/lobsterai-credits.ts`）；Trae CN 是
+ *   `checkin_credits/status` → `claim` 两步（`src/trae-cn-credits.ts`，claim 必须
+ *   带设备四件套），故两者都支持。
+ *
+ * `trae-cn` 的 `balance` 是**双池**：`total` 仍是通用池（chat 实际扣的就是它），
+ * Work 池走超集字段 `workTotal`，两者在 UI 上**分开展示、绝不合并**
+ * （`CreditBalanceRow` 见到 `workTotal` 才切双池形态；其余 provider 的余额对象
+ * 没有该字段，渲染与登记前逐字节一致）。
  *
  * 判定一律**默认关闭**：未登记的 provider 视为不支持任何积分能力。这样将来
  * 新增 provider 时，若忘记在此登记，最坏结果是「暂时看不到积分」，而不是
@@ -46,6 +56,10 @@ export const CREDITS_CAPABILITIES = Object.freeze({
   workbuddy: Object.freeze({ balance: true, dailyCheckin: false }),
   // LobsterAI：余额走 profile-summary，签到走 client-activities 三步流程，两项都支持。
   lobsterai: Object.freeze({ balance: true, dailyCheckin: true }),
+  // Trae CN：余额走 web_user_ent_usage（双池：通用 / Work），签到走
+  // checkin_credits 两步流程（claim 带设备四件套），两项都支持。
+  // 键名是 `trae-cn`（带连字符，与 `PROVIDERS` 的 id 及后端 provider 实参一致）。
+  'trae-cn': Object.freeze({ balance: true, dailyCheckin: true }),
 });
 
 /**

@@ -22,11 +22,27 @@ const WORKBUDDY_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABICA
  */
 const LOBSTERAI_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0Ij48cmVjdCB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHJ4PSI1IiBmaWxsPSIjZTg1MDNhIi8+PHBhdGggZD0iTTEyIDUuNWMtMi40IDAtNC4yIDEuNi00LjIgNHY1LjJjMCAyLjMgMS44IDMuOCA0LjIgMy44czQuMi0xLjUgNC4yLTMuOFY5LjVjMC0yLjQtMS44LTQtNC4yLTR6IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMTAuMyIgY3k9IjEwLjIiIHI9IjEiIGZpbGw9IiNlODUwM2EiLz48Y2lyY2xlIGN4PSIxMy43IiBjeT0iMTAuMiIgcj0iMSIgZmlsbD0iI2U4NTAzYSIvPjxwYXRoIGQ9Ik04LjQgNy4yIDYuMiA0LjltOS40IDIuMyAyLjItMi4zTTkuOSAxOC41bC0xLjQgMm02LjYtMiAxLjQgMiIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjEuNCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBmaWxsPSJub25lIi8+PC9zdmc+'
 
+/**
+ * Trae CN 面板图标（内联 SVG data URL，与 LobsterAI 同款做法）。
+ *
+ * 来源：Trae CN 桌面客户端自带的品牌标识
+ * `%LOCALAPPDATA%\Programs\Trae CN\resources\app\out\media\trae-logo.svg`
+ * （397 字节，原样 base64 内联，未做任何改动）。用官方资源而不是自己画：
+ * 同一目录下的 `ai-trae-sparkles*.svg` 用的是同一个品牌绿 `#32F08C`，
+ * 可交叉印证这就是产品品牌色。
+ *
+ * 内容同样是**预先算好的 base64 字面量**（理由见上一条注释）。
+ */
+const TRAE_CN_ICON = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiByeD0iMy42OTIiIGZpbGw9IiMxQTFCMUQiLz48cGF0aCBkPSJNMTMuMjM1IDUuODI5VjQuMzMySDIuNzU4djUuOTg3aDEuNDk2djEuNDk2aDguOTgxVjUuODI4Wm0tMS40OTcgNC40OUg0LjI1NFY1LjgzaDcuNDg0djQuNDlaIiBmaWxsPSIjMzJGMDhDIi8+PHBhdGggZD0iTTYuOTM3IDYuOTkzIDUuODggOC4wNTEgNi45MzcgOS4xMSA3Ljk5NSA4LjA1IDYuOTM3IDYuOTkzWk05LjkzMSA2Ljk5MiA4Ljg3MyA4LjA1IDkuOTMxIDkuMTEgMTAuOTkgOC4wNSA5LjkzIDYuOTkyWiIgZmlsbD0iIzMyRjA4QyIvPjwvc3ZnPg=='
+
 const PROVIDERS = Object.freeze([
   { id: 'codearts', label: 'CodeArts (华为云)', icon: CODEARTS_ICON, logoClass: 'codearts' },
   { id: 'buddy', label: 'CodeBuddy (腾讯)', icon: CODEBUDDY_ICON, logoClass: 'buddy' },
   { id: 'workbuddy', label: 'WorkBuddy (国际版)', icon: WORKBUDDY_ICON, logoClass: 'workbuddy' },
   { id: 'lobsterai', label: 'LobsterAI (有道)', icon: LOBSTERAI_ICON, logoClass: 'lobsterai' },
+  // 顺序 = 后端注册顺序（src/index.ts 里 Trae CN 服务在 LobsterAI 之后建立），
+  // 也是能力矩阵里的登记顺序。tag 展示名与 TraeCnProduct.displayName 保持一致。
+  { id: 'trae-cn', label: 'Trae CN (字节跳动)', icon: TRAE_CN_ICON, logoClass: 'trae-cn' },
 ]);
 
 /**
@@ -148,6 +164,17 @@ function formatPackageLine(pkg) {
  * - 查不到（balance 为 null）→ 显示原因，不要显示成 0 积分
  * - 查到了但余额为 0 → 显示 0
  * - 还没有结果 → 显示"读取中"
+ *
+ * **双池（通用 / Work）**：Trae CN 的余额对象是 `CreditBalance` 的超集，多带一个
+ * `workTotal`（见 `src/trae-cn-credits.ts` 的 `TraeCnCreditBalance`）。带该字段时
+ * 一行显示两池：`total` 是**通用池**（chat 实际扣的就是它），`workTotal` 是 Work 池。
+ *
+ * 两池**绝不合并成一个数**：合并会让用户以为 Work 的额度能用来对话，于是对
+ * 「明明显示还有 2000 却说余额不足」感到莫名其妙。因此这里既不求和、也不把
+ * Work 数字按通用数字的蓝色强调样式渲染（用弱化色，暗示它不可直接用于对话）。
+ *
+ * 其余 provider 的余额对象没有 `workTotal`，走的仍是原路径 —— 渲染结果与登记
+ * 这个能力之前**逐元素一致**（`workTotal` 缺失时不产生任何额外节点）。
  */
 function CreditBalanceRow({ balance, error, loading }) {
   if (loading) {
@@ -162,6 +189,10 @@ function CreditBalanceRow({ balance, error, loading }) {
         error || '查询失败'));
   }
   const total = formatCredits(balance.total) ?? '0';
+  // 只有**确实带了** workTotal 的 provider 才切双池形态。判据是「字段存在且可解析」，
+  // 而不是「值是 0 就不显示」：Work 池为 0 也是有效信息（该账号没有 Work 积分），
+  // 且此时把主数字标成「通用」反而更清楚 —— 用户不会误以为那 0 是通用余额。
+  const hasWorkPool = typeof balance.workTotal === 'number' && Number.isFinite(balance.workTotal);
   // 明细放进 title，不占版面；账号卡片本身已经信息密集了
   const detail = (balance.packages || []).map(formatPackageLine).join('\n');
   const all = balance.packages || [];
@@ -172,7 +203,13 @@ function CreditBalanceRow({ balance, error, loading }) {
       className: 'dim-jh-creditValue',
       title: detail || undefined,
     },
-    React.createElement('strong', { className: 'dim-jh-creditTotal' }, total),
+    React.createElement('strong', { className: 'dim-jh-creditTotal' },
+      hasWorkPool ? `通用 ${total}` : total),
+    // Work 池单独一项，前缀 `Work` 而非并入主数字。
+    hasWorkPool
+      ? React.createElement('span', { className: 'dim-jh-creditWork' },
+          `Work ${formatCredits(balance.workTotal) ?? '0'}`)
+      : null,
     all.length > 1
       ? React.createElement('span', { className: 'dim-jh-creditPackages' },
           `${activeCount}/${all.length} 个资源包有效`)
