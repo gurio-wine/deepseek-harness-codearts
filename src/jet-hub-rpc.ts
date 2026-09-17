@@ -16,6 +16,8 @@ import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { AccountPool } from './account-pool.js'
 import type { CodeArtsAuth } from './service.js'
 import type { BuddyAuth } from './buddy-auth.js'
+import type { LobsteraiAuth } from './lobsterai-auth.js'
+import { LOBSTERAI } from './lobsterai-product.js'
 import { decorateLoginUrl, fetchAuthState, runBuddyLoginFlow } from './buddy-oauth.js'
 import { credentialExpiresAtMs } from './buddy.js'
 import type { BuddyCredential } from './buddy.js'
@@ -28,6 +30,10 @@ import {
   type CreditBalance,
 } from './credits.js'
 import { CODEBUDDY, productById, type BuddyProduct } from './product.js'
+import {
+  claimLobsteraiDailyCheckin,
+  fetchLobsteraiCreditBalance,
+} from './lobsterai-credits.js'
 import {
   resetAccount,
   resetAllAccounts,
@@ -131,8 +137,17 @@ export function computeClaimSummary(outcomes: readonly ClaimOutcome[]): RpcCredi
  *
  * 抽出这一层是为了让「逐账号处理」能脱离 `ctx.connection.fetch` 注册流程
  * 单独单测：端点内不做任何业务判断，只负责取账号列表并转交下面的纯函数。
+ *
+ * **对凭据/产品类型做泛型化**（而非写死 Buddy 系类型）：LobsterAI 的协议
+ * 完全不同（无签名、三步签到、身份字段是 keyfrom），但「逐账号顺序执行、
+ * 单个失败不中断、凭据解析在 try 之内」这套编排逻辑是**通用**的。
+ * 泛型化让 `collect*` 三兄弟只写一遍，两套协议各自注入自己的下钻函数。
+ * 默认类型参数保持 Buddy 系，故既有调用点与测试一行都不用改。
  */
-export interface CreditsEndpointDeps {
+export interface CreditsEndpointDeps<
+  TCredential = BuddyCredential,
+  TProduct = BuddyProduct,
+> {
   /**
    * 解析凭据引用。
    * 按设计该接口**不可信**（凭据可能已被外部删除、provider 后端异常），
@@ -140,13 +155,25 @@ export interface CreditsEndpointDeps {
    */
   resolve(ref: CredentialRef): Promise<{ value: string } | undefined>
   /** 查询签到状态；默认使用真实的 fetchCheckinStatus。 */
-  fetchStatus?: (credential: BuddyCredential, product: BuddyProduct) => Promise<CheckinStatus | null>
+  fetchStatus?: (credential: TCredential, product: TProduct) => Promise<CheckinStatus | null>
   /** 执行签到领取；默认使用真实的 claimDailyCheckin。 */
-  claim?: (credential: BuddyCredential, product: BuddyProduct) => Promise<ClaimOutcome>
+  claim?: (credential: TCredential, product: TProduct) => Promise<ClaimOutcome>
   /** 查询积分余额；默认使用真实的 fetchCreditBalance。 */
-  fetchBalance?: (credential: BuddyCredential, product: BuddyProduct) => Promise<CreditBalance | null>
+  fetchBalance?: (credential: TCredential, product: TProduct) => Promise<CreditBalance | null>
   /** 单账号异常时的告警出口（不参与控制流）。 */
   warn?: (message: string) => void
+  /**
+   * 领取前是否先查一次签到状态（默认 `true`）。
+   *
+   * CodeBuddy 系拆成「查状态 + 领取」两个独立端点，先查可以省掉一次无效的
+   * 领取请求（活动未开 / 今天已领时直接短路）。
+   *
+   * LobsterAI 的领取流程**自身就是多步的**（slot → context → check_in），
+   * `claimedToday` / `actions` 判断已在内部完成并会返回对应的
+   * `already-claimed` / `inactive`，外部再查一次纯属重复请求 ——
+   * 故它传 `false` 跳过预检，直接交给 `claim`。
+   */
+  precheckStatus?: boolean
 }
 
 /**
@@ -160,12 +187,12 @@ export interface CreditsEndpointDeps {
  * 之外，任一账号的异常都会冒泡到 handleMethod 外层 catch，使整批请求以
  * `jet-hub/handler-failed` 失败——违背「单个账号失败不中断整体」的设计。
  */
-export async function collectCreditsStatus(
+export async function collectCreditsStatus<TCredential = BuddyCredential, TProduct = BuddyProduct>(
   accounts: readonly ProviderAccountEntry[],
-  product: BuddyProduct,
-  deps: CreditsEndpointDeps,
+  product: TProduct,
+  deps: CreditsEndpointDeps<TCredential, TProduct>,
 ): Promise<RpcCreditsStatusResponse['accounts']> {
-  const fetchStatus = deps.fetchStatus ?? fetchCheckinStatus
+  const fetchStatus = deps.fetchStatus ?? (fetchCheckinStatus as unknown as NonNullable<CreditsEndpointDeps<TCredential, TProduct>['fetchStatus']>)
   const results: RpcCreditsStatusResponse['accounts'] = []
   // 顺序查询，避免并发触发风控
   for (const entry of accounts) {
@@ -173,7 +200,7 @@ export async function collectCreditsStatus(
     try {
       const resolved = await deps.resolve(credentialRef(entry.credentialRef))
       if (resolved !== undefined) {
-        const credential = JSON.parse(resolved.value) as BuddyCredential
+        const credential = JSON.parse(resolved.value) as TCredential
         status = await fetchStatus(credential, product)
       }
     } catch (error) {
@@ -196,13 +223,15 @@ export async function collectCreditsStatus(
  * 与 collectCreditsStatus 同理：凭据解析位于每个账号自己的 try 之内，
  * 异常只让该账号记为 failed。
  */
-export async function collectClaimResults(
+export async function collectClaimResults<TCredential = BuddyCredential, TProduct = BuddyProduct>(
   accounts: readonly ProviderAccountEntry[],
-  product: BuddyProduct,
-  deps: CreditsEndpointDeps,
+  product: TProduct,
+  deps: CreditsEndpointDeps<TCredential, TProduct>,
 ): Promise<RpcCreditsClaimAllResponse> {
-  const fetchStatus = deps.fetchStatus ?? fetchCheckinStatus
-  const claim = deps.claim ?? claimDailyCheckin
+  const fetchStatus = deps.fetchStatus ?? (fetchCheckinStatus as unknown as NonNullable<CreditsEndpointDeps<TCredential, TProduct>['fetchStatus']>)
+  const claim = deps.claim ?? (claimDailyCheckin as unknown as NonNullable<CreditsEndpointDeps<TCredential, TProduct>['claim']>)
+  // 默认保留预检（CodeBuddy 系需要）；LobsterAI 显式传 false 跳过。
+  const precheck = deps.precheckStatus !== false
   const results: RpcCreditsClaimAllResponse['results'] = []
   const outcomes: ClaimOutcome[] = []
   for (const entry of accounts) {
@@ -212,17 +241,22 @@ export async function collectClaimResults(
       if (resolved === undefined) {
         outcome = { kind: 'failed', code: -1, message: '凭据未配置' }
       } else {
-        const credential = JSON.parse(resolved.value) as BuddyCredential
-        // 先查状态：活动未开启或今日已领则跳过领取请求，减少无效调用
-        const status = await fetchStatus(credential, product)
-        if (status !== null && !status.active) {
-          outcome = { kind: 'inactive', message: '签到活动未开启' }
-        } else if (status !== null && status.todayCheckedIn) {
-          outcome = { kind: 'already-claimed', message: '今天已签到' }
-        } else {
-          // 状态查询失败（status 为 null）时仍然尝试领取：
-          // 无法确认不代表不能领，交给领取接口以响应体 code 定夺。
+        const credential = JSON.parse(resolved.value) as TCredential
+        if (!precheck) {
+          // 领取流程自带状态判断（LobsterAI 的 slot/context 检查在 claim 内部）。
           outcome = await claim(credential, product)
+        } else {
+          // 先查状态：活动未开启或今日已领则跳过领取请求，减少无效调用
+          const status = await fetchStatus(credential, product)
+          if (status !== null && !status.active) {
+            outcome = { kind: 'inactive', message: '签到活动未开启' }
+          } else if (status !== null && status.todayCheckedIn) {
+            outcome = { kind: 'already-claimed', message: '今天已签到' }
+          } else {
+            // 状态查询失败（status 为 null）时仍然尝试领取：
+            // 无法确认不代表不能领，交给领取接口以响应体 code 定夺。
+            outcome = await claim(credential, product)
+          }
         }
       }
     } catch (error) {
@@ -251,12 +285,12 @@ export async function collectClaimResults(
  * 凭据解析同样位于每个账号自己的 try 之内：单个账号的凭据缺失/损坏/名称非法
  * 都不会冒泡中断整批。
  */
-export async function collectCreditBalances(
+export async function collectCreditBalances<TCredential = BuddyCredential, TProduct = BuddyProduct>(
   accounts: readonly ProviderAccountEntry[],
-  product: BuddyProduct,
-  deps: CreditsEndpointDeps,
+  product: TProduct,
+  deps: CreditsEndpointDeps<TCredential, TProduct>,
 ): Promise<RpcCreditsBalancesResponse['accounts']> {
-  const fetchBalance = deps.fetchBalance ?? fetchCreditBalance
+  const fetchBalance = deps.fetchBalance ?? (fetchCreditBalance as unknown as NonNullable<CreditsEndpointDeps<TCredential, TProduct>['fetchBalance']>)
   const results: RpcCreditsBalancesResponse['accounts'] = []
   // 顺序查询，避免并发触发风控
   for (const entry of accounts) {
@@ -267,7 +301,7 @@ export async function collectCreditBalances(
       if (resolved === undefined) {
         error = '凭据未配置'
       } else {
-        const credential = JSON.parse(resolved.value) as BuddyCredential
+        const credential = JSON.parse(resolved.value) as TCredential
         balance = await fetchBalance(credential, product)
         // 查询函数以 null 表示"查不到"（网络/业务码异常），与"余额为 0"不同
         if (balance === null) error = '余额查询失败'
@@ -312,9 +346,10 @@ export function registerJetHubRpc(
   codearts: CodeArtsAuth,
   buddy: BuddyAuth,
   workbuddy: BuddyAuth,
+  lobsterai: LobsteraiAuth,
 ): void {
   ctx.inject(['connection'], (connectionCtx) => {
-    registerJetHubEndpoints(connectionCtx as Context, pool, codearts, buddy, workbuddy)
+    registerJetHubEndpoints(connectionCtx as Context, pool, codearts, buddy, workbuddy, lobsterai)
   })
 }
 
@@ -325,6 +360,7 @@ function registerJetHubEndpoints(
   codearts: CodeArtsAuth,
   buddy: BuddyAuth,
   workbuddy: BuddyAuth,
+  lobsterai: LobsteraiAuth,
 ): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const connection = (ctx as any).connection ?? ctx.get('connection')
@@ -448,6 +484,15 @@ function registerJetHubEndpoints(
           // 直接同步执行（需等待回调完成）
           const loginResult = await codearts.login({ refName, accountId: id, pool })
           return { ok: true, value: { accountId: id, loginUrl: loginResult.loginUrl } }
+        } else if (provider === LOBSTERAI.id) {
+          // LobsterAI 也是**回调式**登录（本地回调服务器收 authCode），
+          // 与 codearts 同款：同步执行、等待用户在浏览器完成登录后返回。
+          //
+          // 与 CodeBuddy 系的两步式（先返回 URL、后台异步跑）不同 —— 那种模式
+          // 是为「轮询式登录」设计的（前端拿 accountId 反复 login.poll）。
+          // LobsterAI 没有可轮询的 state，照 codearts 做才自然。
+          const loginResult = await lobsterai.login({ refName, accountId: id, pool })
+          return { ok: true, value: { accountId: id, loginUrl: loginResult.loginUrl } }
         } else {
           return { ok: false, error: { code: 'bad-request', message: `unknown provider: ${provider}` } }
         }
@@ -472,12 +517,39 @@ function registerJetHubEndpoints(
           const entry = accounts.find((a) => a.id === req.accountId)
           if (!entry) throw new Error(`Account ${req.accountId} not found`)
 
-          if (entry.provider === 'codearts') {
-            await codearts.refresh()
-          } else if (entry.provider === 'buddy') {
-            await buddy.refresh()
-          } else {
-            throw new Error(`Unknown provider: ${entry.provider}`)
+          // 按 **entry.provider** 分派到对应服务，并调用**按凭据 ref 的**
+          // 续期入口 —— 两处都是修复既有缺陷的关键：
+          //
+          // 1. 原实现只处理 codearts / buddy，`workbuddy` 会落到 else 抛
+          //    `Unknown provider`，即 WorkBuddy 账号卡片的「刷新」按钮一直是坏的；
+          // 2. 原实现调的是 `service.refresh()`，它读写的是该 provider 的
+          //    **默认单凭据 ref**（如 BUDDY_ACCESS_TOKEN），而账号卡片对应的是
+          //    BUDDY_ACCOUNT_XXX —— 于是「刷新这个账号」实际刷的是另一个凭据，
+          //    结果要么报错要么静默改了错的对象。
+          // 按 **entry.provider** 分派到对应服务，并调用**按凭据 ref 的**
+          // 续期入口 —— 两处都是修复既有缺陷的关键：
+          //
+          // 1. 原实现只处理 codearts / buddy，`workbuddy` 会落到 else 抛
+          //    `Unknown provider`，即 WorkBuddy 账号卡片的「刷新」按钮一直是坏的；
+          // 2. 原实现调的是 `service.refresh()`，它读写的是该 provider 的
+          //    **默认单凭据 ref**（如 BUDDY_ACCESS_TOKEN），而账号卡片对应的是
+          //    BUDDY_ACCOUNT_XXX —— 于是「刷新这个账号」实际刷的是另一个凭据，
+          //    结果要么报错要么静默改了错的对象。
+          switch (entry.provider) {
+            case 'codearts':
+              await codearts.refreshAccountCredential(entry.credentialRef)
+              break
+            case 'buddy':
+              await buddy.refreshAccountCredential(entry.credentialRef)
+              break
+            case 'workbuddy':
+              await workbuddy.refreshAccountCredential(entry.credentialRef)
+              break
+            case LOBSTERAI.id:
+              await lobsterai.refreshAccountCredential(entry.credentialRef)
+              break
+            default:
+              throw new Error(`Unknown provider: ${entry.provider}`)
           }
           return { ok: true, value: { success: true } }
         } catch (error) {
@@ -549,6 +621,19 @@ function registerJetHubEndpoints(
       // 此处的拒绝是兜底与契约声明，不是常规路径。
       case 'credits.status': {
         const req = payload as RpcCreditsStatusRequest
+        if (req.provider === LOBSTERAI.id) {
+          // LobsterAI 没有独立的「签到状态」端点：活动状态要经
+          // slot → context 两步才能得到，且语义与 CodeBuddy 的
+          // CheckinStatus 不同构（无 streak/dailyCredit 等概念）。
+          // 故这里如实返回 null，而不是臆造一份状态对象。
+          const accounts = await pool.listAccounts(req.provider)
+          return {
+            ok: true,
+            value: {
+              accounts: accounts.map((entry) => ({ accountId: entry.id, nickname: entry.nickname, status: null })),
+            } satisfies RpcCreditsStatusResponse,
+          }
+        }
         const product = productById(req.provider)
         if (product === undefined) {
           return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
@@ -564,11 +649,25 @@ function registerJetHubEndpoints(
       // 一键领取：逐账号顺序执行（并发易触发风控），单个账号失败不中断整体。
       case 'credits.claimAll': {
         const req = payload as RpcCreditsClaimAllRequest
+        const accounts = await pool.listAccounts(req.provider)
+        if (req.provider === LOBSTERAI.id) {
+          // LobsterAI 的 clientVersion 是签到必填参数，需动态解析
+          //（带缓存，通常无额外网络开销）。
+          const clientVersion = await lobsterai.resolveClientVersion()
+          const value = await collectClaimResults(accounts, LOBSTERAI, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            claim: (credential, product) =>
+              claimLobsteraiDailyCheckin(credential, product, clientVersion),
+            // 领取流程内部已做 slot/context 预检，不需要外部再查一次状态。
+            precheckStatus: false,
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
+        }
         const product = productById(req.provider)
         if (product === undefined) {
           return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
         }
-        const accounts = await pool.listAccounts(req.provider)
         const value = await collectClaimResults(accounts, product, {
           resolve: (ref) => ctx.credentials.resolve(ref),
           warn: (msg) => ctx.logger?.warn?.(msg),
@@ -583,11 +682,19 @@ function registerJetHubEndpoints(
       // 网络耗时拖慢，且一次查询失败会让整份列表都取不到。
       case 'credits.balances': {
         const req = payload as RpcCreditsBalancesRequest
+        const accounts = await pool.listAccounts(req.provider)
+        if (req.provider === LOBSTERAI.id) {
+          const values = await collectCreditBalances(accounts, LOBSTERAI, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            fetchBalance: (credential, product) => fetchLobsteraiCreditBalance(credential, product),
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
+        }
         const product = productById(req.provider)
         if (product === undefined) {
           return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
         }
-        const accounts = await pool.listAccounts(req.provider)
         const values = await collectCreditBalances(accounts, product, {
           resolve: (ref) => ctx.credentials.resolve(ref),
           warn: (msg) => ctx.logger?.warn?.(msg),

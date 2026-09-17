@@ -11,8 +11,10 @@ deepseek-harness 插件：执行 CodeArts（华为云）登录流程，默认走
 - **buddy（腾讯 CodeBuddy）** — 见 [buddy provider](#buddy-provider)；
   另支持「一键领取积分」（每日签到）。
 - **workbuddy（腾讯 WorkBuddy 国际版）** — 见 [WorkBuddy provider](#workbuddy-provider)。
+- **lobsterai（有道 LobsterAI / 龙虾）** — 见 [LobsterAI provider](#lobsterai-provider)；
+  另支持「一键领取积分」（每日签到）。
 
-三个 provider 的 Jet Hub 面板都提供「**显示列表**」按钮，可逐个开关模型以控制其
+四个 provider 的 Jet Hub 面板都提供「**显示列表**」按钮，可逐个开关模型以控制其
 是否出现在对话框的模型选择里（黑名单制，默认全部显示）——
 见 [模型列表开关](#模型列表开关黑名单)。
 
@@ -303,13 +305,14 @@ Jet Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的**�
 - 模型列表来自 `ctx.llm.listModels()`，**即对话框模型选择器读取的同一份目录**
   （会话控制器的 `buildModelCatalog`），因此设置页展示的模型与实际可选集合始终
   一致，不会出现「设置里有、选择器里没有」的错位。
-- 过滤发生在适配器的 `listModels`（`src/llm-adapter.ts` / `src/buddy-adapter.ts`），
+- 过滤发生在适配器的 `listModels`（`src/llm-adapter.ts` / `src/buddy-adapter.ts` /
+  `src/lobsterai-adapter.ts`），
   每次调用都直接读账号池的黑名单，因此**改开关后下一轮模型目录刷新即生效**，
   无需重启或重建适配器。
 - **只影响目录播报，不改变路由能力**：被关闭的模型仍可被 `resolveModel` 解析、
   仍能正常收发请求。这是 DSH 对 `listModels` 的约定（目录是建议性的，缺省不构成
   请求拒绝）。好处是已有会话若正用着某个被关闭的模型，不会被强制中断。
-- 开关按 provider 隔离，CodeBuddy / WorkBuddy / CodeArts 三份黑名单互不影响。
+- 开关按 provider 隔离，CodeArts / CodeBuddy / WorkBuddy / LobsterAI 四份黑名单互不影响。
 - 相关 RPC 端点：`model.list`（列出模型并回填 `disabled`）、`model.setDisabled`
   （打开/关闭单个模型），实现见 `src/jet-hub-rpc.ts`。
 
@@ -338,18 +341,35 @@ POST /v2/billing/meter/get-user-resource    body {}
 
 ### 一键领取积分（每日签到）
 
-**仅 CodeBuddy 面板提供**该按钮。CodeArts 是华为云账号体系不参与；WorkBuddy
-国际版后端没有签到接口，故其面板也不显示（积分领取在 CodeBuddy 侧完成）。
+**CodeBuddy 与 LobsterAI 两个面板提供**该按钮（两者的签到协议完全不同，
+实现各自独立）。CodeArts 是华为云账号体系不参与；WorkBuddy
+国际版后端没有签到接口，故其面板也不显示。
 
-在 Jet Hub → CodeBuddy 面板标题栏点击「**一键领取积分**」，插件会对该面板下
+在 Jet Hub 对应面板标题栏点击「**一键领取积分**」，插件会对该面板下
 **全部账号**顺序执行每日签到领取：
 
 > **含已停用账号。** 停用只影响账号池的自动选择与限流切换，不改变账号本身
 > 是否已签到——用户点「一键领取」时期望所有账号都尝试一遍。
 
+**CodeBuddy（两步）**：
+
 1. 先查签到活动状态（`POST /v2/billing/meter/checkin-activity-status`）；
 2. 活动未开启或今日已签到则跳过领取请求，只报告状态；
 3. 否则调用领取端点（`POST /v2/billing/meter/daily-checkin`）领取当日积分。
+
+**LobsterAI（三步，见 `src/lobsterai-credits.ts`）**：
+
+1. 查活动槽位（`GET /api/client-activities/slot`，带固定的
+   `placement` / `containerApiVersion` / `platform` 参数）；
+2. 查活动上下文（`GET /api/client-activities/{code}/context`），
+   读 `claimedToday` 与 `actions` 决定是否可领；
+3. 领取（`POST /api/client-activities/{code}/actions/check_in`，
+   请求带客户端幂等键 `idempotencyKey`）。
+
+> LobsterAI 的 `clientVersion` 是签到**必填**参数，由插件动态拉取
+> （`api-overmind.youdao.com` 的更新接口，缓存 12 小时）；
+> 拉取失败时回退内置兜底版本并在日志告警 —— 比参考实现的
+> 「取不到就完全放弃签到」更宽容。
 
 完成后按钮下方给出结果摘要（如「3 个账号领取成功（+300 积分），1 个今日已领取」）。
 领取按账号隔离：单个账号凭据缺失、损坏或请求失败不会中断整批，只计入失败数；
@@ -359,11 +379,58 @@ POST /v2/billing/meter/get-user-resource    body {}
 几点实现约定：
 
 - 领取是**顺序执行**的，避免并发触发风控；账号较多时需要等待片刻。
-- 重复领取是幂等的：服务端返回 HTTP 400 + `code 10001`（「今天已签到，请明天
-  再来」），插件把它识别为 `already-claimed` 而非失败。
-- 状态查询用 `checkin-activity-status` 而非 `checkin-status`；后者返回占位数据
-  （`active:false`、`checkin_dates:null`），会让人误判为活动未开启。
-- 请求**不需要** `X-Device-Token`（图灵盾）——已实测验证。
+- **CodeBuddy** 重复领取是幂等的：服务端返回 HTTP 400 + `code 10001`（「今天已签到，
+  请明天再来」），插件把它识别为 `already-claimed` 而非失败。
+- **LobsterAI** 的幂等由**客户端**保证：请求带 `idempotencyKey`，且领取前先读
+  `context` 的 `claimedToday` 与 `actions`；重复领取会被识别为 `already-claimed`。
+- CodeBuddy 的状态查询用 `checkin-activity-status` 而非 `checkin-status`；后者返回
+  占位数据（`active:false`、`checkin_dates:null`），会让人误判为活动未开启。
+- CodeBuddy 的请求**不需要** `X-Device-Token`（图灵盾）——已实测验证。
+- LobsterAI 的签到**不需要签名**，只用 `Authorization: Bearer`；也**不发**腾讯系的
+  `X-Domain` / `X-Product` / `X-Product-Code` 头。
 
 想单独验证领取闭环（会真实改动账号当日签到状态）可运行
-`pnpm test:e2e:workbuddy-claim`，说明见 `tests/e2e/README.md`。
+`pnpm test:e2e:workbuddy-claim` 或 `pnpm test:e2e:lobsterai-claim`，
+说明见 `tests/e2e/README.md`。
+
+## LobsterAI provider（有道龙虾）
+
+独立路由 `lobsterai`（有道 **LobsterAI**），OpenAI 兼容端点
+`https://lobsterai-server.youdao.com/api/proxy/v1/chat/completions`，
+Bearer `access_token` 鉴权。
+
+该 provider 与腾讯系**协议完全不同**，因此实现是独立一套
+（`src/lobsterai*.ts`），只共用架构模式（产品配置驱动、账号池、限流切换、
+模型黑名单）。关键差异：
+
+| 项 | 腾讯系（CodeBuddy / WorkBuddy） | LobsterAI |
+|---|---|---|
+| 登录方式 | 轮询后端 API（无本地服务器） | **本地回调服务器**收 `authCode` 后换 token |
+| 登录/API 域名 | 同一个 `endpoint` | **两个域名**（portal 与 apiBase） |
+| 请求头 | `X-Domain` / `X-Product` / `X-Product-Code` / `X-IDE-*` | 仅 `X-LobsterAI-Client-Capabilities` / `X-LobsterAI-Client-Version` |
+| 续期请求体 | 只带 `refreshToken`（走 `X-Refresh-Token` 头） | 还要带 `firstKeyfrom` / `latestKeyfrom` / `uuid` |
+| `clientVersion` | 编译期常量 | **运行时从第三方接口动态拉取** |
+| 每日签到 | 两步（状态 + 领取） | **三步**（slot + context + check_in） |
+| 图片输入 | 支持 | **不支持**（`inputModalities` 仅 `text`） |
+| 思考等级 | 支持（按模型声明档位） | **不声明**（是否支持未实测） |
+
+- **登录入口：Jet Hub 设置页的 LobsterAI 面板**（支持多账号与账号池自动切换）。
+  不注册斜杠命令。
+- 编程式调用：`ctx.lobsteraiAuth.login()` / `status()` / `refresh()` / `logout()` /
+  `fetchModels()` / `resolveClientVersion()`。
+- 凭据 ref：
+  - 单账号：`LOBSTERAI_ACCESS_TOKEN`；
+  - 多账号：`LOBSTERAI_ACCOUNT_<UUID_SHORT>`，由 Jet Hub「+ 新建账号」生成。
+- 凭据结构（JSON 字符串）：除 `access_token` / `refresh_token` / `expires_at` 外，
+  还持久化 `uuid` / `first_keyfrom` / `latest_keyfrom` 三个**身份字段** ——
+  它们是续期请求体的必填项，丢失会导致静默续期失败、只能重新登录。
+- 模型列表：远端 `GET /api/models/available` 优先（它是权威来源），
+  失败时回退 `src/lobsterai-product.ts` 的 19 个内置模型。
+- 续期：启动后每 30 分钟对可续期账号静默刷新（与其他 provider 同一调度器）。
+  **终态判定比参考实现更精确**：只有 HTTP 401/403 或业务码 40100/40101
+  才判为 `refresh_token` 失效；网络抖动走可重试路径，不会误让用户重新登录。
+
+> **已知待实测项**（见 `docs/lobsterai-integration-plan.md` §7.2）：
+> 是否支持 `reasoning_effort`、各模型真实上下文窗口（内置表统一填 131072，
+> 是桥接层的估计值）、图片输入、`prompt_cache_key`。这些在实现里都取了
+> **保守默认**（不声明 / 不发送），不会因未知而失败。

@@ -8,11 +8,13 @@
 
 ## 项目概述
 
-本项目是 DeepSeek Harness 的一个插件（`dsh-codearts-auth`），提供华为云 CodeArts 浏览器登录与凭据管理功能。插件还附带 `buddy`（腾讯 CodeBuddy 中国版）与 `workbuddy`（腾讯 WorkBuddy **国际版** / WorkBuddy AI）两个 LLM provider 路由。
+本项目是 DeepSeek Harness 的一个插件（`dsh-codearts-auth`），提供华为云 CodeArts 浏览器登录与凭据管理功能。插件还附带 `buddy`（腾讯 CodeBuddy 中国版）、`workbuddy`（腾讯 WorkBuddy **国际版** / WorkBuddy AI）与 `lobsterai`（有道 **LobsterAI** / 龙虾）三个 LLM provider 路由。
 
 `buddy` 与 `workbuddy` 同源：共用同一 CLI 内核与同一认证协议，差异全部收敛在 `src/product.ts` 的产品配置中。关键差异是 **`endpoint`**：中国版为 `copilot.tencent.com`，国际版为 `www.workbuddy.ai`，两者返回不同模型池，因此 endpoint 必须随产品切换、不可当作全局常量。此外 `platform` 分别为 `ide` 与 `workbuddy-ai`，国际版登录 URL 还追加 `version` / `loginSessionId`。
 
-Jet Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到，见 `src/credits.ts`）**仅 CodeBuddy 面板提供** —— 国际版 WorkBuddy 后端没有签到接口。
+`lobsterai` 与上述两者**完全不同源**：登录方式、请求头、续期载荷、签到流程、版本号来源都不一样，因此实现是独立一套 `src/lobsterai*.ts`。它只**共用架构模式**（产品配置驱动、账号池、限流切换、模型黑名单），**不共用 `BuddyProduct` 类型** —— 那里面 `apiDomain` / `productCode` / `attributionName` / `userAgentByModelFamily` / `appendSessionParams` 等字段对 LobsterAI 全部无意义。详见 README 的「LobsterAI provider」章节与 `docs/lobsterai-integration-plan.md`。
+
+Jet Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**CodeBuddy 与 LobsterAI 两个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。
 
 - **包名**：`dsh-codearts-auth`
 - **入口**：`lib/index.js`（宿主侧）、`lib/client/jet-hub.js`（客户端 bundle）
@@ -55,14 +57,16 @@ Jet Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限
 
 ## 工作方式
 
-本插件定义的所有 `ctx.xxxAuth` 服务（`codeartsAuth`、`buddyAuth`、`workbuddyAuth`）均遵循统一接口：
+本插件定义的所有 `ctx.xxxAuth` 服务（`codeartsAuth`、`buddyAuth`、`workbuddyAuth`、`lobsteraiAuth`）均遵循统一接口：
 
 - `login(options?)` — 执行浏览器登录流程
 - `status()` — 查询凭据状态（configured、source、expiresAt、refreshable）
 - `refresh()` — 手动静默续期凭据
 - `logout()` — 清除凭据并停止续期定时器
 
-服务名由产品 id 派生（`${product.id}Auth`）：两个 `BuddyAuth` 实例分别注册为 `buddyAuth` 与 `workbuddyAuth`，互不覆盖。
+另有按凭据 ref 续期**指定账号**的 `refreshAccountCredential(refName)` —— 供 Jet Hub 账号卡片的「刷新」按钮使用。**不要**用 `refresh()` 去刷账号池里的账号：它读写的是该 provider 的**默认单凭据 ref**（如 `BUDDY_ACCESS_TOKEN`），而账号卡片对应的是 `BUDDY_ACCOUNT_XXX`，会刷到另一个凭据上。
+
+服务名由产品 id 派生（`${product.id}Auth`）：两个 `BuddyAuth` 实例分别注册为 `buddyAuth` 与 `workbuddyAuth`，`LobsteraiAuth` 注册为 `lobsteraiAuth`，互不覆盖。
 
 各 provider 的登录/续期机制不同（详见 README.md），但均通过 `ctx.credentials` 统一管理凭据生命周期。
 
@@ -110,36 +114,54 @@ Jet Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限
 
 ## LLM Provider 约定
 
-- provider 名称：`codearts` / `buddy` / `workbuddy`
+- provider 名称：`codearts` / `buddy` / `workbuddy` / `lobsterai`
 - 端点格式为 OpenAI 兼容
 - 请求签名/鉴权方式因 provider 而异：
   - `codearts`：华为云 `SDK-HMAC-SHA256` 签名方案
   - `buddy` / `workbuddy`：Bearer access_token + 额外自定义头（`X-Product-Code` 随产品切换）
+  - `lobsterai`：Bearer access_token + `X-LobsterAI-Client-*` 头（**无签名**，也**不带**腾讯系归属头）
 - provider 在 `ctx.llm` 上注册，配置在 profile 中可选
 - `buddy` 与 `workbuddy` 共用 `BuddyAdapter`，行为差异全部由 `src/product.ts` 的 `BuddyProduct` 配置驱动；新增同源产品只需加一份配置并注册实例
+- `lobsterai` 用独立的 `LobsteraiAdapter`（协议不同源，见项目概述）；它的产品配置是 `src/lobsterai-product.ts` 的 `LobsteraiProduct`，与 `BuddyProduct` **平行而非继承**
 
 ## 积分领取（每日签到）
 
-`src/credits.ts` 封装每日签到积分接口，**目前只用于 CodeBuddy**（国际版 WorkBuddy 后端无签到接口）：
+两套**协议完全不同**的实现，各自独立：
+
+**CodeBuddy** —— `src/credits.ts`（国际版 WorkBuddy 后端无签到接口）：
 
 - 状态查询：`POST /v2/billing/meter/checkin-activity-status`（**不是** `checkin-status`，后者返回全空占位数据）
 - 领取：`POST /v2/billing/meter/daily-checkin`
 - 幂等：重复领取返回 HTTP 400 + `code:10001`（「今天已签到」），判定**以响应体 code 为准**，不能只看 HTTP 状态
 - **不需要** `X-Device-Token`（图灵盾）：实测服务端未强制校验，故不引入 native SDK 依赖
+
+**LobsterAI** —— `src/lobsterai-credits.ts`（三步，见 `lobsterai2api/sigin.py`）：
+
+- 槽位 `GET /api/client-activities/slot` → 上下文 `GET /api/client-activities/{code}/context` → 领取 `POST /api/client-activities/{code}/actions/check_in`
+- 幂等是**客户端**保证的：请求带 `idempotencyKey`（UUID4）+ 先读 `claimedToday` / `actions`
+- `clientVersion` 是**必填** query 参数，动态拉取（缓存 12h），失败回退 `product.fallbackClientVersion`
+- `platform=win32` 等参数是**客户端形态伪装**，非 Windows 上也照发
+
+两套都遵守的共同约定：
+
 - `credits.claimAll` / `credits.status` **处理该 provider 下的全部账号，含已停用**：停用只影响账号池的自动选择与限流切换，与「该账号今天领了没」无关
+- 逐账号**顺序执行**（并发易触发风控），单个账号失败不中断整批
+- 返回同一个 `ClaimOutcome` 判别联合，使 `computeClaimSummary` 与前端摘要 UI 两套协议共用
 
-## 积分余额（Credits Balance）
+**积分余额（Credits Balance）** 覆盖三个产品、两套端点，语义一致（「查不到」与「余额为 0」严格区分），与签到是彼此独立的能力 —— 不要因为「国际版没有签到」就推断也查不到余额（CodeBuddy 系两个产品通用同一端点）：
 
-**两个 CodeBuddy 系产品通用**，与签到是彼此独立的能力 —— 不要因为「国际版没有签到」就推断也查不到余额：
-
-- 端点：`POST /v2/billing/meter/get-user-resource`，body `{}`
-- 响应**双层嵌套**：`data.Response.Data.Accounts[]`（签到是单层 `data`，此处最易解析错）
-- 总额用各包 `CapacityRemainPrecise` 相加（实测 247.87+100=347.87），**不用**截断过的 `TotalDosage`（347）；累加后 `roundCredits` 规整两位小数（多包浮点噪声会放大成 655.67000031）
-- 包名回退链：`PackageName` → `SubProductName` → `PackageCode`
+- **CodeBuddy 系（buddy / workbuddy 通用，仅 baseURL 随 `product.endpoint` 切换）**：端点 `POST /v2/billing/meter/get-user-resource`，body `{}`
+  - 响应**双层嵌套**：`data.Response.Data.Accounts[]`（签到是单层 `data`，此处最易解析错）
+  - 余额取各包的 **`CycleCapacityRemain`（本周期口径）** 相加，**不是** `CapacityRemainPrecise` / `CapacityRemain`（终身口径）—— 现行实现在 `src/credits.ts` 的 `parseCreditPackage()`；精确值经 `readPreciseNumber()` 优先读带 `Precise` 后缀的字符串版
+  - **不用**截断过的 `TotalDosage`
+  - 包名回退链：`PackageName` → `SubProductName` → `PackageCode`
+- **LobsterAI**：`GET /api/user/profile-summary` → `data.totalCreditsRemaining`；**不要**用 `/api/user/quota`（只有 `freeCreditsTotal=300`，不含活动积分，实测某账号 profile-summary 有 5297.72 而 quota 只有 300）
+- 累加后一律 `roundCredits` 规整两位小数（多包浮点噪声会放大成 655.67000031）
 - 「余额为 0」与「查不到」严格区分：失败时 `balance` 为 `null` + `error`，卡片显示原因而非 0
 - RPC：`credits.balances`；前端 `AccountCard` 的 `CreditBalanceRow`，面板有「刷新积分」按钮
 - **CodeArts 不支持**（华为云账号体系，无腾讯计费接口）：`productById('codearts')` 为 `undefined`，三个积分端点都会回 `bad-request: unsupported provider: codearts`
-- 该接口**不在 CLI 内核**里（内核只有 `get-dosage-notify`），静态搜索找不到，靠真实凭据实测发现
+- CodeBuddy 系该接口**不在 CLI 内核**里（内核只有 `get-dosage-notify`），静态搜索找不到，靠真实凭据实测发现
+
 
 ## 积分能力必须在请求前判定（`credits-capabilities.js`）
 
@@ -150,6 +172,7 @@ Jet Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限
 | `codearts` | ✗ | ✗ |
 | `buddy` | ✓ | ✓ |
 | `workbuddy` | ✓ | ✗（国际版后端无签到接口） |
+| `lobsterai` | ✓ | ✓（`client-activities` 三步流程） |
 
 要点：
 
@@ -161,3 +184,5 @@ Jet Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限
 ## X-Domain 必须跟随产品，而非凭据
 
 `checkinHeaders`（`src/credits.ts`）用 `product.apiDomain` 构造 `X-Domain`，**不优先用 `credential.domain`**。凭据里的 domain 是登录时的快照，跨产品迁移后会留下旧值（早期 workbuddy 指向中国版），跟着它走会让请求的 baseURL 与身份标识自相矛盾。
+
+LobsterAI **不适用本条**（它根本不发 `X-Domain`）；其对应约束是「`apiBase` 与 `portalBase` 都是编译期常量，不从凭据推断」。

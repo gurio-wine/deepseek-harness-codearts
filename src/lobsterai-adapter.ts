@@ -1,0 +1,896 @@
+/**
+ * LobsterAI（有道龙虾）LLM 适配器。
+ *
+ * 骨架取自 `src/buddy-adapter.ts`（本插件已验证的实现），但**协议差异全部重写**：
+ * LobsterAI 与腾讯系只在「OpenAI 兼容 + SSE」这一层相同，其余没有一处能照抄。
+ *
+ * ## 与 `BuddyAdapter` 的关键差异（逐条对应计划文档 §3.5-C）
+ *
+ * | 项 | 处理 |
+ * |---|---|
+ * | URL | `${product.apiBase}/api/proxy/v1/chat/completions` |
+ * | 请求头 | 只设 `Authorization` / `Content-Type` / `Accept` / `User-Agent` / `X-LobsterAI-Client-*`；**不设**腾讯系归属头 |
+ * | `stream` | **恒为 `true`** —— 上游只支持 SSE，`stream:false` 返回 500 |
+ * | `tool_choice` | **不适用**：DSH 的 `GenerateOptions` 无该字段，且 body 由本适配器自建，天然不会出现（Go 桥接层要归一化是因为它转发客户端的原始 body） |
+ * | `prompt_cache_key` | **不发** —— 那是腾讯后端的前缀缓存机制，此处未实测支持 |
+ * | 思考等级 | **不照抄** buddy 的 deepseek 补档逻辑（那是针对腾讯后端实测的）；仅透传 |
+ * | 图片 | **不支持**，`inputModalities` 恒为 `['text']` |
+ *
+ * 可以原样复用的是 `src/sse.ts` 的三个工具函数（`readWithIdleTimeout` /
+ * `resolveToolPairing` / `normalizeToolArguments` / `isTruncatedArguments`）——
+ * 它们处理的是 **OpenAI 协议层的通用陷阱**，与具体厂商无关。
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
+import {
+  LlmAdapter, LlmError,
+  ReasoningEffortId,
+} from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { AccountPool } from './account-pool.js'
+import { parseRateLimitError } from './llm-adapter.js'
+import {
+  LOBSTERAI_CHAT_PATH,
+  LOBSTERAI_MODELS_PATH,
+  LOBSTERAI_REQUEST_TIMEOUT_MS,
+  isLobsteraiExpired,
+  lobsteraiChatHeaders,
+  lobsteraiKeyfromBody,
+  parseLobsteraiEnvelope,
+  readStringField,
+  type LobsteraiCredential,
+} from './lobsterai.js'
+import { LOBSTERAI, type LobsteraiFallbackModel, type LobsteraiProduct } from './lobsterai-product.js'
+import { classifyLobsteraiError, recordsLobsteraiRateLimit, shouldRotateLobsteraiAccount } from './lobsterai-errors.js'
+import { isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, resolveToolPairing } from './sse.js'
+
+/** 本适配器注册的 provider 路由名（历史常量，等价于 `LOBSTERAI.id`）。 */
+export const PROVIDER = 'lobsterai'
+
+/**
+ * 限流重置时间的本地兜底（毫秒，1 小时）。
+ *
+ * 仅在**解析不出服务端声明的重置时刻**时使用（如纯文本 429）。
+ * 取值与 `parseRateLimitError` 内部 JSON 路径下的 fallback 一致，
+ * 避免同一场景在不同路径给出不同的冷却时长。
+ */
+const LOBSTERAI_RATE_LIMIT_FALLBACK_MS = 3_600_000
+
+/**
+ * 单次请求最多换几个账号（含首次），对齐 Go 的 `MaxRotate`。
+ *
+ * Go 在 `server.NewHandler` 中把 `MaxRotate` 默认设为 3（`handler.go:38-40`），
+ * 循环写成 `for i := 0; i < h.cfg.MaxRotate; i++`（`handler.go:190`），
+ * 注释明写是**防雪崩**：账号池很大时若逐个试完，一次用户请求可能打出
+ * N 个上游请求，既放大延迟也放大额度消耗。
+ */
+const LOBSTERAI_MAX_ROTATE = 3
+
+/**
+ * LobsterAI 远端模型条目。
+ *
+ * 远端 `GET /api/models/available` 只返回 `modelId`/`modelName`/`provider`/
+ * `apiFormat` —— **不含上下文窗口与推理等级**。因此这个结构刻意比
+ * `BuddyRemoteModel` 更小：多出来的字段没有数据来源，声明了只会误导。
+ */
+export interface LobsteraiRemoteModel {
+  id: string
+  name: string
+}
+
+/**
+ * 解析 `GET /api/models/available` 的响应。
+ *
+ * 响应形状（`internal/upstream/client.go:254-278`）：
+ * `{code:0, data:[{modelId, modelName, provider, apiFormat}]}`
+ *
+ * 只取 `modelId` 与 `modelName`：`provider`/`apiFormat` 是上游内部字段，
+ * 对模型选择器没有意义。
+ */
+export function parseLobsteraiModels(body: unknown): LobsteraiRemoteModel[] {
+  const envelope = parseLobsteraiEnvelope(body)
+  if (!envelope.ok) return []
+  const raw = (envelope.data as { data?: unknown }).data
+  if (!Array.isArray(raw)) return []
+  const models: LobsteraiRemoteModel[] = []
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue
+    const record = item as Record<string, unknown>
+    const id = readStringField(record, 'modelId')
+    if (id.length === 0) continue
+    const name = readStringField(record, 'modelName')
+    models.push({ id, name: name.length > 0 ? name : id })
+  }
+  return models
+}
+
+/**
+ * 构造模型列表请求的 query 串（keyfrom 身份载荷）。
+ *
+ * 注意**不含 `refreshToken`** —— `client.go:229-241` 只用了 `KeyfromBody()`
+ * 的字段（firstKeyfrom/latestKeyfrom/version/uuid/userId）。
+ * 把 refreshToken 放进 query 既是信息泄露（会进服务端访问日志），
+ * 也不是该端点的预期输入。
+ */
+export function buildLobsteraiModelsQuery(
+  credential: LobsteraiCredential,
+  clientVersion: string,
+): string {
+  const body = lobsteraiKeyfromBody(credential, clientVersion)
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(body)) {
+    if (typeof value === 'string' && value.length > 0) params.set(key, value)
+  }
+  return params.toString()
+}
+
+/** `LobsteraiAdapter` 的构造选项。 */
+export interface LobsteraiAdapterOptions {
+  credentialRef: CredentialRef
+  /** 从凭据存储解析凭据。 */
+  resolveCredential: () => Promise<LobsteraiCredential | undefined>
+  /** 静默续期凭据。 */
+  refresh: () => Promise<void>
+  /** 动态拉取远端模型列表；失败时回退到 `product.fallbackModels`。 */
+  fetchRemoteModels?: () => Promise<LobsteraiRemoteModel[]>
+  /** 解析当前客户端版本号（chat 与模型列表都要带）。 */
+  resolveClientVersion?: () => Promise<string>
+  fetchImpl?: typeof fetch
+  /** 多账号池（用于限流时切换账号）。 */
+  accountPool?: AccountPool
+  /** 产品配置；默认 {@link LOBSTERAI}。 */
+  product?: LobsteraiProduct
+}
+
+/** 将消息内容载荷展平为纯文本字符串。 */
+function contentToText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((block): block is { type: string; text: unknown } =>
+      typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'text')
+    .map((block) => String(block.text))
+    .join('')
+}
+
+/**
+ * 将 harness 对话消息序列化为 OpenAI chat-completions 传输格式。
+ *
+ * 与 buddy 适配器的差异：这里**不强制** assistant 携带 `reasoning_content`
+ * （那是腾讯后端对推理模型的要求，未在 LobsterAI 上实测），
+ * 但仍保留其中的**通用协议要求**：
+ * - 孤儿工具调用清理（见 `resolveToolPairing` 的说明，后端会 400）；
+ * - 正文为空且有 `tool_calls` 时 `content` 必须为 `null`（OpenAI 规范）。
+ *
+ * 图片块在此**不处理**：LobsterAI 是否支持图片输入未实测，
+ * `stream()` 已在更早的地方以 `UNSUPPORTED_CONTENT` 拒绝。
+ */
+function serializeMessages(
+  messages: readonly { role: string; content: unknown }[],
+): Array<Record<string, unknown>> {
+  const wire: Array<Record<string, unknown>> = []
+  // OpenAI 兼容协议要求 tool_call 与 tool 结果严格配对：缺任一侧后端都会
+  // 以 400 拒绝整个请求，而这条坏历史会被每次请求原样重放 ——
+  // 表现为「会话突然报废，此后所有消息都无回复」。发出前剔除可让会话自愈。
+  const { keepCallIds, keepResultIds } = resolveToolPairing(messages)
+
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      const content = Array.isArray(message.content) ? message.content : []
+      const toolCalls = content
+        .filter((block): block is { type: string; id: unknown; name: unknown; arguments: unknown } =>
+          typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'tool-call')
+        .filter(block => keepCallIds.has(String(block.id)))
+        .map((block) => ({
+          id: String(block.id),
+          type: 'function' as const,
+          function: { name: String(block.name), arguments: normalizeToolArguments(String(block.arguments)) },
+        }))
+      const reasoning = content
+        .filter((block): block is { type: string; text: unknown } =>
+          typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'reasoning')
+        .map((block) => String(block.text))
+        .join('')
+      const text = contentToText(content)
+      wire.push({
+        role: 'assistant',
+        // 正文为空且有工具调用时 content 必须为 null（OpenAI 规范）。
+        content: text.length === 0 && toolCalls.length > 0 ? null : text,
+        ...reasoning.length > 0 ? { reasoning_content: reasoning } : {},
+        ...toolCalls.length > 0 ? { tool_calls: toolCalls } : {},
+      })
+      continue
+    }
+    if (message.role === 'system') {
+      wire.push({ role: 'system', content: contentToText(message.content) })
+      continue
+    }
+    // user 角色：工具结果搭载在 harness 用户消息中，展开为独立的 role:'tool' 消息。
+    const content = Array.isArray(message.content) ? message.content : []
+    const toolResults = content.filter((block): block is { type: string; toolCallId: unknown; content: unknown } =>
+      typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'tool-result')
+    const text = contentToText(message.content)
+    if (text.length > 0 || toolResults.length === 0) wire.push({ role: 'user', content: text })
+    for (const result of toolResults) {
+      // 丢弃孤儿工具结果：没有对应 assistant tool_call 的结果同样会让后端 400。
+      if (!keepResultIds.has(String(result.toolCallId))) continue
+      wire.push({
+        role: 'tool',
+        tool_call_id: String(result.toolCallId),
+        content: contentToText(result.content) || '(no output)',
+      })
+    }
+  }
+  return wire
+}
+
+/** 安全读取 Error.message。 */
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  try { return String(error) } catch { return 'unknown error' }
+}
+
+/** 从错误体提取可读 detail 文本。 */
+function errorDetail(body: string): string {
+  try {
+    const data = JSON.parse(body) as Record<string, unknown>
+    const parts = [
+      typeof data.code === 'number' || typeof data.code === 'string' ? `code=${String(data.code)}` : undefined,
+      typeof data.message === 'string' ? data.message : undefined,
+      typeof data.msg === 'string' ? data.msg : undefined,
+    ].filter((value): value is string => value !== undefined)
+    if (parts.length > 0) return parts.join(' ')
+  } catch {
+    // 非 JSON 错误体
+  }
+  return body
+}
+
+/** 将 HTTP 状态码映射为 harness 错误码。 */
+function httpErrorCode(status: number): string {
+  if (status === 401 || status === 403) return 'AUTH'
+  if (status === 429) return 'RATE_LIMIT'
+  if (status === 400) return 'INVALID_REQUEST'
+  if (status >= 500) return 'SERVER'
+  return `HTTP_${status}`
+}
+
+/**
+ * 判断是否为传输级错误（可重试的 TRANSPORT）。
+ *
+ * 与 buddy 适配器同源：半开连接与 TCP 重置都会以这些特征出现。
+ */
+function isTransportError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const message = error.message.toLowerCase()
+  if (message.includes('terminated')) return true
+  if (error.name.startsWith('UND_ERR_')) return true
+  if (message.includes('fetch failed')) return true
+  if (message.includes('econnreset') || message.includes('epipe') || message.includes('socket hang up')) return true
+  return false
+}
+
+/**
+ * SSE 空闲超时（毫秒）。
+ *
+ * 分两阶段：等待首 token 的窗口与两次 chunk 之间的最大静默，均可用环境变量覆盖
+ * （便于测试用短超时触发 TIMEOUT 路径）。**每次 `stream()` 调用时读取** ——
+ * 模块顶层常量会在 import 时定型，导致测试里设环境变量不生效。
+ *
+ * 这层保护的必要性：半开 SSE 连接下 `reader.read()` 会永久挂起，
+ * adapter 的 generator 永不返回，会话卡死在「运行中」，用户无法恢复。
+ */
+function resolveFirstTokenTimeoutMs(): number {
+  return Number.parseInt(process.env.DSH_LOBSTERAI_SSE_FIRST_TOKEN_TIMEOUT_MS ?? '', 10) || 120_000
+}
+function resolveChunkTimeoutMs(): number {
+  return Number.parseInt(process.env.DSH_LOBSTERAI_SSE_CHUNK_TIMEOUT_MS ?? '', 10) || 120_000
+}
+
+/** LobsterAI 模型适配器。使用 Bearer access_token 鉴权，仅支持 SSE。 */
+export class LobsteraiAdapter extends LlmAdapter {
+  private readonly product: LobsteraiProduct
+  private readonly fetchImpl: typeof fetch
+  /** 动态模型缓存（首次 listModels 成功后填充）。 */
+  private remoteModels: LobsteraiRemoteModel[] | undefined
+  /** 产品级兜底模型索引（`product.fallbackModels` 的 id → 条目）。 */
+  private readonly fallbackIndex: ReadonlyMap<string, LobsteraiFallbackModel>
+
+  constructor(private readonly options: LobsteraiAdapterOptions) {
+    super()
+    this.product = options.product ?? LOBSTERAI
+    this.fetchImpl = options.fetchImpl ?? fetch
+    this.fallbackIndex = new Map(
+      (this.product.fallbackModels ?? []).map((model) => [model.id, model]),
+    )
+  }
+
+  /**
+   * 描述本适配器拥有的 provider 路由。
+   *
+   * 对入参做防御性归一化：DSH 会强制校验 `info.id === provider`，而模型设置页
+   * 会用该 id 计算 `deriveKeyRef(provider)`（内部调 `provider.toUpperCase()`）。
+   * 一旦 provider 不是字符串（上游传入 undefined），直接回退到本产品的 id，
+   * 避免 `undefined.toUpperCase is not a function` 在客户端炸开。
+   */
+  providerInfo(provider: string): LlmProviderInfo {
+    const id = typeof provider === 'string' && provider.length > 0 ? provider : this.product.id
+    return { id, name: this.product.displayName }
+  }
+
+  /**
+   * 懒加载远端模型目录（仅拉取一次）。
+   *
+   * `listModels` 与 `resolveModel` 共用：`resolveModel` 可能先于 `listModels`
+   * 被调用（如直接从历史会话进入），此时同样需要触发一次拉取。
+   */
+  private async ensureRemoteModels(): Promise<void> {
+    if (this.remoteModels !== undefined || this.options.fetchRemoteModels === undefined) return
+    try {
+      const models = await this.options.fetchRemoteModels()
+      if (models.length > 0) this.remoteModels = models
+    } catch {
+      // 远端不可用：回退兜底目录（由 staticFallbackModels 提供）。
+    }
+  }
+
+  /**
+   * 静态兜底模型目录。
+   *
+   * **不做 buddy 那样的「以兜底表为准」裁剪**（`reconcileWithFallback`）：
+   * LobsterAI 的远端接口是**权威的**（产品兜底表本身就是从它实测抄来的），
+   * 远端可用时应完全采信，兜底只在远端整体失败时顶替。
+   */
+  private staticFallbackModels(): readonly { id: string; name: string }[] {
+    return this.product.fallbackModels.map((model) => ({ id: model.id, name: model.name }))
+  }
+
+  async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
+    await this.ensureRemoteModels()
+    const source = this.remoteModels ?? this.staticFallbackModels()
+    // 用户在 Jet Hub 关闭的模型（黑名单制：不在表里即默认打开）。
+    const disabled = this.options.accountPool?.disabledModelsFor(this.product.id)
+    const listed = disabled === undefined || disabled.size === 0
+      ? source
+      : source.filter((model) => !disabled.has(model.id))
+    return listed.map((model) => ({
+      provider: this.product.id,
+      id: model.id,
+      name: model.name,
+      // 图片输入未实测支持，一律只报文本。
+      inputModalities: ['text'] as const,
+    }))
+  }
+
+  async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+    await this.ensureRemoteModels()
+    const remoteName = this.remoteModels?.find((entry) => entry.id === model)?.name
+    const resolved: LlmResolvedModelInfo = {
+      provider,
+      id: model,
+      name: remoteName ?? this.fallbackIndex.get(model)?.name ?? model,
+      inputModalities: ['text'],
+    }
+    // 上下文窗口：只用产品兜底表的值（远端不返回该字段）。
+    // 注意这是**桥接层的估计值**，见 LobsteraiFallbackModel.contextWindow 的说明。
+    const contextWindow = this.fallbackIndex.get(model)?.contextWindow
+    if (contextWindow !== undefined) resolved.context = { contextWindow }
+    // 思考等级：**刻意不声明**。LobsterAI 是否支持 reasoning_effort 未实测
+    // （Go 桥接层完全没处理）。不声明时模型选择器会显示「当前模型未提供推理等级」，
+    // 这是诚实的；声明了却无效会让用户以为档位生效了。
+    return resolved
+  }
+
+  /**
+   * 兼容 0.1.1-rc.2：新版 `LlmRuntime.prepareCall()` 会调用
+   * `registration.adapter.prepareCall(...)`，而本仓库链接的 dsh-llm 副本
+   * 基类尚未提供该方法，缺少时会在每轮请求开始时抛
+   * `registration.adapter.prepareCall is not a function`。
+   * 与 `BuddyAdapter` 同款 shim。
+   */
+  async prepareCall(
+    provider: string,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<{ model: LlmResolvedModelInfo; stream: (options: GenerateOptions) => AsyncIterable<StreamChunk> }> {
+    return {
+      model: await this.resolveModel(provider, model, signal),
+      stream: (options: GenerateOptions) => this.stream(options),
+    }
+  }
+
+  /** 解析客户端版本号（未注入时用兜底值）。 */
+  private async clientVersion(): Promise<string> {
+    if (this.options.resolveClientVersion === undefined) return this.product.fallbackClientVersion
+    try {
+      return await this.options.resolveClientVersion()
+    } catch {
+      return this.product.fallbackClientVersion
+    }
+  }
+
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    // 图片：LobsterAI 未实测支持，明确报错而不是静默丢弃（静默丢弃会让用户
+    // 以为模型看到了图片）。检查在取凭据之前，省掉一次无谓的凭据读取。
+    for (const message of options.messages) {
+      if (!Array.isArray(message.content)) continue
+      const hasImage = message.content.some((block) =>
+        typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'image')
+      if (hasImage) {
+        throw new LlmError(
+          'lobsterai: 当前 provider 不支持图片输入',
+          'UNSUPPORTED_CONTENT',
+        )
+      }
+    }
+
+    // 1. 获取凭据（过期则先静默续期）
+    let credential = await this.options.resolveCredential()
+    if (credential === undefined || isLobsteraiExpired(credential)) {
+      await this.options.refresh()
+      credential = await this.options.resolveCredential()
+    }
+    if (credential === undefined || credential.access_token.length === 0) {
+      throw new LlmError('lobsterai: no usable credential; log in first', 'MISSING_CREDENTIAL')
+    }
+
+    // 2. 记录当前账号（限流时可切换）
+    let currentAccountId = ''
+    if (this.options.accountPool) {
+      try {
+        currentAccountId = await this.options.accountPool.findAccountIdByCredential(
+          this.product.id,
+          credential.access_token,
+        )
+        if (currentAccountId === '') {
+          // 账号池里没有匹配该凭据的账号（例如用的是回退的单凭据），
+          // 此时限流无法归属到具体账号，UI 上也显示不出标记。
+          console.warn('[lobsterai] 当前凭据未匹配到账号池条目，限流记录将被跳过')
+        }
+      } catch (error) {
+        console.warn('[lobsterai] 账号匹配失败（不影响本次请求）:', error)
+      }
+    }
+
+    await this.ensureRemoteModels()
+
+    // 3. 构造请求体
+    const messages = serializeMessages(options.messages)
+    if (options.system !== undefined && options.system.length > 0) {
+      messages.unshift({ role: 'system', content: options.system })
+    }
+    const tools = options.tools?.map((tool) => ({
+      type: 'function' as const,
+      function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+    }))
+    const bodyObj: Record<string, unknown> = {
+      model: options.model,
+      messages,
+      // **恒为 true**：上游只支持 SSE，stream:false 会返回 500
+      // （`client.go:168-195` prepareChatBody 强制改写）。
+      stream: true,
+    }
+    if (tools !== undefined && tools.length > 0) bodyObj.tools = tools
+    // 关于 `tool_choice`：Go 桥接层要把它归一化（`""` / `"none"` / `null`
+    // 一律删除，见 `client.go:176-189` 的 `prepareChatBody`），那是因为它
+    // **转发任意 OpenAI SDK 客户端发来的原始 body**，无法预知里面写了什么。
+    //
+    // 本适配器是自己构造 body：DSH 的 `GenerateOptions` 根本没有 `toolChoice`
+    // 字段（见 dsh-llm 的 types.d.ts），所以 `tool_choice` 天然不会出现 ——
+    // 目标状态（字段缺席）已经达成，无需再写一段无效的归一化代码。
+    if (options.temperature !== undefined) bodyObj.temperature = options.temperature
+    if (options.maxTokens !== undefined) bodyObj.max_tokens = options.maxTokens
+    if (options.stop !== undefined && options.stop.length > 0) bodyObj.stop = options.stop
+    // 思考等级：仅在调用方显式传入时透传，不主动补档
+    // （buddy 那套「deepseek 系必须补档否则不思考」是针对腾讯后端的实测，
+    // 未在 LobsterAI 上验证，照搬会造成非法参数 400）。
+    if (options.reasoningEffort !== undefined) {
+      bodyObj.reasoning_effort = options.reasoningEffort
+    }
+    // **不发 prompt_cache_key**：那是腾讯后端的前缀缓存机制，此处未实测支持。
+    const body = JSON.stringify(bodyObj)
+
+    // 4. 发送请求（401/403 时刷新一次凭据后重试）
+    let response = await this.send(credential, body, options)
+    if (!response.ok && (response.status === 401 || response.status === 403)) {
+      await this.options.refresh()
+      const refreshed = await this.options.resolveCredential()
+      if (refreshed === undefined || refreshed.access_token.length === 0) {
+        throw new LlmError('lobsterai: credential expired and refresh failed', 'AUTH', { status: response.status })
+      }
+      credential = refreshed
+      response = await this.send(credential, body, options)
+    }
+
+    if (!response.ok) {
+      let errorText = await response.text().catch(() => '')
+      // 当前这次失败的**成组**状态（status / kind / body 必须同源）。
+      //
+      // 用一组可变变量而不是只看循环外的 `kind`：换号循环里
+      // `response`、`errorText` 每轮都被覆盖，若单把 `kind` 留在循环外，
+      // 就会出现「A 账号的 kind 配 B 账号的 status/body」——
+      //   实测：A=402(积分不足) → B=503 时最终 code 变成 SERVER，
+      //   用户完全看不到「积分不足」这个真实原因；
+      //   且会拿 A 的 kind 去判断「要不要给 B 记限流徽章」，
+      //   给 B 写上「该模型限流 1 小时」这种虚假信息。
+      let lastStatus = response.status
+      let lastKind = classifyLobsteraiError(response.status, errorText)
+
+      // 任何非 2xx 都轮转到下一个账号（对齐 Go `handler.go:218-243`：
+      // 那个 switch 每个分支都以 continue 结尾）。策略判定集中在
+      // `shouldRotateLobsteraiAccount` 里，不在这里内联条件 ——
+      // 否则「策略声明」与「实际行为」两处分叉，后续维护必然互相误导。
+      if (this.options.accountPool && shouldRotateLobsteraiAccount(lastKind)) {
+        const tried = new Set<string>()
+        if (currentAccountId) tried.add(currentAccountId)
+
+        // 换号次数上限，对齐 Go 的 `MaxRotate`（`handler.go:190` 的
+        // `for i := 0; i < h.cfg.MaxRotate; i++`，默认值 3 见
+        // `server.NewHandler`）。防雪崩：账号池很大时若逐个试完，
+        // 一次用户请求会打出 N 个上游请求，放大延迟与额度消耗。
+        //
+        // ⚠️ **减 1**：Go 的循环计数**包含首个账号**（它每次迭代都
+        // `PickExcluding` 取一个号），而本适配器在进入这个循环**之前**
+        // 已经用首个凭据发过一次请求了。若这里不减，总请求数会变成
+        // 1 + MaxRotate = 4，比 Go 多一次。
+        const maxRotate = LOBSTERAI_MAX_ROTATE - 1
+        for (let round = 0; round < maxRotate; round++) {
+          // 用**本轮**的 lastKind 判断是否该记徽章，而不是循环外的 kind：
+          // 只有 Go 里真正 `Cooldown(...)` 的三类才记（见
+          // `recordsLobsteraiRateLimit` 的说明），且必须记在**真正失败的那个
+          // 账号**上 —— currentAccountId 在下面的循环体里会被推进到下一个账号。
+          if (currentAccountId && recordsLobsteraiRateLimit(lastKind)) {
+            // 两层取值：优先 `parseRateLimitError` 从错误体里抠出**服务端声明的**
+            // 重置时刻；抠不到则用本地兜底。两者都要能落地 ——
+            // 若在抠不到时直接跳过记录，UI 上就不会出现任何限流标记，
+            // 「重测/重置」按钮也就无从操作。
+            const parsed = parseRateLimitError(errorText, options.model)
+            await this.options.accountPool.updateModelRateLimit(
+              currentAccountId,
+              parsed?.modelId ?? options.model,
+              // `parseRateLimitError` 内部要求错误体是 JSON（它 `JSON.parse` 取 msg），
+              // 而部分上游/网关会用**纯文本** 429。此时它返回 null，这里用
+              // 「1 小时后」兜底 —— 与它自己 JSON 路径下的 fallback 同一口径，
+              // 也与本插件「标记只是快照、可主动重测」的语义一致。
+              parsed?.resetTimeMs ?? Date.now() + LOBSTERAI_RATE_LIMIT_FALLBACK_MS,
+            )
+          }
+          // 必须把 `tried` 传给池：失败类别为 5xx / 请求错误时**不写限流标记**
+          // （它们不是限流，不该留徽章），刚失败的账号仍是池里排序第一，
+          // 不排除就会拿回同一个账号、命中下面的 `tried.has` 而**立即 break**
+          // —— 换号形同虚设。对齐 Go 的 `PickExcluding(tried)`（`pool.go:131`）。
+          const next = await this.options.accountPool.getAvailableAccount(
+            this.product.id, options.model, tried,
+          )
+          if (!next || tried.has(next.entry.id)) break
+          tried.add(next.entry.id)
+          credential = next.credential as LobsteraiCredential
+          currentAccountId = next.entry.id
+          response = await this.send(credential, body, options)
+          if (response.ok) {
+            yield* this.consumeSse(response, options)
+            return
+          }
+          // 覆盖成组状态：status / kind / body 三者必须一起更新，
+          // 否则下面抛出的错误码与实际原因会对不上（见上方说明）。
+          errorText = await response.text().catch(() => '')
+          lastStatus = response.status
+          lastKind = classifyLobsteraiError(response.status, errorText)
+          // 新账号也不可轮转（理论上不会：shouldRotate 仅对 none 为 false，
+          // 而非 2xx 已排除 none）—— 留作防御，避免将来改动引入死循环。
+          if (!shouldRotateLobsteraiAccount(lastKind)) break
+        }
+        // 试遍候选：报「均不可用」，并带上**最后一次**的真实原因（不吞诊断信息）。
+        throw new LlmError(
+          `lobsterai: 模型 ${options.model} 所有账号均不可用（${errorDetail(errorText)}）`,
+          lastKind === 'hard-credit' ? 'QUOTA_EXCEEDED' : httpErrorCode(lastStatus),
+          { status: lastStatus },
+        )
+      }
+
+      // 积分不足但无账号池（或只有一个账号）：用可读文案明确告知，
+      // 而不是抛一个泛泛的 HTTP 错误 —— 这是 LobsterAI 最主要的失败模式。
+      if (lastKind === 'hard-credit') {
+        throw new LlmError(`lobsterai: 积分不足（${errorDetail(errorText)}）`, 'QUOTA_EXCEEDED', { status: lastStatus })
+      }
+      throw new LlmError(`lobsterai: ${errorDetail(errorText)}`, httpErrorCode(lastStatus), { status: lastStatus })
+    }
+
+    // 5. 消费 SSE 流
+    yield* this.consumeSse(response, options)
+  }
+
+  /** 发起一次 chat 请求；网络失败映射为可重试的 TRANSPORT 错误。 */
+  private async send(
+    credential: LobsteraiCredential,
+    body: string,
+    options: GenerateOptions,
+  ): Promise<Response> {
+    const clientVersion = await this.clientVersion()
+    const headers = new Headers(lobsteraiChatHeaders(credential, this.product, clientVersion))
+    try {
+      return await this.fetchImpl(`${this.product.apiBase}${LOBSTERAI_CHAT_PATH}`, {
+        method: 'POST',
+        headers,
+        body,
+        signal: options.signal,
+      })
+    } catch (error) {
+      if (options.signal?.aborted) throw error
+      if (isTransportError(error)) {
+        throw new LlmError(`lobsterai: transport error: ${errorMessage(error)}`, 'TRANSPORT', { cause: error as Error })
+      }
+      throw error
+    }
+  }
+
+  /**
+   * 消费 SSE 响应并产出 `StreamChunk`。
+   *
+   * 上游返回标准 OpenAI SSE。移植了 Go 侧 `Aggregate` 的三处兼容处理：
+   * 1. **容忍 `data:` 后无空格**（`sse.go:37-39` 注释写明「龙虾上游实测无空格」）——
+   *    这里靠 `line.slice(5).trim()` 天然兼容两种形态；
+   * 2. `reasoning_content` 单独成块（`sse.go:74-76`）；
+   * 3. `tool_calls` 按 `index` 合并（首片带 id/name，后续只带 arguments 片段）。
+   *
+   * 额外保留 buddy 适配器里两条实测得出的防坑规则（与厂商无关，属协议层）：
+   * - **`function.name` 只允许非空覆盖**：后续分片带空串 `""`，
+   *   直接覆盖会清空已解析出的工具名 → `unknown tool ""`；
+   * - **`finish_reason` 映射顺序**：`length` / 中途断流 / 参数残缺一律归为
+   *   `max-tokens`，否则 harness 会执行残缺 JSON 参数并污染会话历史。
+   */
+  private async *consumeSse(
+    response: Response,
+    options: GenerateOptions,
+  ): AsyncIterable<StreamChunk> {
+    if (!response.body) throw new LlmError('lobsterai: empty model response body', 'EMPTY_RESPONSE')
+
+    const blocks: Array<{ index: number; kind: 'text' | 'reasoning'; text: string }> = []
+    let nextIndex = 0
+    const toolCalls = new Map<number, { index: number; text: string; callId?: string; name?: string }>()
+    const toolOrder: number[] = []
+    const toolIds = new Map<number, string>()
+    let buffer = ''
+    let streamEnded = false
+    let finishReason: 'stop' | 'tool_calls' | 'length' | undefined
+    /**
+     * 是否已通过 `delta.content` 收到过正文。
+     *
+     * 用途与 Go 的 `gotAnyContent`（`sse.go:72,98`）一致：一旦为 true，
+     * 就不再采纳 `message.content` 这条兼容回退路径，避免两种下发形态
+     * 同时出现时把内容重复拼接。
+     */
+    let gotAnyContent = false
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let firstTokenReceived = false
+
+    try {
+      for (;;) {
+        if (streamEnded) break
+        let result
+        try {
+          const timeoutMs = firstTokenReceived ? resolveChunkTimeoutMs() : resolveFirstTokenTimeoutMs()
+          const phase = firstTokenReceived ? 'chunk' : 'first-token'
+          result = await readWithIdleTimeout(reader, timeoutMs, 'lobsterai', options.signal, phase)
+          if (!result.done) firstTokenReceived = true
+        } catch (error) {
+          if (options.signal?.aborted) throw error
+          if (error instanceof LlmError) throw error
+          if (isTransportError(error)) {
+            throw new LlmError(`lobsterai: sse transport error: ${errorMessage(error)}`, 'TRANSPORT', { cause: error as Error })
+          }
+          throw error
+        }
+        if (result.done) break
+        buffer += decoder.decode(result.value, { stream: true })
+        let newline: number
+        while ((newline = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newline).trim()
+          buffer = buffer.slice(newline + 1)
+          if (!line.startsWith('data:')) continue
+          // 兼容 "data: {...}" 与 "data:{...}"（上游实测无空格）。
+          const payload = line.slice(5).trim()
+          if (payload === '[DONE]') {
+            streamEnded = true
+            break
+          }
+          let data: {
+            error?: { message?: string }
+            choices?: Array<{
+              delta?: {
+                content?: string
+                reasoning_content?: string
+                tool_calls?: Array<{
+                  index?: number
+                  id?: string
+                  function?: { name?: string; arguments?: string }
+                }>
+              }
+              /** 有的上游把完整消息放在 message 而非 delta（对齐 sse.go:97-102）。 */
+              message?: { content?: string }
+              finish_reason?: string
+            }>
+            usage?: {
+              prompt_tokens?: number
+              completion_tokens?: number
+              prompt_tokens_details?: { cached_tokens?: number }
+              completion_tokens_details?: { reasoning_tokens?: number }
+              prompt_cache_hit_tokens?: number
+            }
+          }
+          try {
+            data = JSON.parse(payload)
+          } catch {
+            continue
+          }
+          if (data.error !== undefined) {
+            throw new LlmError(`lobsterai: ${data.error.message ?? 'unknown error'}`, 'SERVER')
+          }
+          const choice = data.choices?.[0]
+          const delta = choice?.delta
+          if (typeof choice?.finish_reason === 'string') {
+            finishReason = choice.finish_reason as 'stop' | 'tool_calls' | 'length'
+          }
+          // `message.content` 只是**兼容回退**：有的上游把完整消息放在 message
+          // 而非 delta 里（对齐 `sse.go:97-102`）。它与 delta 是**互斥**的两种
+          // 下发形态，不能同时采纳 —— 一旦某个 chunk 既有 delta.content 又有
+          // message.content，无守卫的 `??` 会把两段都拼进去。
+          //
+          // Go 用 `&& !gotAnyContent`（`sse.go:98`，标志位在 `sse.go:72`
+          // 每次写入 delta.content 时置 true）表达「只要已经收到过正文，
+          // 就再也不采纳 message 形态」。这里照搬该语义。
+          const deltaContent = delta?.content
+          const textDelta = deltaContent !== undefined && deltaContent.length > 0
+            ? deltaContent
+            : (!gotAnyContent && typeof choice?.message?.content === 'string' ? choice.message.content : undefined)
+          if (textDelta !== undefined && textDelta.length > 0) {
+            if (deltaContent !== undefined && deltaContent.length > 0) gotAnyContent = true
+            let block = blocks.find(candidate => candidate.kind === 'text')
+            if (block === undefined) {
+              block = { index: nextIndex++, kind: 'text', text: '' }
+              blocks.push(block)
+              yield { type: 'block-start', index: block.index, blockType: 'text' }
+            }
+            block.text += textDelta
+            yield { type: 'text-delta', index: block.index, text: textDelta }
+          }
+          if (delta?.reasoning_content !== undefined && delta.reasoning_content.length > 0) {
+            let block = blocks.find(candidate => candidate.kind === 'reasoning')
+            if (block === undefined) {
+              block = { index: nextIndex++, kind: 'reasoning', text: '' }
+              blocks.push(block)
+              yield { type: 'block-start', index: block.index, blockType: 'reasoning' }
+            }
+            block.text += delta.reasoning_content
+            yield { type: 'reasoning-delta', index: block.index, text: delta.reasoning_content }
+          }
+          for (const call of delta?.tool_calls ?? []) {
+            const wireIndex = call.index ?? 0
+            if (typeof call.id === 'string' && call.id.length > 0) toolIds.set(wireIndex, call.id)
+            const callId = toolIds.get(wireIndex) ?? `call_${wireIndex}`
+            let block = toolCalls.get(wireIndex)
+            if (block === undefined) {
+              block = { index: nextIndex++, text: '', callId }
+              toolCalls.set(wireIndex, block)
+              toolOrder.push(block.index)
+              yield { type: 'block-start', index: block.index, blockType: 'tool-call' }
+            }
+            block.callId = callId
+            // 只允许非空名字覆盖：后续分片带空串 "" 会清空首个分片解析出的工具名，
+            // 表现为 `unknown tool ""`。
+            if (typeof call.function?.name === 'string' && call.function.name.length > 0) {
+              block.name = call.function.name
+            }
+            const fragment = call.function?.arguments ?? ''
+            block.text += fragment
+            yield {
+              type: 'tool-call-delta',
+              index: block.index,
+              id: ToolCallId(callId),
+              ...block.name !== undefined ? { name: block.name } : {},
+              argumentsDelta: fragment,
+            }
+          }
+          if (data.usage) {
+            const promptTokens = data.usage.prompt_tokens ?? 0
+            // 缓存命中字段有多处来源，取首个有值的（与 buddy 侧同口径）。
+            const cachedTokens = data.usage.prompt_tokens_details?.cached_tokens
+              ?? data.usage.prompt_cache_hit_tokens
+              ?? 0
+            const reasoningTokens = data.usage.completion_tokens_details?.reasoning_tokens
+            yield {
+              type: 'usage',
+              usage: {
+                // inputTokens 只计**未命中缓存**的部分，命中部分单列
+                // cacheReadTokens，否则缓存命中率显示会偏大。
+                inputTokens: cachedTokens > 0 ? promptTokens - cachedTokens : promptTokens,
+                outputTokens: data.usage.completion_tokens ?? 0,
+                ...cachedTokens > 0 ? { cacheReadTokens: cachedTokens } : {},
+                ...reasoningTokens !== undefined && reasoningTokens > 0 ? { reasoningTokens } : {},
+              },
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+
+    // 按创建顺序关闭每个块
+    const textBlock = blocks.find(block => block.kind === 'text')
+    for (const index of toolOrder) {
+      const block = [...toolCalls.values()].find(candidate => candidate.index === index)!
+      yield {
+        type: 'block-end',
+        index,
+        block: {
+          type: 'tool-call',
+          id: ToolCallId(block.callId ?? ''),
+          name: block.name ?? '',
+          // 仅把「无参数工具下发的空分片」补成 {}；**残缺参数保持原样**，
+          // 由 max-tokens 判定触发重试 —— 把残缺 JSON 补成 {} 会伪造出
+          // 合法外观，让 harness 报 missing required property 而非重试。
+          arguments: isTruncatedArguments(block.text)
+            ? block.text
+            : normalizeToolArguments(block.text),
+        },
+      }
+    }
+    if (textBlock !== undefined) {
+      yield { type: 'block-end', index: textBlock.index, block: { type: 'text', text: textBlock.text } }
+    }
+    const reasoningBlock = blocks.find(block => block.kind === 'reasoning')
+    if (reasoningBlock !== undefined && reasoningBlock.text !== '') {
+      yield { type: 'block-end', index: reasoningBlock.index, block: { type: 'reasoning', text: reasoningBlock.text } }
+    }
+    // 三种「不完整」都必须报告 max-tokens 而非 tool-calls：
+    // - 'length'：被 max_tokens 显式截断；
+    // - 未收到 finish_reason：连接被中途掐断，参数必然是半截 JSON；
+    // - 参数无法解析：分片丢失（并行工具调用时偶发）。
+    // 报告 tool-calls 会让 harness 执行缺参调用并报 schema 错误，
+    // 模型收到莫名错误后陷入重试循环；报告 max-tokens 则丢弃并重试，
+    // 实测一次即恢复。
+    const argsTruncated = [...toolCalls.values()].some(block => isTruncatedArguments(block.text))
+    const reason = finishReason === 'length'
+      || (finishReason === undefined && toolOrder.length > 0)
+      || argsTruncated
+      ? { kind: 'max-tokens' as const }
+      : finishReason === 'tool_calls' || toolOrder.length > 0
+        ? { kind: 'tool-calls' as const }
+        : { kind: 'stop' as const }
+    yield { type: 'finish', reason }
+  }
+}
+
+/**
+ * 在 `ctx.llm` 上注册 LobsterAI provider 路由与适配器。
+ *
+ * 路由名、配置页展示名与 settingsNs 全部由产品配置驱动，得到
+ * `lobsterai` / `llm-lobsterai`。`settingsNs` **必须**与 `src/index.ts` 的
+ * `registerProviderSettings` 注册的 namespace 一致，否则模型设置页会因
+ * 未注册 namespace 在 `refFor → deriveKeyRef(provider)` 处崩溃。
+ */
+export function registerLobsteraiLlm(ctx: Context, options: LobsteraiAdapterOptions): void {
+  const product = options.product ?? LOBSTERAI
+  ctx.llm.registerConfigurableProviders([
+    { provider: product.id, displayName: product.displayName, settingsNs: `llm-${product.id}`, settingsPath: [] },
+  ])
+  ctx.llm.registerAdapter([product.id], new LobsteraiAdapter(options))
+}
+
+/** 构造远端模型列表请求的完整 URL（供 auth 服务与测试复用）。 */
+export function buildLobsteraiModelsUrl(
+  product: LobsteraiProduct,
+  credential: LobsteraiCredential,
+  clientVersion: string,
+): string {
+  const query = buildLobsteraiModelsQuery(credential, clientVersion)
+  const base = `${product.apiBase}${LOBSTERAI_MODELS_PATH}`
+  return query.length > 0 ? `${base}?${query}` : base
+}
+
+/** 模型列表请求超时（与其它控制面请求一致）。 */
+export const LOBSTERAI_MODELS_TIMEOUT_MS = LOBSTERAI_REQUEST_TIMEOUT_MS

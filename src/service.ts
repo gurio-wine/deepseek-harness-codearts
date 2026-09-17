@@ -190,6 +190,36 @@ export class CodeArtsAuth extends Service {
   }
 
   /**
+   * 按凭据 ref 续期**指定账号**的凭据。
+   *
+   * 与 {@link refresh} 的区别（与 `BuddyAuth.refreshAccountCredential` 同因）：
+   * `refresh()` 读写的是 `CODEARTS_ACCESS_TOKEN` 这个**默认单凭据 ref**，
+   * 而 Jet Hub 账号卡片对应的是 `CODEARTS_ACCOUNT_XXX` ——
+   * 用 `refresh()` 去刷账号池里的账号，实际刷的是另一个凭据。
+   *
+   * 同样**不触碰** `refreshTokenInvalid` / `lastRefreshError` / 调度器：
+   * 那些状态属于单凭据路径，被多账号操作污染会让 UI 显示错误的失效提示。
+   */
+  async refreshAccountCredential(refName: string): Promise<void> {
+    const ref = credentialRef(refName)
+    const resolved = await this.ctx.credentials.resolve(ref)
+    if (!resolved) throw new Error('凭据未配置')
+    const credential = parseCredential(resolved.value)
+    if (!credential?.refresh_token || !credential.code_verifier || !credential.dpop_private_key_jwk) {
+      throw new Error('无 refresh_token，请重新登录')
+    }
+    const keyPair = keyPairFromStoredJwk(credential.dpop_private_key_jwk)
+    const token = await exchangeRefreshToken(credential.refresh_token, credential.code_verifier, keyPair, this.fetchImpl)
+    const refreshed = credentialFromTokenResponse(token, { codeVerifier: credential.code_verifier, codeChallenge: '' }, keyPair)
+    // 保留无变化字段（domain_id/user_id/user_name 等）。
+    refreshed.domain_id = credential.domain_id
+    refreshed.user_id = credential.user_id
+    refreshed.user_name = credential.user_name
+    if (credential.model_rate_limits) refreshed.model_rate_limits = credential.model_rate_limits
+    await this.ctx.credentials.set(ref, JSON.stringify(refreshed))
+  }
+
+  /**
    * 批量续期所有 codearts 账号。
    * 遍历 pool 中 enabled + refreshable 的 codearts 账号，逐一续期。
    * 单账号失败不影响其他账号。

@@ -32,9 +32,12 @@
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage, LlmError } from '@deepseek-ai/dsh-llm'
 import { BuddyAdapter } from './buddy-adapter.js'
+import { LobsteraiAdapter } from './lobsterai-adapter.js'
 import { CodeArtsAdapter, isRateLimited } from './llm-adapter.js'
 import { productById } from './product.js'
+import { lobsteraiProductById } from './lobsterai-product.js'
 import type { BuddyCredential } from './buddy.js'
+import type { LobsteraiCredential } from './lobsterai.js'
 import type {
   CodeArtsCredential,
   ProbeAccountResult,
@@ -69,7 +72,7 @@ export interface ProbePool {
   /** 列出某 provider 的全部账号（含已停用）。 */
   listAccountsByProvider(provider: string): ProviderAccountEntry[]
   /** 按 id 解析凭据（不检查 enabled）。 */
-  resolveCredentialForAccount(id: string): Promise<CodeArtsCredential | BuddyCredential | undefined>
+  resolveCredentialForAccount(id: string): Promise<CodeArtsCredential | BuddyCredential | LobsteraiCredential | undefined>
   /** 清除限流标记；modelIds 省略时清除全部。返回清除条数。 */
   clearModelRateLimits(accountId: string, modelIds?: readonly string[]): Promise<number>
 }
@@ -102,7 +105,7 @@ function isRateLimitFailure(error: unknown): boolean {
 /** 用真实适配器对指定账号的指定模型发一次最小请求。 */
 async function probeWithAdapter(
   entry: ProviderAccountEntry,
-  credential: CodeArtsCredential | BuddyCredential,
+  credential: CodeArtsCredential | BuddyCredential | LobsteraiCredential,
   modelId: string,
   timeoutMs: number,
 ): Promise<ProbeModelResult> {
@@ -115,23 +118,40 @@ async function probeWithAdapter(
   //
   // refresh 设为 no-op：探测不应触发全局续期流程（那会影响其他账号与
   // 其他并发会话），凭据真的过期就让它以 AUTH 失败并如实上报。
-  // CodeBuddy 系（buddy / workbuddy）必须都走 BuddyAdapter，并按各自的
-  // 产品配置发请求。此前只判断 `provider === 'buddy'`：workbuddy 会落入
-  // else 分支而用 CodeArtsAdapter（华为云 HMAC 签名 + 错误端点）去发
-  // WorkBuddy 凭据，必然失败。改用 productById 判定，一次覆盖两个产品。
-  const product = productById(entry.provider)
-  const adapter = product !== undefined
-    ? new BuddyAdapter({
-        credentialRef: ref,
-        resolveCredential: async () => credential as BuddyCredential,
-        refresh: async () => {},
-        product,
-      })
-    : new CodeArtsAdapter({
-        credentialRef: ref,
-        resolveCredential: async () => credential as CodeArtsCredential,
-        refresh: async () => {},
-      })
+  //
+  // **三个产品线各自选适配器**，顺序不能颠倒也不能只判前两个：
+  // - CodeBuddy 系（buddy / workbuddy）→ BuddyAdapter，按各自 product 发请求；
+  // - LobsterAI → LobsteraiAdapter（自己的端点与头族）；
+  // - 其余（codearts）→ CodeArtsAdapter（华为云 HMAC 签名）。
+  //
+  // 历史上这里只判断 `provider === 'buddy'`，导致 workbuddy 落入 else 分支、
+  // 用华为云 HMAC 签名去发 WorkBuddy 凭据而必然失败（见下方 productById 的
+  // 原注释）；现在 lobsterai 若不加分支会重蹈覆辙 —— 它的协议与两者都不同，
+  // 用 CodeArtsAdapter 会以完全错误的签名与端点发请求。
+  const buddyProduct = productById(entry.provider)
+  const lobsteraiProduct = lobsteraiProductById(entry.provider)
+  let adapter: BuddyAdapter | LobsteraiAdapter | CodeArtsAdapter
+  if (buddyProduct !== undefined) {
+    adapter = new BuddyAdapter({
+      credentialRef: ref,
+      resolveCredential: async () => credential as BuddyCredential,
+      refresh: async () => {},
+      product: buddyProduct,
+    })
+  } else if (lobsteraiProduct !== undefined) {
+    adapter = new LobsteraiAdapter({
+      credentialRef: ref,
+      resolveCredential: async () => credential as LobsteraiCredential,
+      refresh: async () => {},
+      product: lobsteraiProduct,
+    })
+  } else {
+    adapter = new CodeArtsAdapter({
+      credentialRef: ref,
+      resolveCredential: async () => credential as CodeArtsCredential,
+      refresh: async () => {},
+    })
+  }
 
   try {
     for await (const _chunk of adapter.stream({

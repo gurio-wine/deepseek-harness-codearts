@@ -42,6 +42,14 @@ describe('积分能力矩阵', () => {
     expect(supportsDailyCheckin('workbuddy')).toBe(false)
   })
 
+  it('LobsterAI 余额与签到都支持（两套端点彼此独立）', () => {
+    // 余额走 GET /api/user/profile-summary，签到走 client-activities 三步流程，
+    // 与 CodeBuddy 系协议完全不同源，但两项能力都具备。
+    expect(CREDITS_CAPABILITIES.lobsterai).toEqual({ balance: true, dailyCheckin: true })
+    expect(supportsCreditBalance('lobsterai')).toBe(true)
+    expect(supportsDailyCheckin('lobsterai')).toBe(true)
+  })
+
   it('未登记的 provider 默认不支持任何积分能力（默认关闭）', () => {
     // 新增 provider 时若忘记登记，最坏结果是暂时看不到积分，
     // 而不是每次打开面板都发一个必然失败的请求。

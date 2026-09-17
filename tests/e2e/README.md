@@ -12,6 +12,10 @@
 | `buddy-pool-probe.e2e.spec.ts` | `DSH_BUDDY_POOL_E2E=1` + `DSH_BUDDY_POOL_E2E_CONFIRM=yes` | 用账号池凭据走完整 LLM 链路 |
 | `buddy-ratelimit-probe.e2e.spec.ts` | `DSH_BUDDY_RATELIMIT_E2E=1` + `DSH_BUDDY_RATELIMIT_E2E_CONFIRM=yes` | 对记录「限额重置」的账号实发一次请求，**判定是否真限流** |
 
+> LobsterAI **没有**发 chat 请求的 e2e —— 它的对话链路可在 Jet Hub 里人工验证
+> （选一个模型发一句话即可），单独写探针的边际价值低于维护成本。
+> 认证与签到已有只读探针（见下表）。
+
 ## 不消耗模型积分
 
 | 文件 | 闸门 | 说明 |
@@ -21,6 +25,8 @@
 | `login.e2e.spec.ts` | `DSH_CODEARTS_E2E=1` | 只走 CodeArts 浏览器登录与凭据换取 |
 | `buddy-login-probe.e2e.spec.ts` | `DSH_BUDDY_PROBE=1` | 只打印登录流程原始响应，不发模型请求 |
 | `workbuddy-claim-probe.e2e.spec.ts` | `DSH_WORKBUDDY_CLAIM_E2E=1` + `DSH_WORKBUDDY_CLAIM_E2E_CONFIRM=yes` | 真实领取积分（不改模型额度，但会改动账号当日签到状态） |
+| `lobsterai-probe.e2e.spec.ts` | `DSH_LOBSTERAI_E2E=1` | **只读**：凭据结构、客户端版本号动态解析、签到槽位/上下文、积分余额。**不签到、不发模型请求** |
+| `lobsterai-claim-probe.e2e.spec.ts` | `DSH_LOBSTERAI_E2E=1` + `DSH_LOBSTERAI_CLAIM_E2E_CONFIRM=yes` | 真实签到（会改动当日签到状态；**不消耗模型积分**，且重复运行幂等） |
 
 > CodeArts deepseek-v4 系列使用华为云免费福利额度（每日 1000 万免费 Tokens），
 > 不产生额外费用，因此 `DSH_CODEARTS_E2E=1` 不需要确认变量。
@@ -48,6 +54,12 @@ pnpm test:e2e:codearts
 
 # ⚠️ 会真实领取积分（改动当日签到状态）
 pnpm test:e2e:workbuddy-claim
+
+# 安全：LobsterAI 只读探针（凭据/版本号/签到槽位/余额，不签到）
+pnpm test:e2e:lobsterai
+
+# ⚠️ 会真实签到（改动当日签到状态；不消耗模型积分，重复运行幂等）
+pnpm test:e2e:lobsterai-claim
 ```
 
 ## 限流真实性判定

@@ -230,21 +230,10 @@ export class BuddyAuth extends Service {
     try {
       // 第 4 个参数是本实例的产品：WorkBuddy 续期时必须带自己的 UA，
       // 否则会以 CodeBuddy 的身份标识请求刷新接口。
-      const token = await refreshToken(credential, this.fetchImpl, undefined, this.product)
+      const refreshed = await this.refreshCredential(credential)
       // 登出竞态保护：在途刷新期间已 logout()/stop() 时，跳过凭据回写与调度武装，
       // 避免已登出的凭据被在途刷新复活。
       if (!this.active) return
-      const refreshed: BuddyCredential = {
-        ...credential,
-        access_token: token.accessToken,
-        refresh_token: token.refreshToken,
-        expires_at: token.expiresAt,
-        refresh_expires_at: token.refreshExpiresAt,
-        token_type: token.tokenType,
-        scope: token.scope,
-        // 后端未返回 domain 时保留原值。
-        ...token.domain.length > 0 ? { domain: token.domain } : {},
-      }
       await this.ctx.credentials.set(ref, JSON.stringify(refreshed))
       this.refreshTokenInvalid = false
       this.lastRefreshError = undefined
@@ -255,6 +244,50 @@ export class BuddyAuth extends Service {
       if (error instanceof RefreshTokenExpiredError) this.markRefreshTokenInvalid()
       throw error
     }
+  }
+
+  /**
+   * 用给定凭据换新令牌并合并字段（不触碰存储、调度器与错误状态）。
+   *
+   * 抽出来供 {@link refresh} 与 {@link refreshAccountCredential} 共用，
+   * 避免两处各写一遍「换 token → 合并字段」而逐渐分叉。
+   */
+  private async refreshCredential(credential: BuddyCredential): Promise<BuddyCredential> {
+    const token = await refreshToken(credential, this.fetchImpl, undefined, this.product)
+    return {
+      ...credential,
+      access_token: token.accessToken,
+      refresh_token: token.refreshToken,
+      expires_at: token.expiresAt,
+      refresh_expires_at: token.refreshExpiresAt,
+      token_type: token.tokenType,
+      scope: token.scope,
+      // 后端未返回 domain 时保留原值。
+      ...token.domain.length > 0 ? { domain: token.domain } : {},
+    }
+  }
+
+  /**
+   * 按凭据 ref 续期**指定账号**的凭据。
+   *
+   * 与 {@link refresh} 的区别（这是修复既有缺陷的关键）：
+   * - `refresh()` 读写的是本实例的**默认单凭据 ref**（如 `BUDDY_ACCESS_TOKEN`），
+   *   而 Jet Hub 的账号卡片对应的是 `BUDDY_ACCOUNT_XXX` ——
+   *   用 `refresh()` 去刷账号池里的账号，实际刷的是另一个凭据；
+   * - 本方法也**不触碰** `refreshTokenInvalid` / `lastRefreshError` / 调度器：
+   *   那些状态属于「单凭据路径」，被多账号操作污染会让 UI 显示错误的失效提示。
+   */
+  async refreshAccountCredential(refName: string): Promise<void> {
+    const ref = credentialRef(refName)
+    const resolved = await this.ctx.credentials.resolve(ref)
+    if (!resolved) throw new Error('凭据未配置')
+    const credential = parseCredential(resolved.value)
+    if (!credential) throw new Error('凭据解析失败')
+    if (!isRefreshable(credential)) {
+      throw new RefreshTokenExpiredError('无 refresh_token，请重新登录')
+    }
+    const refreshed = await this.refreshCredential(credential)
+    await this.ctx.credentials.set(ref, JSON.stringify(refreshed))
   }
 
   /**
@@ -278,17 +311,7 @@ export class BuddyAuth extends Service {
           await pool.updateAccount(entry.id, { refreshable: false })
           continue
         }
-        const token = await refreshToken(credential, this.fetchImpl, undefined, this.product)
-        const refreshed: BuddyCredential = {
-          ...credential,
-          access_token: token.accessToken,
-          refresh_token: token.refreshToken,
-          expires_at: token.expiresAt,
-          refresh_expires_at: token.refreshExpiresAt,
-          token_type: token.tokenType,
-          scope: token.scope,
-          ...token.domain.length > 0 ? { domain: token.domain } : {},
-        }
+        const refreshed = await this.refreshCredential(credential)
         await this.ctx.credentials.set(ref, JSON.stringify(refreshed))
         const expiresAt = credentialExpiresAtMs(refreshed)
         await pool.updateAccount(entry.id, {
