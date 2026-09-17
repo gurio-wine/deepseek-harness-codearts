@@ -27,10 +27,11 @@ import { CODEBUDDY, type BuddyProduct } from './product.js'
 /**
  * CodeBuddy 的登录结果存储所用的凭据引用。
  *
- * 等价于 `CODEBUDDY.defaultCredentialRef`，保留此导出仅为兼容既有导入方；
- * 新代码请改用 `BuddyAuth` 实例的 `credentialRefName` 字段（随产品变化）。
+ * 直接取自 `CODEBUDDY.defaultCredentialRef`（产品配置是唯一真相源），保留此
+ * 导出仅为兼容既有导入方；新代码请改用 `BuddyAuth` 实例的 `credentialRefName`
+ * 字段（随产品变化）。
  */
-export const BUDDY_CREDENTIAL_REF = 'BUDDY_ACCESS_TOKEN'
+export const BUDDY_CREDENTIAL_REF = CODEBUDDY.defaultCredentialRef
 
 /** 一次成功登录的结果。 */
 export interface BuddyLoginResult {

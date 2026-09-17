@@ -12,16 +12,26 @@
  * 客户端不起本地服务器，而是定期轮询后端 API 检查登录状态。
  *
  * 本模块只放常量与纯函数（无网络、无存储），网络流程见 buddy-oauth.ts。
+ *
+ * 依赖方向：本模块从 `src/product.ts` 读取 CodeBuddy 的产品差异取值（只读，
+ * 不反向导出）。`product.ts` 不 import 本模块，故不构成循环依赖。
  */
 
+import { CODEBUDDY } from './product.js'
+
 // ── API 端点常量（逆向自 genie 扩展 product.json + index.js） ──
+//
+// 下列取值中，凡属「产品差异」的（endpoint / platform / UA / productCode /
+// apiDomain）一律从 `src/product.ts` 的 CODEBUDDY 产品配置**派生**，此处不再
+// 重复字面量：产品差异的唯一真相源是 product.ts，改端点只需改那一处。
+// 路径与轮询参数（PREFIX_PATH 等）两产品共用、非差异项，保持字面量。
 
 /** 主 API 端点（product.json endpoint）。 */
-export const API_ENDPOINT = 'https://copilot.tencent.com'
-/** API 路径前缀（product.json authentication.attributes.prefixPath）。 */
+export const API_ENDPOINT = CODEBUDDY.endpoint
+/** API 路径前缀（product.json authentication.attributes.prefixPath，两产品相同）。 */
 export const PREFIX_PATH = '/plugin'
 /** 平台标识（product.json authentication.attributes.platform）。 */
-export const PLATFORM = 'ide'
+export const PLATFORM = CODEBUDDY.platform
 /** 登录网站首页（copilot.tencent.com → www.codebuddy.cn 映射）。 */
 export const WEBSITE_HOME = 'https://www.codebuddy.cn'
 
@@ -74,16 +84,16 @@ export const HTTP_HEADER_PRODUCT_CODE = 'X-Product-Code'
  * User-Agent 标识（对齐 IDE 的 getUserAgent() → CodeBuddyIDE/${platformVersion}）。
  * platformVersion 来自 IDE product.json version 字段（1.106.1），非 genie 版本。
  */
-export const BUDDY_USER_AGENT = 'CodeBuddyIDE/1.106.1'
+export const BUDDY_USER_AGENT = CODEBUDDY.userAgent
 /** X-Product-Code 值（对齐 IDE headers 设置）。 */
-export const BUDDY_PRODUCT_CODE = 'codebuddy'
+export const BUDDY_PRODUCT_CODE = CODEBUDDY.productCode
 /** X-Product 默认值（deploymentType，对齐 ProductEndpointHttpInterceptor）。 */
 export const BUDDY_DEPLOYMENT_TYPE = 'SaaS'
 /** 刷新来源标识（对齐 IDE 的 ide-main）。 */
 export const AUTH_REFRESH_SOURCE = 'ide-main'
 
 /** API 端点的裸域名（X-Domain 头的值）。 */
-export const API_DOMAIN = 'copilot.tencent.com'
+export const API_DOMAIN = CODEBUDDY.apiDomain
 
 // ── 凭据数据结构 ──
 

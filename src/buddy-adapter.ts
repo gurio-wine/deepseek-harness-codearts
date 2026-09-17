@@ -34,11 +34,12 @@ import { isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reso
 /**
  * CodeBuddy（中国版）的 chat completions 基址。
  *
- * 仅供既有导入方（如 e2e 探针）使用；适配器实例实际请求的基址是
+ * 由 `CODEBUDDY.endpoint` 派生（产品配置是唯一真相源）；仅供既有导入方
+ * （如 e2e 探针）使用。适配器实例实际请求的基址是
  * `` `${this.product.endpoint}/v2` `` —— 国际版 WorkBuddy 的域名不同
  * （www.workbuddy.ai），故不能再用本常量拼接请求 URL。
  */
-export const CHAT_API_BASE = 'https://copilot.tencent.com/v2'
+export const CHAT_API_BASE = `${CODEBUDDY.endpoint}/v2`
 
 /**
  * 是否为 DeepSeek 系模型（前缀匹配，不区分大小写）。

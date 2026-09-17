@@ -17,16 +17,16 @@
  * （中国版含 glm/hy/deepseek 系，国际版含 claude/gpt/gemini/kimi 系）。
  * 因此 endpoint 必须随产品切换，不能被当成全局常量。
  *
- * 迁移关系（重要）：
- * 本模块中与 `src/buddy.ts` / `src/buddy-auth.ts` 重名的取值，将从后者**迁移**到
- * 本模块，由本模块作为唯一真相源（single source of truth）。在后续参数化任务完成、
- * 旧常量被删除之前，本模块的这些字面量必须与 `src/buddy.ts` / `src/buddy-auth.ts`
- * 中的对应常量**保持完全一致**：任何一处取值变更都必须同步另一处，否则各产品的
- * 认证/请求行为会分叉。
+ * 迁移关系（已完成的单一真相源）：
+ * 本模块是产品差异取值的**唯一真相源**。历史上的重复字面量已消除 ——
+ * `src/buddy.ts` / `src/buddy-auth.ts` / `src/buddy-adapter.ts` 中与产品差异
+ * 相关的导出（API_ENDPOINT / PLATFORM / API_DOMAIN / BUDDY_USER_AGENT /
+ * BUDDY_PRODUCT_CODE / BUDDY_CREDENTIAL_REF / CHAT_API_BASE）已改为从本模块的
+ * CODEBUDDY 配置**派生**，只保留原有的导出签名以兼容既有导入方。
  *
- * 之所以此处仍写死字面量而不 import 常量：`buddy-auth.ts` 后续任务将改为
- * `import product.ts`，若本模块反向 import `buddy-auth.ts` 会形成循环依赖；
- * 为保持一致性，这些字段全部维持字面量写法。
+ * 依赖方向：`product.ts` 不 import 任何业务模块（见下方 import 列表为空的
+ * 约束），只有业务模块单向 import 本模块，故不存在循环依赖；同理，新增产品
+ * 差异取值时只在本模块声明，不要在 `buddy*.ts` 里再造字面量。
  */
 
 /** 兜底模型目录中的一个条目（字段对齐远端 `/v3/config` 的 `data.models[]`）。 */
@@ -139,15 +139,10 @@ export interface BuddyProduct {
 /**
  * CodeBuddy（腾讯 CodeBuddy，中国版），platform = ide。
  *
- * 以下字段与既有常量重复，属**待删除的重复定义**（等后续参数化任务把
- * `src/buddy.ts` / `src/buddy-auth.ts` 改为从本模块取值后即可删除）：
- * - `platform: 'ide'`          ↔ `src/buddy.ts:24`  `PLATFORM`
- * - `productCode: 'codebuddy'` ↔ `src/buddy.ts:79`  `BUDDY_PRODUCT_CODE`
- * - `userAgent: 'CodeBuddyIDE/1.106.1'` ↔ `src/buddy.ts:77`  `BUDDY_USER_AGENT`
- * - `defaultCredentialRef: 'BUDDY_ACCESS_TOKEN'` ↔ `src/buddy-auth.ts:27`  `BUDDY_CREDENTIAL_REF`
- * - `endpoint`/`apiDomain`     ↔ `src/buddy.ts:20/86`  `API_ENDPOINT` / `API_DOMAIN`
- *
- * 迁移完成前两处取值必须保持一致，改动需同步（见文件头「迁移关系」）。
+ * 本配置是产品差异取值的唯一真相源：`src/buddy.ts` / `src/buddy-auth.ts` /
+ * `src/buddy-adapter.ts` 中同名的历史常量（PLATFORM / BUDDY_PRODUCT_CODE /
+ * BUDDY_USER_AGENT / BUDDY_CREDENTIAL_REF / API_ENDPOINT / API_DOMAIN /
+ * CHAT_API_BASE）均由此处派生，不再是独立字面量。
  */
 /**
  * CodeBuddy（中国版）的内置模型目录。
