@@ -435,12 +435,9 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 >    通用池）。没有 `workTotal` 的 provider 渲染**逐元素不变**，由
 >    `tests/unit/jet-hub-credit-balance-row.spec.ts` 用整树深比较守住。
 >
-> ⚠️ **剩余缺口在宿主侧**（不属于前端登记的范围）：`src/jet-hub-rpc.ts` 的
-> `account.create` 还没有 `trae-cn` 分支，`account.refresh` 的 provider switch 与
-> `account-probe.ts` 的适配器选择同理，且 `registerJetHubRpc` 未接收 `traeCn`
-> 实例。因此 Trae CN 标签页虽然出现、积分能力也已登记，但**暂时无法在该面板里
-> 新建账号**（会得到 `unknown provider: trae-cn`）—— 双池展示要等这几处接上后
-> 才能在真机上看到实际数据。
+> ✅ 宿主侧接线已完成（`47f253f`）：`account.create` / `account.refresh` /
+> `account-probe.ts` 三处的 `trae-cn` 分支与 `registerJetHubRpc` 的 `traeCn`
+> 实例均已就位，Trae CN 面板可以新建账号、刷新凭据与重测限流标记。
 
 **CodeArts 不支持**：它是华为云账号体系，没有上述任何一条计费接口。因此 CodeArts
 面板**不显示「积分」行，也不显示「刷新积分」按钮**，且不会发起

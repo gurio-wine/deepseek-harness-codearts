@@ -21,7 +21,7 @@
 
 `trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。它比 `lobsterai` 还要再少一步：**回调 query 直接携带 refreshToken**，没有 authCode 交换；续期走 `POST …/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**产品配置 + 认证 + 模型路由（`src/trae-cn-adapter.ts`）+ 签到与积分余额（`src/trae-cn-credits.ts`）均已实现**。三个关键事实决定了它的适配器与其它 provider 结构不同：**SSE 是具名事件流**（`event:output`，不是 OpenAI 的 `data:{choices}`）、**业务失败发生在 HTTP 200 的 `event:error` 帧里**（故换号循环必须接住流内失败，错误分类按业务码而非状态码，见 `src/trae-cn-errors.ts`）、**签到必须带设备四件套**（见「积分领取」）。回调 URL 形态（T5）、chat 端点路径（T6）与签到/余额的若干字段名（T7 / T8）**尚未真机实测**，实现采「候选表 + 常量」策略，详见 README 的「Trae CN provider」章节。
 
-Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**由 CodeBuddy、LobsterAI 与 Trae CN 三个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。Trae CN 的签到与余额**前后端均已就绪**（`src/trae-cn-credits.ts` + 客户端能力矩阵已登记）。⚠️ **但它的宿主侧接线尚未完成**：`account.create` / `account.refresh` / `account-probe` 三处都还没有 `trae-cn` 分支，`registerJetHubRpc` 也未接收 `traeCn` 实例，故 Trae CN 面板**暂时无法新建账号**（回 `unknown provider: trae-cn`），双池展示拿不到真实数据。详见「积分能力必须在请求前判定」。
+Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**由 CodeBuddy、LobsterAI 与 Trae CN 三个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。Trae CN 的签到与余额**前后端及宿主接线均已就绪**（`src/trae-cn-credits.ts` + 客户端能力矩阵 + `jet-hub-rpc.ts` 三处分支与 `traeCn` 实例传参）。回调 URL 形态（T5）等少量协议细节待真机校准，见「积分能力必须在请求前判定」与 README 的「Trae CN provider」章节。
 
 - **包名**：`dsh-account-hub`
 - **入口**：`lib/index.js`（宿主侧）、`lib/client/jet-hub.js`（客户端 bundle）
@@ -224,7 +224,7 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 要点：
 
 - **默认关闭**：未登记的 provider 视为两项全无。新增 provider 忘登记时，最坏结果是暂时看不到积分，而不是每次打开面板都发一个必然失败的请求
-- **`trae-cn` 已登记**：三项均已就绪（`src/trae-cn-credits.ts` + `jet-hub-rpc.ts` 分发 + 客户端能力矩阵与 `PROVIDERS` 条目），面板会显示积分行与两个积分按钮。**但宿主侧接线未完成**（见「项目概述」的 ⚠️）：面板无法新建 trae-cn 账号，故双池显示暂时拿不到真实数据
+- **`trae-cn` 已登记**：全部就绪（`src/trae-cn-credits.ts` + `jet-hub-rpc.ts` 分发与三处宿主分支 + 客户端能力矩阵与 `PROVIDERS` 条目），面板显示积分行与两个积分按钮，可新建账号（`47f253f` 补齐接线）
 - **`trae-cn` 的 `balance` 是双池**：`total` 是通用池（chat 实际扣的），Work 池走超集字段 `workTotal`，`CreditBalanceRow` 在该字段存在且可解析时渲染「通用 X / Work Y」，**绝不合并**（合并会让用户以为 Work 额度能用于对话）。其余 provider 的余额对象没有该字段，渲染路径完全不变
 - **门控在发请求之前**，不是在 UI 上吞错误：`loadCredits` / `claimCredits` 函数内部各有一道守卫（按钮不渲染只是 UI 便利，不是安全边界），`AccountCard` 的积分行与「刷新积分」按钮也按能力渲染
 - **历史缺陷**（用户报障）：客户端在面板挂载时对所有 provider 无条件调用 `credits.balances`，CodeArts 面板每次打开都在控制台报 `unsupported provider: codearts`，并把账号卡片的「积分」渲染成「查询失败」。后端 `productById()` 的拒绝是正确契约，不该被当成运行时故障
