@@ -6,6 +6,11 @@
 - **正文输出**（正文回复、代码注释说明、总结、文档）一律使用中文。
 - 代码标识符、关键字、类型名称、变量名等保持英文不变。
 
+## 子代理路由（2026-09 记录，避免重复查询模型列表）
+
+- 当前可用组合：**`buddy` / `deepseek-v4.1-flash` / 思考档 `max`**（该模型可选档位为 low / high(默认) / max，思考程度选最高档 = max）
+- 派发前不再查询可用模型列表，直接用上述组合；仅当该组合报「模型/档位不可用」时才重新核实并更新本节。
+
 ## 项目概述
 
 本项目是 DeepSeek Harness 的一个插件（`dsh-account-hub`），提供华为云 CodeArts 浏览器登录与凭据管理功能。插件还附带 `buddy`（腾讯 CodeBuddy 中国版）、`workbuddy`（腾讯 WorkBuddy **国际版** / WorkBuddy AI）与 `lobsterai`（有道 **LobsterAI** / 龙虾）三个 LLM provider 路由。
