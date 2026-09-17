@@ -590,8 +590,76 @@ provider id 是 `trae-cn`（带连字符，对齐用户与生态叫法），但 
 > 并在凭据的 `device_id_source` 里标为 `machine-id-fallback`（**显式降级，
 > 不静默伪造**）。
 
-> **本轮范围**：仅产品配置 + 认证（登录 / 续期 / 状态）。
-> **模型路由（`stream` / `listModels` / `classify`）与签到见后续提交** ——
-> 故 `trae-cn` 目前不出现在 `ctx.llm` 的路由列表里。
-> 补模型路由时须同时注册 `llm-trae-cn` settings namespace，否则模型设置页会在
-> `refFor → deriveKeyRef(provider)` 处崩溃。
+### 模型路由（LLM 适配器）
+
+路由名 `trae-cn`，适配器 `TraeCnAdapter`（`src/trae-cn-adapter.ts`），
+随插件启动注册到 `ctx.llm`，同时注册 `llm-trae-cn` settings namespace ——
+后者**必须**存在，否则模型设置页会在 `refFor → deriveKeyRef(provider)` 处崩溃。
+注意该 namespace 里的连字符是**正确**的：namespace 是字符串键而非 JS 标识符，
+与 cordis 服务名（`traeCnAuth`）走的是两套命名规则。
+
+**端点**：`POST https://api.trae.cn/api/ide/v1/chat`，请求头
+`Cloud-IDE-JWT <access>` + 同值 `X-Ide-Token` / `X-Cloudide-Token`，
+`Accept: text/event-stream`；请求体是标准 OpenAI chat-completions 消息数组
+（`model` / `messages` / `stream: true`），**不发**任何腾讯系或 LobsterAI 归属头。
+
+> ⚠️ **待校准项（T6）**：chat 端点路径**未经真机实测**。`TRAE_CN_CHAT_PATH`
+> 的值来自本机客户端 `resources/app/modules/ai-agent/ai_agent.dll` 的字符串池
+> （只读提取，未发网络请求）：`/api/ide/v1/chat` 与调研报告已确认的 SSE 事件序列
+> （`metadata` → `timing_cost` → `output` → `done`）**出现在同一段字符串里**，
+> 且与同为 IDE 协议族的 `get_detail_param` / `model_list` 并列。
+> 同池另有三个候选（`llm_raw_chat` / v2 `llm_raw_chat` / `chat_prompt`），
+> 全部列在 `TRAE_CN_CHAT_PATH_CANDIDATES` 里。真机一次请求即可判定；
+> 证伪时改常量并同步候选表（单测锁死了两者的一致性）。
+> **不做运行时逐个试错** —— 那会把每次对话变成最多 4 次请求。
+
+**SSE 不是 OpenAI 协议**。上游返回**具名事件**流，帧解析在 `src/trae-cn-sse.ts`：
+
+```
+event:metadata      data:{"conversation_id":…}      ← 忽略（`meta` 亦识别）
+event:timing_cost   data:{…}                        ← 忽略
+event:output        data:{"response":"片段"}         ← 正文增量
+event:token_usage   data:{prompt_tokens,…}          ← usage
+event:done          data:{…}                        ← 流结束
+event:error         data:{"code":4008,"message":…}  ← 失败（HTTP 仍为 200）
+```
+
+事件名同样取自本机客户端字符串池：Rust 侧
+`…/adapter/llm/event.rs` 有一份权威事件类型清单，每个变体都带一条
+`Failed to deserialize <name> event` 诊断串（实测提取到 22 条）。
+
+**错误分类按业务码，不按 HTTP 状态码**（`src/trae-cn-errors.ts`，纯函数）：
+
+| 动作 | 业务码 | 说明 |
+|---|---|---|
+| **换号** | `4008` `4021` `5003` `977`（限流）、`4200`–`4203`（额度）、`1001` `1002` `4010` `4014`（账号失效）、`4011` `4013` `4015`（风控） | 对齐官方 `isSecurityError` 语义：账号失效与风控同样换号 |
+| **退避不换号** | `4007` `3004` `9074`（软限流）、`4000005` `4050`–`4052`（排队） | 排队是**全局**状态，换号只会把同一个问题再问一遍并多烧一个账号的额度 |
+| **直接报错** | `4001`（参数）、`4006`（超长）、`4023`（模型不存在） | 确定性失败，换号与退避都是浪费往返 |
+| **直报（带原始码）** | 其它未知码 | 保守默认：未知码可能是终态（积分耗尽的真实码 T3 尚未实测到），直报能让真机第一次遇到就把码暴露在文案里，一步校准 |
+
+非 200 的 HTTP 失败（网络层/网关）走兜底：`401`/`403` → 换号，`429`/`408`/`5xx` → 退避，
+其余直报。`4006` 映射为 `CONTEXT_WINDOW_EXCEEDED`（触发 DSH 上下文自动压缩），
+换号与退避都映射为可重试的 `RATE_LIMIT`。
+
+**结构上与 LobsterAI 的根本差异**：Trae 的业务失败发生在 **HTTP 200 的
+`event:error` 帧**里，所以换号循环必须能接住**流内**失败 —— LobsterAI 的错误
+全在 `!response.ok` 分支，流一旦开始就没有换号的余地。换号上限同 LobsterAI
+（3 个账号，含首次）。若流已经开始产出正文才报错，则**不再换号**（换号会让用户
+看到「半截回答 + 完整回答」两段内容，比直接报错更糟），改为直报。
+
+**模型目录**：暂用静态兜底表 `TRAE_CN_FALLBACK_MODELS`（8 项，从调研报告实测的
+41 项里每个模型家族取一项）。取舍：远端 `get_detail_param` 才是权威源，兜底表只在
+远端失败时顶替；**只取 8 项而不是抄全 41 项**，是为了让「兜底表正在生效」在 UI 上
+一眼可见（模型选择器只有 8 项时，用户与排查者立刻知道远端拉取失败了）。
+远端拉取逻辑由注入的 `fetchRemoteModels` 提供，解析器 `parseTraeCnModels` 对字段名
+做容忍式读取（**T6 待校准**：报告未给出条目的确切字段名）。
+消耗倍率（`display_contact_config.consumption_rate.data.rate`）会被解析出来，
+但**不塞进** `LlmModelInfo` —— DSH 该接口只有
+`provider`/`id`/`name`/`description`/`inputModalities` 五个字段，唯一的落点是
+`description`，而那会污染模型选择器的展示文案。
+
+**与其它 provider 一致的约定**：`stream()` 把 `options.model` 传给
+`resolveCredential` 与 `refresh`（硬约定，见「账号池与多账号」）；
+`listModels()` 实时读 `pool.disabledModelsFor('trae-cn')` 应用黑名单；
+图片输入报 `UNSUPPORTED_CONTENT`（未实测支持，不静默丢弃）；
+**不声明** reasoning 等级（是否支持 `reasoning_effort` 未实测，仅透传调用方显式传的值）。

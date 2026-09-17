@@ -5,6 +5,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { registerCodeArtsLlm } from './llm-adapter.js'
 import { registerBuddyLlm } from './buddy-adapter.js'
 import { registerLobsteraiLlm } from './lobsterai-adapter.js'
+import { registerTraeCnLlm } from './trae-cn-adapter.js'
 import { CODEARTS_CREDENTIAL_REF, CodeArtsAuth } from './service.js'
 import { BUDDY_CREDENTIAL_REF, BuddyAuth } from './buddy-auth.js'
 import { LobsteraiAuth } from './lobsterai-auth.js'
@@ -13,8 +14,10 @@ import { AccountPool } from './account-pool.js'
 import { registerJetHubRpc } from './jet-hub-rpc.js'
 import { CODEBUDDY, WORKBUDDY } from './product.js'
 import { LOBSTERAI } from './lobsterai-product.js'
+import { TRAE_CN } from './trae-cn-product.js'
 import type { CodeArtsCredential, BuddyCredential } from './types.js'
 import type { LobsteraiCredential } from './lobsterai.js'
+import type { TraeCnCredential } from './trae-cn-oauth.js'
 
 export const name = 'codearts-auth'
 // `connection` 刻意不列入静态 inject：它只由 Web bundle（dsh-client-connection）
@@ -194,12 +197,14 @@ export function makeCredentialResolver<T>(
 /** 注册 codeartsAuth 服务、命令以及 codearts LLM 路由。 */
 export function apply(ctx: Context): void {
   // provider 的 settingsNs 必须已注册，否则模型设置页会因未注册 namespace 崩溃。
-  // 四个 namespace 分别对应：codearts 路由、CodeBuddy（buddy）路由、
-  // WorkBuddy（workbuddy）路由、LobsterAI（lobsterai）路由 —— 后三者由
-  // registerBuddyLlm / registerLobsteraiLlm 以 `llm-${product.id}` 派生，
-  // 漏注册会让模型设置页在 `refFor → deriveKeyRef(provider)` 处以
+  // 五个 namespace 分别对应：codearts 路由、CodeBuddy（buddy）路由、
+  // WorkBuddy（workbuddy）路由、LobsterAI（lobsterai）路由、Trae CN（trae-cn）路由
+  // —— 后四者由 registerXxxLlm 以 `llm-${product.id}` 派生，漏注册会让模型设置页在
+  // `refFor → deriveKeyRef(provider)` 处以
   // `provider.toUpperCase is not a function` 崩溃。
-  registerProviderSettings(ctx, 'llm-buddy', 'llm-workbuddy', 'llm-codearts', 'llm-lobsterai')
+  // 注意 `llm-trae-cn` 里的连字符是**正确**的：namespace 是字符串键而非标识符，
+  // 与 cordis 服务名（`traeCnAuth`）走的是两套命名规则。
+  registerProviderSettings(ctx, 'llm-buddy', 'llm-workbuddy', 'llm-codearts', 'llm-lobsterai', 'llm-trae-cn')
   const service = new CodeArtsAuth(ctx)
   const pool = new AccountPool(ctx)
 
@@ -364,16 +369,42 @@ export function apply(ctx: Context): void {
   // （无 authCode 交换）+ `ExchangeToken` 续期 + `Cloud-IDE-JWT` 鉴权
   // （见 src/trae-cn-oauth.ts）。
   //
-  // **本轮只注册认证服务**，不注册 LLM 适配器与 settings namespace：
-  // 模型路由（stream / listModels / classify）是后续任务，此处提前注册一个
-  // 没有适配器的 provider 只会让模型设置页出现一个点了就报错的空路由。
-  // 届时补上时，注意同时注册 `llm-trae-cn` namespace（否则模型设置页会在
-  // refFor → deriveKeyRef(provider) 处崩溃，见 registerProviderSettings 的说明）。
-  //
   // 服务名**不是** `${product.id}Auth`：产品 id 为 `trae-cn`，机械派生会得到
   // 带连字符的 `trae-cnAuth`。服务名由产品配置的 serviceName 显式给出
   // `traeCnAuth`，与另外四个 provider 的命名风格保持一致。
   const traeCn = new TraeCnAuth(ctx)
+  // 与 resolveCredential 共用同一个选号器：两者必须挑到**同一个**账号，
+  // 否则「刷新的是解析凭据时所用的那个账号」这条不变量会被打破
+  // （详因见 makeAccountPicker 的说明，回归测试在 lobsterai-wiring.spec.ts）。
+  const pickTraeCnAccount = makeAccountPicker(pool, TRAE_CN.id)
+  registerTraeCnLlm(ctx, {
+    credentialRef: credentialRef(TRAE_CN.defaultCredentialRef),
+    // 只从 Trae CN 自己的账号池取账号，回退到自己的单凭据 ref，
+    // 保证不会串用其它四条线的凭据。
+    // provider 实参用 TRAE_CN.id 而非字面量 'trae-cn'：写死字面量在改名/多产品
+    // 场景下会静默查不到账号（本插件在 workbuddy 上踩过同类坑）。
+    resolveCredential: makeCredentialResolver<TraeCnCredential>(
+      ctx, pool, TRAE_CN.id, TRAE_CN.defaultCredentialRef,
+    ),
+    refresh: async (model?: string) => {
+      // 必须刷新**解析凭据时所用的那一个**账号，而不是默认单凭据 ref。
+      // 为什么：resolveCredential（上面）优先从账号池取 `TRAE_CN_ACCOUNT_XXX`
+      // 的凭据，而 `traeCn.refresh()` 读写的是 `TRAE_CN_ACCESS_TOKEN`。两者错配
+      // 的后果是 —— 适配器检测到池凭据过期 → 调 refresh → 成功回写到**另一个**
+      // ref → 再 resolve 仍取到那份未更新的过期凭据 → 带着过期 token 发请求 →
+      // 401。用户看到「刚在 Account Hub 登录好，却一直认证失败」，而日志里续期
+      // 全是成功的，极难排查。
+      //
+      // **必须用同一个 model 选号**：resolveCredential 已按目标模型过滤，若这里
+      // 退回空 modelId，就会挑回排序第一的（可能正是对 M 限流的那个）账号，
+      // 从而重新引入上面那段错配。
+      const available = await pickTraeCnAccount(model)
+      if (available) await traeCn.refreshAccountCredential(available.entry.credentialRef)
+      else await traeCn.refresh()
+    },
+    accountPool: pool,
+    product: TRAE_CN,
+  })
 
   // ===== 多账号静默续期调度 =====
   // 替代原有的单账号 scheduleRefresh()，使用 refreshAll() 遍历所有账号续期

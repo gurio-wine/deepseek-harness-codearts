@@ -19,7 +19,7 @@
 
 `lobsterai` 与上述两者**完全不同源**：登录方式、请求头、续期载荷、签到流程、版本号来源都不一样，因此实现是独立一套 `src/lobsterai*.ts`。它只**共用架构模式**（产品配置驱动、账号池、限流切换、模型黑名单），**不共用 `BuddyProduct` 类型** —— 那里面 `apiDomain` / `productCode` / `attributionName` / `userAgentByModelFamily` / `appendSessionParams` 等字段对 LobsterAI 全部无意义。详见 README 的「LobsterAI provider」章节与 `docs/lobsterai-integration-plan.md`。
 
-`trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。它比 `lobsterai` 还要再少一步：**回调 query 直接携带 refreshToken**，没有 authCode 交换；续期走 `POST …/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**当前只实现了产品配置 + 认证（登录/续期/状态）**：模型路由与签到是后续任务，故 `trae-cn` 暂不出现在 `ctx.llm` 路由列表中。回调 URL 的确切形态**尚未真机实测**（记为待校准点 T5）—— 实现采「候选参数表 + 每条回调输出脱敏日志」策略，详见 README 的「Trae CN provider」章节。
+`trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。它比 `lobsterai` 还要再少一步：**回调 query 直接携带 refreshToken**，没有 authCode 交换；续期走 `POST …/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**产品配置 + 认证 + 模型路由（`src/trae-cn-adapter.ts`）均已实现**，签到是后续任务。两个关键事实决定了它的适配器与其它 provider 结构不同：**SSE 是具名事件流**（`event:output`，不是 OpenAI 的 `data:{choices}`），且**业务失败发生在 HTTP 200 的 `event:error` 帧里** —— 故换号循环必须接住流内失败，错误分类按业务码而非状态码（`src/trae-cn-errors.ts`）。回调 URL 形态（T5）与 chat 端点路径（T6）**尚未真机实测**，实现采「候选表 + 常量」策略，详见 README 的「Trae CN provider」章节。
 
 Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**CodeBuddy 与 LobsterAI 两个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。
 

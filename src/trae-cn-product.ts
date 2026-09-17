@@ -90,6 +90,60 @@ export const TRAE_CN_CALLBACK_PATH = '/authorize'
 /** 登录页授权端点路径（拼在 `portalBase` 之后）。 */
 export const TRAE_CN_AUTHORIZATION_PATH = '/authorization'
 
+/**
+ * chat（流式对话）端点路径。
+ *
+ * ## 为什么是常量 + 候选表，而不是直接内联
+ *
+ * ⚠️ **T6 待校准**：调研报告给出了模型目录端点（`/api/ide/v1/get_detail_param`）
+ * 与积分端点，但**未给出 chat 端点的确切路径**。本值来自**本机客户端的只读提取**
+ * （`resources/app/modules/ai-agent/ai_agent.dll` 的字符串池），不是凭空发明：
+ * 该池里 `/api/ide/v1/chat` 与调研报告已确认的 SSE 事件序列（`metadata` →
+ * `timing_cost` → `output` → `done`）**出现在同一段字符串里**，且与同为 IDE 协议族的
+ * `get_detail_param` / `model_list` / `llm_raw_chat` 并列。
+ *
+ * ## 候选表（真机校准时按序替换）
+ *
+ * 同一字符串池里另有三个可能承载 chat 的路径，按可能性排序：
+ * 1. {@link TRAE_CN_CHAT_PATH} = `/api/ide/v1/chat`（**主选**：与 SSE 事件序列同段）；
+ * 2. `/api/ide/v1/llm_raw_chat`（客户端 Rust 侧 `[ModelService] llm_raw_chat error`
+ *    日志与之同名，是「原始 LLM 调用」路径 —— 但它更可能是客户端**内部**命名，
+ *    而非网关路径）；
+ * 3. `/api/ide/v2/llm_raw_chat`（v2 版本）；
+ * 4. `/api/ide/v1/chat_prompt`（疑似 prompt 构造而非对话）。
+ *
+ * 真机一次请求即可判定：若非主选，服务端会返回 404/未知路径错误，届时把本常量
+ * 改成实测值并删除本候选表（**不要**在运行时做逐个试错 —— 那会把每次对话都变成
+ * 最多 4 次请求，且失败模式难以归因）。
+ */
+export const TRAE_CN_CHAT_PATH = '/api/ide/v1/chat'
+
+/**
+ * 候选端点表（仅用于诊断与人工校准，**运行时不使用**）。
+ *
+ * 保留它是为了让「待校准」这件事在代码里可见：`TRAE_CN_CHAT_PATH` 一旦被真机
+ * 证伪，排查者不必重新翻客户端文件，照着本表逐个试即可。
+ */
+export const TRAE_CN_CHAT_PATH_CANDIDATES: readonly string[] = [
+  '/api/ide/v1/chat',
+  '/api/ide/v1/llm_raw_chat',
+  '/api/ide/v2/llm_raw_chat',
+  '/api/ide/v1/chat_prompt',
+]
+
+/**
+ * 模型目录端点路径。
+ *
+ * 调研报告实测确认：`POST /api/ide/v1/get_detail_param` → 41 项，
+ * model id 形如 `DeepSeek-V4-Flash-Official` / `glm-5.2` / `kimi-k3`；
+ * 倍率在 `display_contact_config.consumption_rate.data.rate`。
+ *
+ * ⚠️ 本插件**当前不发这个请求**（任务边界：不发起任何真实网络请求）——
+ * `listModels` 走静态兜底表，远端拉取逻辑由注入的 `fetchRemoteModels` 提供
+ * 并在单测里 mock。本常量供后续（T6 真机校准与签到任务）复用。
+ */
+export const TRAE_CN_MODELS_PATH = '/api/ide/v1/get_detail_param'
+
 /** 控制面请求超时（毫秒）；流式对话请求不适用。 */
 export const TRAE_CN_REQUEST_TIMEOUT_MS = 30_000
 

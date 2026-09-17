@@ -411,7 +411,7 @@ describe('LobsterAI provider 注册', () => {
   })
 })
 
-describe('Trae CN provider 注册（本轮只有认证服务）', () => {
+describe('Trae CN provider 注册（认证服务 + 模型路由）', () => {
   it('暴露 traeCnAuth；服务名不是机械派生的 trae-cnAuth', () => {
     const ctx = createMockContext()
     apply(ctx as never)
@@ -448,13 +448,15 @@ describe('Trae CN provider 注册（本轮只有认证服务）', () => {
     expect((await ctx.traeCnAuth.status()).configured).toBe(true)
   })
 
-  it('**不注册** LLM 路由与 LLM settings namespace（模型路由是后续任务）', () => {
+  it('**注册** LLM 路由与 `llm-trae-cn` settings namespace', () => {
     const ctx = createMockContext()
     apply(ctx as never)
-    // 提前注册一个没有适配器的 provider 只会让模型设置页出现一个点了就报错的空路由。
-    expect(ctx.llm.registeredProviders).not.toContain('trae-cn')
-    expect(ctx.settings.registeredNamespaces).not.toContain('llm-trae-cn')
-    // 但认证服务本身必须在。
+    expect(ctx.llm.registeredProviders).toContain('trae-cn')
+    // namespace 必须与 registerTraeCnLlm 声明的 settingsNs 一致：漏注册会让模型
+    // 设置页在 `refFor → deriveKeyRef(provider)` 处以
+    // `provider.toUpperCase is not a function` 崩溃。
+    // 注意连字符在这里是**正确**的（namespace 是字符串键，不是标识符）。
+    expect(ctx.settings.registeredNamespaces).toContain('llm-trae-cn')
     expect(ctx.traeCnAuth).toBeInstanceOf(TraeCnAuth)
   })
 
