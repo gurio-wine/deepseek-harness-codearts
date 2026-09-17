@@ -17,6 +17,7 @@ import { AccountPool } from './account-pool.js'
 import type { CodeArtsAuth } from './service.js'
 import type { BuddyAuth } from './buddy-auth.js'
 import type { LobsteraiAuth } from './lobsterai-auth.js'
+import type { TraeCnAuth } from './trae-cn-auth.js'
 import type { LobsteraiPendingLogin } from './lobsterai-oauth.js'
 import type { CodeartsPendingLogin } from './login.js'
 import { LOBSTERAI } from './lobsterai-product.js'
@@ -37,7 +38,7 @@ import {
   fetchLobsteraiCreditBalance,
 } from './lobsterai-credits.js'
 import { TRAE_CN } from './trae-cn-product.js'
-import type { TraeCnCredential } from './trae-cn-oauth.js'
+import type { TraeCnCredential, TraeCnPendingLogin } from './trae-cn-oauth.js'
 import type { TraeCnProduct } from './trae-cn-product.js'
 import {
   claimTraeCnDailyCheckin,
@@ -164,6 +165,18 @@ const pendingLobsteraiLogins = new Map<string, { accountId: string; session: Lob
  * 这里不重复实现判重 —— 否则两处状态会在异常路径上失去同步。
  */
 const pendingCodeartsLogins = new Map<string, { accountId: string; session: CodeartsPendingLogin }>()
+
+/**
+ * 进行中的 Trae CN 登录登记表（accountId → 会话句柄）。
+ *
+ * 与 {@link pendingLobsteraiLogins} 同构、同样**只做生命周期管理**：
+ * `account.delete` 时按 accountId 找到会话并 cancel，立刻释放它占用的
+ * 回调端口；会话结算（成功/失败/超时）后自行删除。
+ *
+ * 真正的并发互斥在 `prepareTraeCnLogin` 内（provider 级、模块级单例），
+ * 这里不重复实现判重 —— 否则两处状态会在异常路径上失去同步。
+ */
+const pendingTraeCnLogins = new Map<string, { accountId: string; session: TraeCnPendingLogin }>()
 
 /**
  * 积分端点的可注入依赖。
@@ -380,9 +393,10 @@ export function registerJetHubRpc(
   buddy: BuddyAuth,
   workbuddy: BuddyAuth,
   lobsterai: LobsteraiAuth,
+  traeCn: TraeCnAuth,
 ): void {
   ctx.inject(['connection'], (connectionCtx) => {
-    registerJetHubEndpoints(connectionCtx as Context, pool, codearts, buddy, workbuddy, lobsterai)
+    registerJetHubEndpoints(connectionCtx as Context, pool, codearts, buddy, workbuddy, lobsterai, traeCn)
   })
 }
 
@@ -394,6 +408,7 @@ function registerJetHubEndpoints(
   buddy: BuddyAuth,
   workbuddy: BuddyAuth,
   lobsterai: LobsteraiAuth,
+  traeCn: TraeCnAuth,
 ): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const connection = (ctx as any).connection ?? ctx.get('connection')
@@ -619,6 +634,55 @@ function registerJetHubEndpoints(
             pendingLobsteraiLogins.delete(id)
           })
           return { ok: true, value: { accountId: id, loginUrl: loginSession.loginUrl } }
+        } else if (provider === TRAE_CN.id) {
+          // Trae CN 与 lobsterai/codearts 同款两段式（本地回调服务器拿 loginUrl），
+          // 但更简单：回调 query 直接携带 refreshToken，没有 authCode 交换。
+          //   1. 先 prepare（起 127.0.0.1 回调服务器）→ 立即返回 loginUrl；
+          //   2. 客户端在同一用户手势内 open 该 URL；
+          //   3. 后台 awaitCredential 完成后写凭据并补全占位账号。
+          // 宿主不打开浏览器（打开动作归客户端，宿主再开一次会变成两个标签页）。
+          let prepared
+          try {
+            prepared = await traeCn.prepareLogin()
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error)
+            throw new Error(`无法启动 Trae CN 登录：${reason}`)
+          }
+          if (!prepared.ok) {
+            // provider 级互斥：已有未结算的登录会话。原样返回可判别错误码，
+            // 而不是抛异常 —— 抛异常会被包装成 jet-hub/handler-failed，
+            // 客户端就无法据以提示「已有登录进行中」。
+            return { ok: false, error: { code: prepared.error, message: prepared.message } }
+          }
+          const loginSession = prepared.session
+          // 先在 pool 中添加启用的占位条目（无凭据、pending 形态），
+          // 满足 login.poll 的检测路径：它按「该 credentialRef 能否解析到凭据」判完成。
+          await pool.addAccount({
+            id,
+            provider: TRAE_CN.id,
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            // 占位期间不可续期、无过期时间：两者都要等 exchange 结果才知道。
+            refreshable: false,
+            createdAt: Date.now(),
+          })
+          // 登记表只做生命周期管理：失败/超时释放端口，account.delete 时取消。
+          pendingTraeCnLogins.set(id, { accountId: id, session: loginSession })
+          void loginSession.awaitCredential().then(async (flow) => {
+            // 凭据落盘 + 占位账号补全（两段式的第二段），时序由该方法内部保证。
+            await traeCn.persistLoginResult(flow, { refName, accountId: id, pool })
+          }).catch(async (error: unknown) => {
+            ctx.logger.warn(
+              `[jet-hub] background ${TRAE_CN.id} login failed for ${id}: `
+              + `${error instanceof Error ? error.message : String(error)}`,
+            )
+            // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
+            await pool.removeAccount(id).catch(() => {})
+          }).finally(() => {
+            pendingTraeCnLogins.delete(id)
+          })
+          return { ok: true, value: { accountId: id, loginUrl: loginSession.loginUrl } }
         } else {
           return { ok: false, error: { code: 'bad-request', message: `unknown provider: ${provider}` } }
         }
@@ -641,6 +705,9 @@ function registerJetHubEndpoints(
         // CodeArts 同理（互斥同样是 provider 级的，且它占用的端口还要求 ≥10000）。
         pendingCodeartsLogins.get(req.accountId)?.session.cancel('账号已删除，登录已取消')
         pendingCodeartsLogins.delete(req.accountId)
+        // Trae CN 同理（互斥同样是 provider 级的）。
+        pendingTraeCnLogins.get(req.accountId)?.session.cancel('账号已删除，登录已取消')
+        pendingTraeCnLogins.delete(req.accountId)
         await pool.removeAccount(req.accountId)
         return { ok: true, value: undefined }
       }
@@ -682,6 +749,9 @@ function registerJetHubEndpoints(
               break
             case LOBSTERAI.id:
               await lobsterai.refreshAccountCredential(entry.credentialRef)
+              break
+            case TRAE_CN.id:
+              await traeCn.refreshAccountCredential(entry.credentialRef)
               break
             default:
               throw new Error(`Unknown provider: ${entry.provider}`)

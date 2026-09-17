@@ -38,6 +38,9 @@ import { productById } from './product.js'
 import { lobsteraiProductById } from './lobsterai-product.js'
 import type { BuddyCredential } from './buddy.js'
 import type { LobsteraiCredential } from './lobsterai.js'
+import { TraeCnAdapter } from './trae-cn-adapter.js'
+import type { TraeCnCredential } from './trae-cn-oauth.js'
+import { traeCnProductById } from './trae-cn-product.js'
 import type {
   CodeArtsCredential,
   ProbeAccountResult,
@@ -130,7 +133,8 @@ async function probeWithAdapter(
   // 用 CodeArtsAdapter 会以完全错误的签名与端点发请求。
   const buddyProduct = productById(entry.provider)
   const lobsteraiProduct = lobsteraiProductById(entry.provider)
-  let adapter: BuddyAdapter | LobsteraiAdapter | CodeArtsAdapter
+  const traeCnProduct = traeCnProductById(entry.provider)
+  let adapter: BuddyAdapter | LobsteraiAdapter | TraeCnAdapter | CodeArtsAdapter
   if (buddyProduct !== undefined) {
     adapter = new BuddyAdapter({
       credentialRef: ref,
@@ -144,6 +148,13 @@ async function probeWithAdapter(
       resolveCredential: async () => credential as LobsteraiCredential,
       refresh: async () => {},
       product: lobsteraiProduct,
+    })
+  } else if (traeCnProduct !== undefined) {
+    adapter = new TraeCnAdapter({
+      credentialRef: ref,
+      resolveCredential: async () => credential as TraeCnCredential,
+      refresh: async () => {},
+      product: traeCnProduct,
     })
   } else {
     adapter = new CodeArtsAdapter({

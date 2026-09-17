@@ -455,6 +455,6 @@ export function apply(ctx: Context): void {
   }, 'codearts-auth.scheduler (legacy)')
 
   // ===== Account Hub RPC 注册 =====
-  registerJetHubRpc(ctx, pool, service, buddy, workbuddy, lobsterai)
+  registerJetHubRpc(ctx, pool, service, buddy, workbuddy, lobsterai, traeCn)
   ctx.provide('accountPool', pool)
 }
