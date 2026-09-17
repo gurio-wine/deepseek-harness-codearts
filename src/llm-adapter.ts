@@ -53,8 +53,21 @@ const MAAS_TYPE_BENEFIT_MODELS: ReadonlySet<string> = new Set(['glm-5.3-flash'])
 
 export interface CodeArtsAdapterOptions {
   credentialRef: CredentialRef
-  resolveCredential: () => Promise<CodeArtsCredential | undefined>
-  refresh: () => Promise<void>
+  /**
+   * 从凭据存储解析凭据。
+   *
+   * `model` 是**本次请求的目标模型**，由 `stream()` 从 `options.model` 透传，
+   * 供多账号池跳过「对该模型仍有限流/积分耗尽标记」的账号（见 `buddy-adapter`
+   * 的同类说明）。无目标模型的场景（拉模型目录）省略该参数。
+   */
+  resolveCredential: (model?: string) => Promise<CodeArtsCredential | undefined>
+  /**
+   * 静默续期凭据。
+   *
+   * `model` 与 {@link CodeArtsAdapterOptions.resolveCredential} 同源，供
+   * 「按账号池选号再续期」的实现保持与选号一致的口径；默认单凭据路径忽略它。
+   */
+  refresh: (model?: string) => Promise<void>
   /** 动态拉取远端模型列表；失败时调用方回退到静态列表。 */
   fetchRemoteModels?: () => Promise<Array<{ id: string; name: string }>>
   fetchImpl?: typeof fetch
@@ -807,10 +820,12 @@ export class CodeArtsAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    let credential = await this.options.resolveCredential()
+    // 传 options.model：让账号池在**发请求之前**就跳过对该模型已记为
+    // 限流/积分耗尽的账号（否则每次请求都要先白跑一遍这些账号再换号）。
+    let credential = await this.options.resolveCredential(options.model)
     if (credential === undefined || Date.parse(credential.expires_at) <= Date.now()) {
-      await this.options.refresh()
-      credential = await this.options.resolveCredential()
+      await this.options.refresh(options.model)
+      credential = await this.options.resolveCredential(options.model)
     }
     if (credential === undefined || !credential.access_key_id || !credential.secret_access_key || !credential.security_token) {
       throw new LlmError('codearts: no usable credential; log in first', 'MISSING_CREDENTIAL')
@@ -955,8 +970,8 @@ export class CodeArtsAdapter extends LlmAdapter {
         // 或时钟偏差场景，这里做兜底，避免把可自愈的鉴权失败抛给用户。
         if (isAuthError(response.status, errorText) && !authRefreshed) {
           authRefreshed = true
-          await this.options.refresh()
-          credential = await this.options.resolveCredential()
+          await this.options.refresh(options.model)
+          credential = await this.options.resolveCredential(options.model)
           if (credential === undefined || !credential.access_key_id || !credential.secret_access_key || !credential.security_token) {
             throw new LlmError('codearts: credential missing after refresh; log in again', 'MISSING_CREDENTIAL')
           }

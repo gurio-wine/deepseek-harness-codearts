@@ -129,10 +129,24 @@ export function buildLobsteraiModelsQuery(
 /** `LobsteraiAdapter` 的构造选项。 */
 export interface LobsteraiAdapterOptions {
   credentialRef: CredentialRef
-  /** 从凭据存储解析凭据。 */
-  resolveCredential: () => Promise<LobsteraiCredential | undefined>
-  /** 静默续期凭据。 */
-  refresh: () => Promise<void>
+  /**
+   * 从凭据存储解析凭据。
+   *
+   * `model` 是**本次请求的目标模型**，由 `stream()` 从 `options.model` 透传，
+   * 供多账号池跳过「对该模型仍有限流/积分耗尽标记」的账号。无目标模型的
+   * 场景（拉模型目录）省略该参数。
+   */
+  resolveCredential: (model?: string) => Promise<LobsteraiCredential | undefined>
+  /**
+   * 静默续期凭据。
+   *
+   * `model` 与 {@link LobsteraiAdapterOptions.resolveCredential} 同源。**本
+   * provider 的接线必须用同一个 model 选号**：`refresh` 是「按账号池选号再
+   * 续期该账号」，若它与解析时用的过滤口径不同（例如这里漏传 model），
+   * 就会出现「解析到 B、却刷新了 A」——B 的过期 token 永不更新，用户看到
+   * 「刚登录好却一直认证失败」而日志全绿（历史上的 S1 缺陷）。
+   */
+  refresh: (model?: string) => Promise<void>
   /** 动态拉取远端模型列表；失败时回退到 `product.fallbackModels`。 */
   fetchRemoteModels?: () => Promise<LobsteraiRemoteModel[]>
   /** 解析当前客户端版本号（chat 与模型列表都要带）。 */
@@ -427,10 +441,12 @@ export class LobsteraiAdapter extends LlmAdapter {
     }
 
     // 1. 获取凭据（过期则先静默续期）
-    let credential = await this.options.resolveCredential()
+    // 传 options.model：让账号池在**发请求之前**就跳过对该模型已记为
+    // 限流/积分耗尽的账号（否则每次请求都要先白跑一遍这些账号再换号）。
+    let credential = await this.options.resolveCredential(options.model)
     if (credential === undefined || isLobsteraiExpired(credential)) {
-      await this.options.refresh()
-      credential = await this.options.resolveCredential()
+      await this.options.refresh(options.model)
+      credential = await this.options.resolveCredential(options.model)
     }
     if (credential === undefined || credential.access_token.length === 0) {
       throw new LlmError('lobsterai: no usable credential; log in first', 'MISSING_CREDENTIAL')
@@ -495,8 +511,8 @@ export class LobsteraiAdapter extends LlmAdapter {
     // 4. 发送请求（401/403 时刷新一次凭据后重试）
     let response = await this.send(credential, body, options)
     if (!response.ok && (response.status === 401 || response.status === 403)) {
-      await this.options.refresh()
-      const refreshed = await this.options.resolveCredential()
+      await this.options.refresh(options.model)
+      const refreshed = await this.options.resolveCredential(options.model)
       if (refreshed === undefined || refreshed.access_token.length === 0) {
         throw new LlmError('lobsterai: credential expired and refresh failed', 'AUTH', { status: response.status })
       }

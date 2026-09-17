@@ -105,6 +105,91 @@ function makeReadImage(ctx: Context) {
   }
 }
 
+/**
+ * 账号池选号器：按目标模型挑选一个可用账号。
+ *
+ * 抽成独立函数是**必需的**，不是为了复用：`resolveCredential` 与 LobsterAI 的
+ * `refresh` 回调都要「按模型挑一个账号」，而两者的挑号结果**必须一致**。
+ * 若各写一份，resolve 在 A 对模型 M 限流时会挑到 B，而 refresh 用空
+ * modelId 会挑回排序第一的 A —— 于是「刷新的是解析凭据时所用的那个账号」
+ * 这条不变量（见 `lobsterai-wiring.spec.ts` 的 S1）被破坏：适配器拿到 B 的
+ * 凭据却刷新了 A，B 的过期 token 始终不更新，用户看到的是「刚登录好却
+ * 一直认证失败」，而日志里续期全绿。
+ *
+ * 两步策略（第二步是刻意的退化，不要「顺手」删掉）：
+ * 1. 先按目标模型过滤，跳过仍在该模型冷却期内的账号；
+ * 2. 全被过滤掉时退回不过滤的查询。原因见 {@link makeCredentialResolver}。
+ *
+ * @param pool - 账号池；未提供时返回 null（调用方自行回退单凭据）。
+ * @param provider - provider id（`this.product.id`，不要写死字面量）。
+ */
+export function makeAccountPicker(
+  pool: AccountPool | undefined,
+  provider: string,
+): (model?: string) => Promise<Awaited<ReturnType<AccountPool['getAvailableAccount']>>> {
+  return async (model?: string) => {
+    if (!pool) return null
+    const target = model ?? ''
+    const filtered = await pool.getAvailableAccount(provider, target)
+    if (filtered) return filtered
+    if (target.length === 0) return null
+    // 退化：所有账号都在冷却期 → 取一个让调用方去实测（见 makeCredentialResolver）。
+    return pool.getAvailableAccount(provider, '')
+  }
+}
+
+/**
+ * 构造 provider 的凭据解析函数（四个 provider 共用同一段接线）。
+ *
+ * **`model` 参数就是本函数存在的理由**：`getAvailableAccount` 的限流过滤是
+ * **逐模型**的，`modelId` 传空串时按设计不过滤（见 `AccountPool` 的说明）。
+ * 历史接线把空串写死在这里 —— 于是每次请求开头总是拿到「排序第一」的账号，
+ * 即使它已被记了 24h 积分耗尽标记；失败后才靠适配器的换号循环逐个试。
+ * 前几个账号都耗尽时，每次请求都要白跑 N 次完整往返（发请求 → 400 → 解析
+ * → 记标记 → 换号）。
+ *
+ * 适配器的 `stream()` 在调用点就已经知道目标模型（`options.model`），把它
+ * 透传下来即可让「跳过已知不可用账号」发生在**发请求之前**。
+ *
+ * 两条退化路径都是刻意的，不要「顺手」改掉：
+ *
+ * 1. **全部账号都在冷却期时退回不过滤的查询**（见 {@link makeAccountPicker}）。
+ *    此时按模型过滤的结果是 `null`，直接返回 undefined 会让适配器把
+ *    「所有账号都在冷却」误报成 `MISSING_CREDENTIAL`（「请先登录」）——而真实
+ *    原因是限流/积分耗尽，用户看到的提示会完全指错方向。退回取一个账号、
+ *    由适配器发一次请求，再走完换号循环抛 `QUOTA_EXCEEDED`，既保留既有错误
+ *    语义，也只多花一次探测。这一层退化是必要的：限流标记只是**快照**，
+ *    服务端常在重置时刻之前提前放行（见 `account-probe.ts` 的说明），凭标记
+ *    直接拒绝会让用户被一个早已失效的标记挡住最长 24 小时。
+ * 2. **`model` 缺省（`fetchModels` 拉模型目录）时仍不做限流过滤**。目录对
+ *    所有模型一致，按某个模型的限流状态裁剪反而会凭空缺号。
+ *
+ * @param ctx - 宿主上下文（只用到 `credentials.resolve`）。
+ * @param pool - 账号池；未提供时只用单凭据回退 ref。
+ * @param provider - provider id（`this.product.id`，不要写死字面量）。
+ * @param fallbackRef - 池中无账号时回退的单凭据 ref。
+ */
+export function makeCredentialResolver<T>(
+  ctx: Context,
+  pool: AccountPool | undefined,
+  provider: string,
+  fallbackRef: string,
+): (model?: string) => Promise<T | undefined> {
+  const pick = makeAccountPicker(pool, provider)
+  return async (model?: string) => {
+    const available = await pick(model)
+    if (available) return available.credential as unknown as T
+    // 回退到单凭据 ref（池为空 / 未配置账号池时）。
+    const resolved = await ctx.credentials.resolve(credentialRef(fallbackRef))
+    if (!resolved) return undefined
+    try {
+      return JSON.parse(resolved.value) as T
+    } catch {
+      return undefined
+    }
+  }
+}
+
 /** 注册 codeartsAuth 服务、命令以及 codearts LLM 路由。 */
 export function apply(ctx: Context): void {
   // provider 的 settingsNs 必须已注册，否则模型设置页会因未注册 namespace 崩溃。
@@ -181,20 +266,10 @@ export function apply(ctx: Context): void {
   })
   registerCodeArtsLlm(ctx, {
     credentialRef: credentialRef(CODEARTS_CREDENTIAL_REF),
-    resolveCredential: async () => {
-      // 优先使用账号池获取可用账号，回退到单凭据解析
-      if (pool) {
-        const available = await pool.getAvailableAccount('codearts', '')
-        if (available) return available.credential as CodeArtsCredential
-      }
-      const resolved = await ctx.credentials.resolve(credentialRef(CODEARTS_CREDENTIAL_REF))
-      if (!resolved) return undefined
-      try {
-        return JSON.parse(resolved.value) as CodeArtsCredential
-      } catch {
-        return undefined
-      }
-    },
+    // 优先使用账号池获取可用账号（按目标模型过滤），回退到单凭据解析。
+    resolveCredential: makeCredentialResolver<CodeArtsCredential>(
+      ctx, pool, 'codearts', CODEARTS_CREDENTIAL_REF,
+    ),
     refresh: () => service.refresh(),
     fetchRemoteModels: () => service.refreshModels(),
     accountPool: pool,
@@ -206,20 +281,10 @@ export function apply(ctx: Context): void {
   const buddy = new BuddyAuth(ctx)
   registerBuddyLlm(ctx, {
     credentialRef: credentialRef(BUDDY_CREDENTIAL_REF),
-    resolveCredential: async () => {
-      // 优先使用账号池获取可用账号，回退到单凭据解析
-      if (pool) {
-        const available = await pool.getAvailableAccount('buddy', '')
-        if (available) return available.credential as BuddyCredential
-      }
-      const resolved = await ctx.credentials.resolve(credentialRef(BUDDY_CREDENTIAL_REF))
-      if (!resolved) return undefined
-      try {
-        return JSON.parse(resolved.value) as BuddyCredential
-      } catch {
-        return undefined
-      }
-    },
+    // 池中账号按 `product.id` 归属；provider 实参必须与产品一致，否则查不到账号。
+    resolveCredential: makeCredentialResolver<BuddyCredential>(
+      ctx, pool, CODEBUDDY.id, BUDDY_CREDENTIAL_REF,
+    ),
     refresh: () => buddy.refresh(),
     fetchRemoteModels: () => buddy.fetchModels(pool),
     readImage: makeReadImage(ctx),
@@ -235,19 +300,11 @@ export function apply(ctx: Context): void {
   const workbuddy = new BuddyAuth(ctx, { product: WORKBUDDY })
   registerBuddyLlm(ctx, {
     credentialRef: credentialRef(WORKBUDDY.defaultCredentialRef),
-    resolveCredential: async () => {
-      // 只从 workbuddy 的账号池取账号，回退到 WorkBuddy 自己的单凭据 ref，
-      // 保证不会串用 CodeBuddy 的凭据。
-      const available = await pool.getAvailableAccount('workbuddy', '')
-      if (available) return available.credential as BuddyCredential
-      const resolved = await ctx.credentials.resolve(credentialRef(WORKBUDDY.defaultCredentialRef))
-      if (!resolved) return undefined
-      try {
-        return JSON.parse(resolved.value) as BuddyCredential
-      } catch {
-        return undefined
-      }
-    },
+    // 只从 workbuddy 的账号池取账号，回退到 WorkBuddy 自己的单凭据 ref，
+    // 保证不会串用 CodeBuddy 的凭据。
+    resolveCredential: makeCredentialResolver<BuddyCredential>(
+      ctx, pool, WORKBUDDY.id, WORKBUDDY.defaultCredentialRef,
+    ),
     refresh: () => workbuddy.refresh(),
     fetchRemoteModels: () => workbuddy.fetchModels(pool),
     readImage: makeReadImage(ctx),
@@ -261,24 +318,20 @@ export function apply(ctx: Context): void {
   // 服务名由 LobsteraiAuth 依 product.id 派生，注册为 ctx.lobsteraiAuth。
   // 与其他 provider 一样不注册斜杠命令：入口在 Jet Hub 的 LobsterAI 面板。
   const lobsterai = new LobsteraiAuth(ctx)
+  // 与 resolveCredential 共用同一个选号器：两者必须挑到**同一个**账号，
+  // 否则「刷新的是解析凭据时所用的那个账号」这条不变量会被打破
+  // （详因见 makeAccountPicker 的说明）。
+  const pickLobsteraiAccount = makeAccountPicker(pool, LOBSTERAI.id)
   registerLobsteraiLlm(ctx, {
     credentialRef: credentialRef(LOBSTERAI.defaultCredentialRef),
-    resolveCredential: async () => {
-      // 只从 LobsterAI 自己的账号池取账号，回退到自己的单凭据 ref，
-      // 保证不会串用 CodeBuddy / WorkBuddy / CodeArts 的凭据。
-      // provider 实参用 LOBSTERAI.id 而非字面量 'lobsterai'：写死字面量在
-      // 改名/多产品场景下会静默查不到账号（本插件在 workbuddy 上踩过同类坑）。
-      const available = await pool.getAvailableAccount(LOBSTERAI.id, '')
-      if (available) return available.credential as LobsteraiCredential
-      const resolved = await ctx.credentials.resolve(credentialRef(LOBSTERAI.defaultCredentialRef))
-      if (!resolved) return undefined
-      try {
-        return JSON.parse(resolved.value) as LobsteraiCredential
-      } catch {
-        return undefined
-      }
-    },
-    refresh: async () => {
+    // 只从 LobsterAI 自己的账号池取账号，回退到自己的单凭据 ref，
+    // 保证不会串用 CodeBuddy / WorkBuddy / CodeArts 的凭据。
+    // provider 实参用 LOBSTERAI.id 而非字面量 'lobsterai'：写死字面量在
+    // 改名/多产品场景下会静默查不到账号（本插件在 workbuddy 上踩过同类坑）。
+    resolveCredential: makeCredentialResolver<LobsteraiCredential>(
+      ctx, pool, LOBSTERAI.id, LOBSTERAI.defaultCredentialRef,
+    ),
+    refresh: async (model?: string) => {
       // 必须刷新**解析凭据时所用的那一个**账号，而不是默认单凭据 ref。
       //
       // 为什么：resolveCredential（上面）优先从账号池取
@@ -291,7 +344,11 @@ export function apply(ctx: Context): void {
       //
       // 与 Go 一致：`handler.go:197-209` 也是先 Pick 出账号、再对该账号
       // `RefreshToken(acct)`（而非某个全局单例）。
-      const available = await pool.getAvailableAccount(LOBSTERAI.id, '')
+      //
+      // **必须用同一个 model 选号**：resolveCredential 已按目标模型过滤，
+      // 若这里退回空 modelId，就会挑回排序第一的（可能正是对 M 限流的那个）
+      // 账号，从而重新引入上面那段错配。
+      const available = await pickLobsteraiAccount(model)
       if (available) await lobsterai.refreshAccountCredential(available.entry.credentialRef)
       else await lobsterai.refresh()
     },
