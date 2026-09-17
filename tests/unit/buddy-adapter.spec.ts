@@ -38,6 +38,32 @@ function sseResponse(body: string): Response {
   return new Response(stream, { status: 200 })
 }
 
+/**
+ * 上下文超限的 400 响应体（用户报障原文，国际版 WorkBuddy + deepseek-v4.1-flash）。
+ *
+ * 关键字段：`msg` 用「prompt is too long」措辞、`extError.code` 为
+ * `context_length_exceeded`。两者都是 DSH `isContextWindowExceededError` 的
+ * 识别依据，适配器必须据此把它归为 CONTEXT_WINDOW_EXCEEDED 而非 INVALID_REQUEST。
+ */
+const CONTEXT_OVERFLOW_BODY = JSON.stringify({
+  code: 11115,
+  msg: 'prompt is too long: 1061554 tokens > 1048576 maximum',
+  requestId: '9dc0e856-3dae-431c-a8bd-87a2ab63e8d9',
+  extError: {
+    code: 'context_length_exceeded',
+    message: 'prompt is too long: 1061554 tokens > 1048576 maximum',
+    param: '',
+    type: 'invalid_request_error',
+    StatusCode: 400,
+    Request: null,
+    Response: null,
+  },
+  displayMsg: {
+    en: 'The request exceeds the model context limit. Please shorten the conversation or remove attachments.',
+    zh: '对话内容超出模型长度上限，请精简对话或减少附件后重试。',
+  },
+})
+
 function makeAdapter(overrides: {
   credential?: BuddyCredential | undefined
   refresh?: () => Promise<void>
@@ -301,6 +327,111 @@ describe('BuddyAdapter credential handling', () => {
       expect(error).toBeInstanceOf(LlmError)
       expect((error as LlmError).failure.code).toBe(code)
     }
+  })
+
+  /**
+   * 上下文超限必须归为 CONTEXT_WINDOW_EXCEEDED，而不是笼统的 INVALID_REQUEST。
+   *
+   * 为什么这条错误码至关重要：DSH 的自动压缩恢复（dsh-compaction-basic）监听
+   * `agent/request-error`，**只对 `failure.code === CONTEXT_WINDOW_EXCEEDED`**
+   * 的失败压缩上下文并重试。若标成 INVALID_REQUEST，长会话一旦越过窗口就会把
+   * 裸错误直接抛给用户，用户看到的是：
+   *
+   *   buddy: {"code":11115,"msg":"prompt is too long: 1061554 tokens > 1048576 maximum", ...}
+   *
+   * 这正是用户报障的现象（国际版 WorkBuddy，deepseek-v4.1-flash）。CodeArts
+   * 适配器早已做此归类（llm-adapter.ts 的 httpErrorCode），buddy 此前遗漏。
+   *
+   * 报文取自真实报障原文：`msg` 为「prompt is too long」措辞、
+   * `extError.code` 为 `context_length_exceeded`，两者都应被识别。
+   */
+  it('stream 把上下文超限的 400 归为 CONTEXT_WINDOW_EXCEEDED（触发自动压缩）', async () => {
+    const adapter = makeAdapter({
+      fetchImpl: async () => new Response(CONTEXT_OVERFLOW_BODY, { status: 400 }),
+    })
+    const error = await collectChunks(adapter, streamOptions).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(LlmError)
+    expect((error as LlmError).failure.code).toBe('CONTEXT_WINDOW_EXCEEDED')
+    // 错误消息仍须保留可读原因（用户/日志据此定位），不能被错误码改写掉
+    expect((error as LlmError).message).toContain('prompt is too long')
+  })
+
+  it('上下文超限的 400 不被误判为限流（不触发账号切换）', async () => {
+    // 区分「窗口超限」与「用量限流」很重要：前者换账号也没用（同样的上下文
+    // 会再次超限），必须走压缩；后者才该切换账号。若误判为限流，适配器会白试
+    // 一遍所有账号，最后仍以 QUOTA_EXCEEDED 掩盖真实原因。
+    //
+    // 这里用自包含的 pool 替身（该 describe 内的 makePool 定义在另一块中）。
+    const recorded: Array<{ accountId: string }> = []
+    const sentTokens: string[] = []
+    const pool = {
+      async findAccountIdByCredential() { return 'acct-1' },
+      async updateModelRateLimit(accountId: string) { recorded.push({ accountId }) },
+      async getAvailableAccount() {
+        return { entry: { id: 'acct-2' }, credential: makeCredential({ access_token: 'AT2' }) }
+      },
+    }
+    const adapter = new BuddyAdapter({
+      credentialRef: CREDENTIAL_REF,
+      resolveCredential: async () => makeCredential({ access_token: 'AT1' }),
+      refresh: async () => {},
+      accountPool: pool as never,
+      fetchImpl: async (_url, init) => {
+        const auth = (init?.headers as Headers | undefined)?.get('Authorization') ?? ''
+        sentTokens.push(auth.replace('Bearer ', ''))
+        return new Response(CONTEXT_OVERFLOW_BODY, { status: 400 })
+      },
+    })
+
+    const error = await collectChunks(adapter, streamOptions).catch((e: unknown) => e)
+
+    expect((error as LlmError).failure.code).toBe('CONTEXT_WINDOW_EXCEEDED')
+    // 只发了当前账号：没有因误判限流而去轮询其余账号
+    expect(sentTokens).toEqual(['AT1'])
+    // 也不应写入任何限流标记
+    expect(recorded).toEqual([])
+  })
+
+  /**
+   * 对照：同为中国版/国际版常见的 400 错误，只要不含超限措辞，仍须是
+   * INVALID_REQUEST —— 避免为了修上下文超限而把所有 400 都当成可压缩错误
+   * （那会让真正的请求错误被反复压缩重试，浪费额度且掩盖原因）。
+   */
+  it('普通 400（模型不存在 / 参数非法）仍归为 INVALID_REQUEST', async () => {
+    const cases = [
+      '{"error":{"message":"model not found"}}',
+      '{"code":11102,"msg":"service info not found"}',
+      '{"error":{"type":"invalid_request_error","message":"unsupported parameter"}}',
+    ]
+    for (const body of cases) {
+      const adapter = makeAdapter({ fetchImpl: async () => new Response(body, { status: 400 }) })
+      const error = await collectChunks(adapter, streamOptions).catch((e: unknown) => e)
+      expect((error as LlmError).failure.code, body).toBe('INVALID_REQUEST')
+    }
+  })
+
+  /**
+   * 判定必须看**完整 body**，不能只看 errorDetail 归一化后的短文本。
+   *
+   * `errorDetail` 在能提取到 `error.*` / `data.message` 时会返回拼接文本，
+   * 从而丢掉 `extError` / `displayMsg`。若把判定建立在它之上，服务端一旦
+   * 把 `msg` 改名成 `message`（或补上 `error.code`），`extError.code =
+   * context_length_exceeded` 这个最强信号就会被丢弃，超限随即漏判成
+   * INVALID_REQUEST、自动压缩再次失效。
+   *
+   * 这里构造「error.code 为字符串 + msg 为超限措辞」的变体：errorDetail 会
+   * 返回 `"some_error prompt is too long: ..."`（丢失 extError），但完整 body
+   * 仍含 `context_length_exceeded`，故必须仍判为超限。
+   */
+  it('判定基于完整 body：extError 在 errorDetail 中被丢弃时仍能识别超限', async () => {
+    const variant = JSON.stringify({
+      error: { code: 'some_error', message: 'prompt is too long: 1061554 tokens > 1048576 maximum' },
+      extError: { code: 'context_length_exceeded' },
+    })
+    const adapter = makeAdapter({ fetchImpl: async () => new Response(variant, { status: 400 }) })
+    const error = await collectChunks(adapter, streamOptions).catch((e: unknown) => e)
+    expect((error as LlmError).failure.code).toBe('CONTEXT_WINDOW_EXCEEDED')
   })
 
   it('stream sends the required CodeBuddy headers', async () => {

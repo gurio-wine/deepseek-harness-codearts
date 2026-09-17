@@ -12,6 +12,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   attributionHeaders,
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  isContextWindowExceededError,
   LlmAdapter, LlmError,
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
@@ -314,11 +316,40 @@ function errorDetail(body: string): string {
   return body
 }
 
-/** 将 HTTP 状态码映射为 harness 错误码。 */
-function httpErrorCode(status: number): string {
+/**
+ * 将 HTTP 状态码映射为 harness 错误码。
+ *
+ * 400 需要看**响应体**才能区分「上下文超限」与「普通请求错误」：前者必须归为
+ * CONTEXT_WINDOW_EXCEEDED，才能触发 DSH 的 context-overflow 自动压缩恢复
+ * （dsh-compaction-basic 监听 `agent/request-error`，只对
+ * `failure.code === CONTEXT_WINDOW_EXCEEDED` 的失败压缩上下文并重试）；
+ * 若一律标成 INVALID_REQUEST，长会话一旦越过窗口就会直接把裸错误抛给用户。
+ *
+ * 实测报文（国际版 WorkBuddy，deepseek-v4.1-flash）：
+ * ```
+ * {"code":11115,"msg":"prompt is too long: 1061554 tokens > 1048576 maximum",
+ *  "extError":{"code":"context_length_exceeded","type":"invalid_request_error",...},
+ *  "displayMsg":{"en":"The request exceeds the model context limit. ..."}}
+ * ```
+ * 注意该报文的 `msg` 是「prompt is too long」措辞、`extError.code` 是
+ * `context_length_exceeded`，两者都能被 `isContextWindowExceededError` 识别。
+ *
+ * 与 CodeArts 适配器（llm-adapter.ts 的 httpErrorCode）同一判定口径，但
+ * **传入原始 body 而非 errorDetail(body)**：`errorDetail` 在能提取到
+ * `error.*` / `message` 时会返回拼接后的短文本，从而丢掉 `extError`、
+ * `displayMsg` 等字段——实测「仅 msg 文本」这种输入会被
+ * `isContextWindowExceededError` 漏判（其正则要求出现 context/for-the-model
+ * 字样），而完整 body 因含 `extError.code = context_length_exceeded` 能稳定命中。
+ * 判定看完整报文、展示用归一化文本，两者职责不同。
+ */
+function httpErrorCode(status: number, body: string): string {
   if (status === 401 || status === 403) return 'AUTH'
   if (status === 429) return 'RATE_LIMIT'
-  if (status === 400) return 'INVALID_REQUEST'
+  if (status === 400) {
+    // 先判上下文超限，再退回通用 INVALID_REQUEST。
+    if (isContextWindowExceededError(body)) return CONTEXT_WINDOW_EXCEEDED_CODE
+    return 'INVALID_REQUEST'
+  }
   if (status >= 500) return 'SERVER'
   return `HTTP_${status}`
 }
@@ -819,12 +850,12 @@ export class BuddyAdapter extends LlmAdapter {
           errorText = await response.text().catch(() => '')
           if (!isRateLimited(errorText)) {
             // 新账号失败但不是限流：按原错误分类抛出，不要再吞成"均受限"
-            throw new LlmError(`buddy: ${errorDetail(errorText)}`, httpErrorCode(response.status), { status: response.status })
+            throw new LlmError(`buddy: ${errorDetail(errorText)}`, httpErrorCode(response.status, errorText), { status: response.status })
           }
         }
         throw new LlmError(`buddy: 模型 ${options.model} 所有账号均受限，请稍后再试`, 'QUOTA_EXCEEDED')
       }
-      throw new LlmError(`buddy: ${errorDetail(errorText)}`, httpErrorCode(response.status), { status: response.status })
+      throw new LlmError(`buddy: ${errorDetail(errorText)}`, httpErrorCode(response.status, errorText), { status: response.status })
     }
 
     // 5. 消费 SSE 流
