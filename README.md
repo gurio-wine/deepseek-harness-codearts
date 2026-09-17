@@ -455,6 +455,12 @@ Bearer `access_token` 鉴权。
   不注册斜杠命令。
 - 编程式调用：`ctx.lobsteraiAuth.login()` / `status()` / `refresh()` / `logout()` /
   `fetchModels()` / `resolveClientVersion()`。
+- **登录是两段式非阻塞的**（2026-09 起）：Account Hub 点「+ 新建账号」时，
+  RPC 只做 `prepareLogin()`（起本地回调服务器）并**立即返回 `loginUrl`**，
+  由客户端在同一用户手势内开窗；登录在后台完成后才写凭据并补全账号字段。
+  `login()` 保留为阻塞式便捷封装（会等到用户在浏览器完成，最长 10 分钟），
+  供 e2e 探针等同步调用方使用。同一时间只允许一个进行中的登录会话，
+  重复点击会拿到 `login-in-progress`。
 - 凭据 ref：
   - 单账号：`LOBSTERAI_ACCESS_TOKEN`；
   - 多账号：`LOBSTERAI_ACCOUNT_<UUID_SHORT>`，由 Account Hub「+ 新建账号」生成。

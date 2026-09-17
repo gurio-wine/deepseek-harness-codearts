@@ -17,6 +17,7 @@ import { AccountPool } from './account-pool.js'
 import type { CodeArtsAuth } from './service.js'
 import type { BuddyAuth } from './buddy-auth.js'
 import type { LobsteraiAuth } from './lobsterai-auth.js'
+import type { LobsteraiPendingLogin } from './lobsterai-oauth.js'
 import { LOBSTERAI } from './lobsterai-product.js'
 import { decorateLoginUrl, fetchAuthState, runBuddyLoginFlow } from './buddy-oauth.js'
 import { credentialExpiresAtMs } from './buddy.js'
@@ -131,6 +132,17 @@ export function computeClaimSummary(outcomes: readonly ClaimOutcome[]): RpcCredi
   }
   return summary
 }
+
+/**
+ * 进行中的 LobsterAI 登录登记表（accountId → 会话句柄）。
+ *
+ * 只做**生命周期管理**：`account.delete` 时按 accountId 找到会话并 cancel，
+ * 立刻释放它占用的 127.0.0.1 回调端口；会话结算（成功/失败/超时）后自行删除。
+ *
+ * 真正的并发互斥在 `prepareLobsteraiLogin` 内（provider 级、模块级单例），
+ * 这里不重复实现判重 —— 否则两处状态会在异常路径上失去同步。
+ */
+const pendingLobsteraiLogins = new Map<string, { accountId: string; session: LobsteraiPendingLogin }>()
 
 /**
  * 积分端点的可注入依赖。
@@ -485,14 +497,59 @@ function registerJetHubEndpoints(
           const loginResult = await codearts.login({ refName, accountId: id, pool })
           return { ok: true, value: { accountId: id, loginUrl: loginResult.loginUrl } }
         } else if (provider === LOBSTERAI.id) {
-          // LobsterAI 也是**回调式**登录（本地回调服务器收 authCode），
-          // 与 codearts 同款：同步执行、等待用户在浏览器完成登录后返回。
+          // LobsterAI 与 CodeBuddy 系一样走**两段式**，但第一段不是「轮询式取 state」，
+          // 而是「起本地回调服务器拿 loginUrl」：
+          //   1. 先 prepare（起 127.0.0.1 回调服务器）→ 立即返回 loginUrl；
+          //   2. 客户端在同一用户手势内 open 该 URL —— 这正是本次改造的目的：
+          //      宿主不再持有一个可能长达 10 分钟的阻塞 RPC。阻塞期间用户手势
+          //      早已过期，客户端兜底会自行开窗，把 DSH 页面顶掉；
+          //   3. 后台 awaitCredential 完成后写凭据并补全占位账号。
           //
-          // 与 CodeBuddy 系的两步式（先返回 URL、后台异步跑）不同 —— 那种模式
-          // 是为「轮询式登录」设计的（前端拿 accountId 反复 login.poll）。
-          // LobsterAI 没有可轮询的 state，照 codearts 做才自然。
-          const loginResult = await lobsterai.login({ refName, accountId: id, pool })
-          return { ok: true, value: { accountId: id, loginUrl: loginResult.loginUrl } }
+          // 宿主 opener 为空函数（对齐上面 CodeBuddy 分支的 `openBrowser: () => {}`）：
+          // 打开动作归客户端，宿主再开一次会变成两个标签页。prepareLogin 本身
+          // 不接收 openBrowser，这里通过「根本不打开」来表达同一约束。
+          let prepared
+          try {
+            prepared = await lobsterai.prepareLogin()
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error)
+            throw new Error(`无法启动 LobsterAI 登录：${reason}`)
+          }
+          if (!prepared.ok) {
+            // provider 级互斥：已有未结算的登录会话。原样返回可判别错误码，
+            // 而不是抛异常 —— 抛异常会被包装成 jet-hub/handler-failed，
+            // 客户端就无法据以提示「已有登录进行中」。
+            return { ok: false, error: { code: prepared.error, message: prepared.message } }
+          }
+          const loginSession = prepared.session
+          // 先在 pool 中添加启用的占位条目（无凭据、pending 形态），
+          // 满足 login.poll 的检测路径：它按「该 credentialRef 能否解析到凭据」判完成。
+          await pool.addAccount({
+            id,
+            provider: LOBSTERAI.id,
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            // 占位期间不可续期、无过期时间：两者都要等 exchange 结果才知道。
+            refreshable: false,
+            createdAt: Date.now(),
+          })
+          // 登记表只做生命周期管理：失败/超时释放端口，account.delete 时取消。
+          pendingLobsteraiLogins.set(id, { accountId: id, session: loginSession })
+          void loginSession.awaitCredential().then(async (flow) => {
+            // 凭据落盘 + 占位账号补全（两段式的第二段），时序由该方法内部保证。
+            await lobsterai.persistLoginResult(flow, { refName, accountId: id, pool })
+          }).catch(async (error: unknown) => {
+            ctx.logger.warn(
+              `[jet-hub] background ${LOBSTERAI.id} login failed for ${id}: `
+              + `${error instanceof Error ? error.message : String(error)}`,
+            )
+            // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
+            await pool.removeAccount(id).catch(() => {})
+          }).finally(() => {
+            pendingLobsteraiLogins.delete(id)
+          })
+          return { ok: true, value: { accountId: id, loginUrl: loginSession.loginUrl } }
         } else {
           return { ok: false, error: { code: 'bad-request', message: `unknown provider: ${provider}` } }
         }
@@ -506,6 +563,12 @@ function registerJetHubEndpoints(
 
       case 'account.delete': {
         const req = payload as RpcDeleteAccountRequest
+        // 若该账号正处于「等待浏览器登录」状态，先取消会话：否则它会一直占着
+        // 127.0.0.1 的回调端口到 10 分钟超时；更糟的是 prepare 的互斥锁是
+        // provider 级的 —— 旧会话不释放，用户删掉占位账号后想重新登录
+        // 会一直拿到 `login-in-progress`，直到旧会话超时。
+        pendingLobsteraiLogins.get(req.accountId)?.session.cancel('账号已删除，登录已取消')
+        pendingLobsteraiLogins.delete(req.accountId)
         await pool.removeAccount(req.accountId)
         return { ok: true, value: undefined }
       }

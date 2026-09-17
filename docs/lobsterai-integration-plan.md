@@ -512,6 +512,12 @@ export interface LobsteraiLoginFlowResult {
    缺点：前端要等用户完成登录（CodeArts 现在就是这样，`jet-hub-rpc.ts:430-434`）。
    照它做，改动最小、语义最直白。
 
+   > **2026-09 更新：已改为两段式非阻塞**，本条的「缺点」正是当时的痛点 ——
+   > 前端等待期间用户手势过期，弹窗被浏览器拦截，客户端兜底自行开窗并把
+   > DSH 页面顶掉。现行实现见 §3.2-C 第 1 条的更新说明与 `AGENTS.md`。
+   > `loginUrl` 现在由 `prepareLobsteraiLogin()` 在起完 loopback 服务器后
+   > 立即返回，登录在后台完成。
+
 ---
 
 ### 3.3 凭据存储与解析（Credential）
@@ -1335,7 +1341,7 @@ pool.listAllAccounts().then(accounts => {
 | 方法 | 要点 |
 |---|---|
 | `account.list` | `pool.listAccounts(provider)` |
-| `account.create` | `productById(provider)` 存在 → 两步式（取 state+authUrl 返回，后台跑完）；`codearts` → 同步 `login()`；否则报 `unknown provider`（**436 行**） |
+| `account.create` | `productById(provider)` 存在 → 两步式（取 state+authUrl 返回，后台跑完）；`lobsterai` → 两步式（`prepareLogin` 起回调服务器拿 loginUrl 返回，后台 `persistLoginResult`）；`codearts` → 同步 `login()`；否则报 `unknown provider`（**436 行**） |
 | `account.update` / `account.delete` | 直接转 pool |
 | `account.refresh` | ⚠️ **见下方 bug** |
 | `login.poll` | 检查凭据是否已实际写入 |
@@ -1375,6 +1381,17 @@ pool.listAllAccounts().then(accounts => {
      return { ok: true, value: { accountId: id, loginUrl: loginResult.loginUrl } }
    }
    ```
+
+   > **2026-09 已改为两段式非阻塞（本节方案作废）**：上面这段同步实现会导致
+   > 「用户手势过期 → 客户端弹窗被拦 → 客户端兜底自行开窗顶掉 DSH 页面」。
+   > 现行实现对齐 CodeBuddy 系：`prepareLogin()` 起回调服务器并**立即返回**
+   > `loginUrl`，`pool.addAccount` 写占位条目（`refreshable: false`、无
+   > `expiresAt`），后台 `awaitCredential()` 完成后由 `persistLoginResult()`
+   > 写凭据并补全账号字段，失败 `pool.removeAccount`。
+   > 另加 **provider 级互斥**（`prepareLobsteraiLogin` 返回
+   > `{ok:false, error:'login-in-progress'}`，不新建监听也不复用旧会话），
+   > 并保留 `LobsteraiAuth.login()` 作为阻塞式便捷封装（e2e 探针用）。
+   > 详见 `AGENTS.md` 的「登录必须两段式」一节。
 2. `account.refresh` 顺带**修掉上面两个 bug**：改成按 `entry.provider` 找服务 +
    按 `entry.credentialRef` 刷新。这会同时修好 workbuddy。
 3. `credits.status` / `claimAll` / `balances` 目前签名是

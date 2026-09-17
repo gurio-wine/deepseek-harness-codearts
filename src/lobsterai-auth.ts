@@ -38,8 +38,12 @@ import { LOBSTERAI, type LobsteraiProduct } from './lobsterai-product.js'
 import { classifyLobsteraiError, isLobsteraiTerminalError } from './lobsterai-errors.js'
 import {
   exchangeLobsteraiAuthCode,
+  prepareLobsteraiLogin,
   runLobsteraiLoginFlow,
   type LobsteraiLoginFlowOptions,
+  type LobsteraiLoginFlowResult,
+  type LobsteraiLoginPrepareOptions,
+  type LobsteraiLoginPrepareOutcome,
 } from './lobsterai-oauth.js'
 import { RefreshScheduler } from './refresh.js'
 import { AccountPool } from './account-pool.js'
@@ -198,12 +202,15 @@ export class LobsteraiAuth extends Service {
    *
    * `accountId` + `pool` 同时提供时，登录成功后自动把账号登记进账号池
    * （Account Hub 的「+ 新建账号」路径）。
+   *
+   * **阻塞式**：会一直等到用户在浏览器完成登录（最长 10 分钟）。
+   * Account Hub 用的是两段式 {@link prepareLogin} + {@link persistLoginResult}，
+   * 以便 RPC 立即返回登录 URL、不阻塞客户端。
    */
   async login(
     flowOptions: { refName?: string; accountId?: string; pool?: AccountPool } & Partial<LobsteraiLoginFlowOptions> = {},
   ): Promise<LobsteraiLoginResult> {
     this.active = true
-    const ref = flowOptions.refName ? credentialRef(flowOptions.refName) : credentialRef(this.credentialRefName)
     // 版本号是 exchange 的必需字段，登录前先解析（带缓存，通常无网络开销）。
     const clientVersion = await this.resolveClientVersion()
     const flow = await runLobsteraiLoginFlow({
@@ -212,21 +219,77 @@ export class LobsteraiAuth extends Service {
       ...this.options.fetcher === undefined ? {} : { fetcher: this.options.fetcher },
       ...flowOptions,
     })
+    return this.persistLoginResult(flow, flowOptions)
+  }
+
+  /**
+   * 两段式的**第一段**：准备一次登录，返回登录 URL 与会话句柄。
+   *
+   * 只做「起本地回调服务器 + 解析版本号」，**不打开浏览器、不等待用户**。
+   * 调用方应立即把 `session.loginUrl` 交给客户端弹窗（用户手势必须发生在
+   * 同一轮交互里），随后用 {@link persistLoginResult} 在后台消费
+   * `session.awaitCredential()` 的结果。
+   *
+   * 这里**不写凭据、不动账号池** —— 凭据落盘与占位账号的补全由
+   * {@link persistLoginResult} 负责，两者时序必须保持「先跑完流程、
+   * 再写凭据、最后补全账号」。
+   *
+   * 已有进行中的会话时返回 `login-in-progress`（provider 级互斥：
+   * 不新建监听、不复用旧会话）；调用方应把该错误原样透传给客户端提示用户。
+   */
+  async prepareLogin(
+    options: Partial<Omit<LobsteraiLoginPrepareOptions, 'product' | 'clientVersion'>> = {},
+  ): Promise<LobsteraiLoginPrepareOutcome> {
+    // 会话出现即视为「本次登录有效」：清掉上一次的失效标记，
+    // 否则 status() 会一直显示旧的 refresh_token 失效提示。
+    this.active = true
+    const clientVersion = await this.resolveClientVersion()
+    return prepareLobsteraiLogin({
+      product: this.product,
+      clientVersion,
+      ...this.options.fetcher === undefined ? {} : { fetcher: this.options.fetcher },
+      ...options,
+    })
+  }
+
+  /**
+   * 两段式的**第二段**：把一个已完成的登录结果落盘（凭据 + 账号池）。
+   *
+   * 时序约束（不可调换）：
+   * 1. `expiresAt` / `refreshable` / `nickname` 都来自 exchange 结果，
+   *    流程返回前无法得知，因此占位账号只能以「pending 形态」存在
+   *    （无 `expiresAt`、`refreshable: false`）；
+   * 2. 先把凭据写入 `ctx.credentials`，**再**补全账号条目 —— 客户端轮询的
+   *    `login.poll` 以「该 ref 能否解析到凭据」为完成判据，反过来（先补全
+   *    账号字段再写凭据）会让轮询在凭据就绪前就报成功。
+   *
+   * `accountId` + `pool` 提供时按账号路径补全；否则落到默认单凭据 ref
+   * （{@link login} 走的就是这条）。
+   *
+   * 不触碰 `active`：那是「登出竞态」的开关（见 {@link refresh}），
+   * 由 {@link login} / {@link prepareLogin} 在会话开始时置位。
+   * 两段式路径下 `prepareLogin` 已经置位，第二段只需落盘。
+   */
+  async persistLoginResult(
+    flow: LobsteraiLoginFlowResult,
+    options: { refName?: string; accountId?: string; pool?: AccountPool } = {},
+  ): Promise<LobsteraiLoginResult> {
+    const ref = options.refName ? credentialRef(options.refName) : credentialRef(this.credentialRefName)
     await this.ctx.credentials.set(ref, flow.access)
     this.refreshTokenInvalid = false
     this.lastRefreshError = undefined
     this.scheduleRefresh()
     const credential = parseCredential(flow.access)
     // 多账号：accountId 提供时自动注册到 pool
-    if (flowOptions.accountId !== undefined && flowOptions.pool !== undefined) {
-      await flowOptions.pool.addAccount({
-        id: flowOptions.accountId,
+    if (options.accountId !== undefined && options.pool !== undefined) {
+      await options.pool.addAccount({
+        id: options.accountId,
         provider: this.product.id,
         nickname: credential?.nickname !== undefined && credential.nickname.length > 0
           ? credential.nickname
-          : flowOptions.accountId,
+          : options.accountId,
         enabled: true,
-        credentialRef: flowOptions.refName ?? this.credentialRefName,
+        credentialRef: options.refName ?? this.credentialRefName,
         createdAt: Date.now(),
         expiresAt: credential ? lobsteraiCredentialExpiresAtMs(credential) : undefined,
         refreshable: credential !== undefined && isLobsteraiRefreshable(credential),
