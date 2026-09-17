@@ -3,8 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runLoginFlow, runOAuthFlow } from '../../src/login.js'
 import { RefreshTokenExpiredError, exchangeRefreshToken, generateDpopKeyPair, type TokenResponse } from '../../src/oauth.js'
 import { CODEARTS_CREDENTIAL_REF, CodeArtsAuth } from '../../src/service.js'
+import { AccountPool } from '../../src/account-pool.js'
 
-vi.mock('../../src/login.js', () => ({
+vi.mock('../../src/login.js', async (importOriginal) => ({
+  // 两段式的 prepare 用真实实现（它只起本地回调服务器），
+  // 阻塞式两个流程保持 mock —— 它们会真的去开浏览器 / 等 180 秒。
+  ...await importOriginal<typeof import('../../src/login.js')>(),
   runLoginFlow: vi.fn(),
   runOAuthFlow: vi.fn(),
 }))
@@ -161,6 +165,82 @@ describe('CodeArtsAuth OAuth login', () => {
     const result = await service.login({ flow: 'ticket' })
     expect(mockedRunLoginFlow).toHaveBeenCalled()
     expect(result.refreshable).toBe(false)
+  })
+})
+
+describe('CodeArtsAuth 两段式（prepareLogin + persistLoginResult）', () => {
+  it('prepareLogin 返回 loginUrl 但不写凭据', async () => {
+    const { ctx, credentials } = makeContext()
+    const service = newService(ctx, { fetcher: mockFetcher })
+    const outcome = await service.prepareLogin({ timeoutMs: 5000 })
+    try {
+      expect(outcome.ok).toBe(true)
+      if (!outcome.ok) throw new Error('prepare 失败')
+      expect(outcome.session.loginUrl).toContain('codearts.huaweicloud.com/portal/authorize')
+      expect(outcome.session.port).toBeGreaterThanOrEqual(10_000)
+      // 第一段**不落盘**：凭据要在第二段才写。
+      expect(await credentials.resolve(CODEARTS_CREDENTIAL_REF)).toBeUndefined()
+    } finally {
+      if (outcome.ok) outcome.session.cancel('用例清理')
+    }
+  })
+
+  it('persistLoginResult 写凭据并返回 refreshable，且不改动 active', async () => {
+    const { ctx, credentials } = makeContext()
+    const service = newService(ctx, { fetcher: mockFetcher })
+    const access = JSON.stringify({
+      access_key_id: 'AK', secret_access_key: 'SK', security_token: 'ST',
+      expires_at: '2026-08-15T00:00:00Z', refresh_token: 'RT',
+    })
+    const result = await service.persistLoginResult({
+      access, expires: Date.parse('2026-08-15T00:00:00Z'), loginUrl: 'https://login',
+    })
+    expect(await credentials.resolve(CODEARTS_CREDENTIAL_REF)).toEqual({ value: access, source: 'fake' })
+    expect(result).toMatchObject({ access, loginUrl: 'https://login', refreshable: true })
+    expect(String(result.ref)).toBe(CODEARTS_CREDENTIAL_REF)
+  })
+
+  it('persistLoginResult 对已存在的占位账号是**补全**而非新增（账号池不出现重复条目）', async () => {
+    const { ctx } = makeContext()
+    const service = newService(ctx, { fetcher: mockFetcher })
+    const pool = new AccountPool(ctx)
+    await pool.addAccount({
+      id: 'codearts-abc', provider: 'codearts', nickname: 'codearts-abc', enabled: true,
+      credentialRef: 'CODEARTS_ACCOUNT_ABCD', refreshable: false, createdAt: 1,
+    })
+    await service.persistLoginResult({
+      access: JSON.stringify({
+        access_key_id: 'AK', secret_access_key: 'SK', security_token: 'ST',
+        expires_at: '2026-08-15T00:00:00Z', refresh_token: 'RT',
+      }),
+      expires: Date.parse('2026-08-15T00:00:00Z'),
+      loginUrl: 'https://login',
+    }, { refName: 'CODEARTS_ACCOUNT_ABCD', accountId: 'codearts-abc', pool })
+
+    const accounts = await pool.listAllAccounts()
+    expect(accounts).toHaveLength(1)
+    expect(accounts[0]).toMatchObject({
+      id: 'codearts-abc',
+      refreshable: true,
+      expiresAt: Date.parse('2026-08-15T00:00:00Z'),
+    })
+  })
+
+  it('login() 仍是两段的串联：先跑流程、再落盘', async () => {
+    mockedRunOAuthFlow.mockResolvedValue({
+      access: JSON.stringify({
+        access_key_id: 'AK', secret_access_key: 'SK', security_token: 'ST',
+        expires_at: '2026-08-15T00:00:00Z', refresh_token: 'RT',
+      }),
+      expires: Date.parse('2026-08-15T00:00:00Z'),
+      loginUrl: 'https://login',
+    })
+    const { ctx, credentials } = makeContext()
+    const service = newService(ctx, { fetcher: mockFetcher })
+    const result = await service.login()
+    expect(mockedRunOAuthFlow).toHaveBeenCalled()
+    expect(result.refreshable).toBe(true)
+    expect(await credentials.resolve(CODEARTS_CREDENTIAL_REF)).toBeDefined()
   })
 })
 

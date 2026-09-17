@@ -336,16 +336,61 @@ export function startOAuthCallbackServer(
 /** 新式 OAuth 回调等待预算（浏览器打开 + 用户操作，180 秒）。 */
 const OAUTH_CALLBACK_TIMEOUT_MS = 180_000
 /** 回调端口下限（对齐真实插件对回调端口的 ≥10000 要求）。 */
-const MIN_CALLBACK_PORT = 10_000
+export const MIN_CALLBACK_PORT = 10_000
 
-/** 启动回调服务器并确保监听端口 ≥10000（真实插件要求，低端口会被 portal 拒绝）。 */
-function listenOnCallbackPort(
+/** 登录超时错误文案（阻塞式封装与两段式共用同一条消息）。 */
+const OAUTH_TIMEOUT_MESSAGE = 'CodeArts OAuth login timed out'
+
+/** 回调端口重试上限（见 {@link listenOnCallbackPort}）。 */
+const CALLBACK_PORT_ATTEMPTS = 10
+
+/** 从 [10000, 65535] 随机取一个候选端口。 */
+function randomCallbackPort(): number {
+  return Math.floor(Math.random() * (65_536 - MIN_CALLBACK_PORT)) + MIN_CALLBACK_PORT
+}
+
+/**
+ * 启动回调服务器并确保监听端口 ≥10000（真实插件要求，低端口会被 portal 拒绝）。
+ *
+ * `listen(0)` 由系统分配的端口可能低于 10000，此时关闭并用随机端口重试 ——
+ * 该随机端口可能落在**系统保留段**（Windows 上 `netsh int ipv4 show
+ * excludedportrange protocol=tcp` 常见成百上千个保留端口），`listen` 会以
+ * `EACCES` 失败。这类失败与「端口被占用」一样属于**挑选失败**，不是登录本身
+ * 失败，故同样换端口重试（带上限，避免极端情况下死循环）；只有连续
+ * {@link CALLBACK_PORT_ATTEMPTS} 次都挑不到端口才认为真的起不来。
+ *
+ * `options` 仅供测试注入确定的端口序列：`initialPort` 覆盖首次尝试的端口
+ * （默认 0 = 由系统分配），`pickPort` 覆盖重试时的随机取端口。
+ */
+export function listenOnCallbackPort(
   server: ReturnType<typeof createServer>,
+  options: { initialPort?: number; pickPort?: () => number } = {},
 ): Promise<number> {
+  const pickPort = options.pickPort ?? randomCallbackPort
   return new Promise((resolve, reject) => {
+    let attempts = 0
     const tryListen = (port: number) => {
-      server.once('error', reject)
-      server.listen(port, '127.0.0.1', () => {
+      attempts += 1
+      /**
+       * 一次尝试的两个监听器必须成对摘除。
+       *
+       * `server.listen()` 会挂一个一次性的 `'listening'` 监听器；失败时该事件
+       * 永不触发、监听器会**留在 server 上**。重试 N 次就累积 N 个，Node 在
+       * 第 11 个时报 `MaxListenersExceededWarning`（把普通的重试涂成「疑似内存
+       * 泄漏」），且每次重试都让旧监听器多留一份。故失败路径必须把
+       * `'listening'` 也一并摘掉。
+       */
+      const onError = (error: NodeJS.ErrnoException) => {
+        server.removeListener('listening', onListening)
+        server.removeListener('error', onError)
+        if (attempts >= CALLBACK_PORT_ATTEMPTS) {
+          reject(error)
+          return
+        }
+        tryListen(pickPort())
+      }
+      const onListening = () => {
+        server.removeListener('error', onError)
         const address = server.address()
         const assigned = typeof address === 'object' && address ? address.port : 0
         if (assigned >= MIN_CALLBACK_PORT) {
@@ -354,34 +399,209 @@ function listenOnCallbackPort(
         }
         // 端口 < 10000：关闭后用随机 [10000, 65535] 端口重试（对齐真实插件）。
         server.close(() => {
-          const retry = Math.floor(Math.random() * (65_536 - MIN_CALLBACK_PORT)) + MIN_CALLBACK_PORT
-          tryListen(retry)
+          if (attempts >= CALLBACK_PORT_ATTEMPTS) {
+            reject(new Error(`CodeArts 登录回调服务器未能获得 ≥${MIN_CALLBACK_PORT} 的端口`))
+            return
+          }
+          tryListen(pickPort())
         })
-      })
+      }
+      server.once('error', onError)
+      server.once('listening', onListening)
+      server.listen(port, '127.0.0.1')
     }
-    tryListen(0)
+    tryListen(options.initialPort ?? 0)
   })
 }
 
-/** 运行完整的新式 IAM OAuth 登录流程（默认登录方式）。 */
-export async function runOAuthFlow(options: LoginFlowOptions = {}): Promise<LoginFlowResult> {
+/**
+ * 一次「已准备、待完成」的 OAuth 登录会话（两段式的第一段产物）。
+ *
+ * 与阻塞式 {@link runOAuthFlow} 的区别：**流程内不再打开浏览器**。
+ * 打开动作必须由持有用户手势的一方（客户端弹窗）完成 —— 这正是两段式改造的
+ * 目的：RPC 立即把 `loginUrl` 返回给客户端，客户端在同一手势内 `open`，
+ * 宿主不再持有「等 180 秒」的阻塞调用（用户手势过期会让弹窗被拦截，
+ * 客户端的兜底逻辑于是自行开窗、把 DSH 页面顶掉）。
+ */
+export interface CodeartsPendingLogin {
+  /** 本地回调服务器实际监听的端口（必然 ≥ {@link MIN_CALLBACK_PORT}）。 */
+  port: number
+  /** 展示给用户的 portal 授权 URL（含一次性 PKCE 挑战与 ticket_id）。 */
+  loginUrl: string
+  /** 等待用户在浏览器完成授权并换回凭据。 */
+  awaitCredential(): Promise<LoginFlowResult>
+  /** 主动放弃本次登录：关闭回调端口，并让 {@link awaitCredential} 以错误结算。 */
+  cancel(reason?: string): void
+}
+
+/**
+ * {@link prepareCodeartsLogin} 的结果。
+ *
+ * 用判别联合而非「抛异常」表达互斥：调用方（RPC 层）需要把
+ * `login-in-progress` 原样透传给客户端做提示，异常会被 RPC 的统一错误包装
+ * 成 `jet-hub/handler-failed`，客户端拿不到可判别的错误码。
+ */
+export type CodeartsLoginPrepareOutcome =
+  | { ok: true; session: CodeartsPendingLogin }
+  | { ok: false; error: 'login-in-progress'; message: string }
+
+/** {@link prepareCodeartsLogin} 接受的选项（无 `openBrowser` —— 该阶段不开浏览器）。 */
+export type CodeartsLoginPrepareOptions = Omit<LoginFlowOptions, 'openBrowser' | 'flow'> & {
+  /** 回调等待总超时（毫秒）；默认 180 秒（{@link OAUTH_CALLBACK_TIMEOUT_MS}）。 */
+  timeoutMs?: number
+}
+
+/**
+ * 进行中的登录槽位（模块级，同一时间最多一个）。
+ *
+ * prepare 阶段会**占用一个本地监听端口**，而客户端的「新建账号」按钮可以被
+ * 反复点击。没有互斥时每次点击都会起一个新的 loopback 服务器，
+ * 点 N 次就有 N 个端口一直挂到 180 秒超时。
+ *
+ * `'preparing'` 是**同步占位**：从进入临界区到回调服务器真正 listen 成功之间
+ * 存在多个 await（生成 DPoP 密钥对、listen），若只在 listen 完成后才登记，
+ * 并发的两次调用会双双通过判空检查、各自起一个监听。
+ * 故必须在**第一个 await 之前**同步占位。
+ */
+type CodeartsLoginSlot = CodeartsPendingLogin | 'preparing'
+
+let activeLoginSlot: CodeartsLoginSlot | undefined
+
+/** 当前是否有未结算的登录会话（含正在准备中的；供诊断与单测断言使用）。 */
+export function hasActiveCodeartsLogin(): boolean {
+  return activeLoginSlot !== undefined
+}
+
+/**
+ * 准备一次新式 IAM OAuth 登录（两段式的第一段）：起本地回调服务器，
+ * 返回登录 URL 与结算句柄。
+ *
+ * **不打开浏览器、不等待用户**：调用方应立即把 `session.loginUrl` 交给客户端
+ * 弹窗，之后再用 {@link CodeartsPendingLogin.awaitCredential} 等凭据落盘。
+ *
+ * ## 并发策略：provider 级互斥（已有会话时拒绝，不新建、不复用）
+ *
+ * 已有未结算会话时返回 `{ok:false, error:'login-in-progress'}`：
+ * - **不复用旧会话**：复用会让一份凭据结果被多个占位 accountId 共享，
+ *   账号池里出现指向同一凭据的重复候选；
+ * - **不静默新建**：每次点击都起监听会让端口堆积到超时。
+ *
+ * 超时、成功、失败、{@link CodeartsPendingLogin.cancel} 都会释放会话。
+ *
+ * 其余语义（180 秒等待预算、`code_challenge_method=SHA-256`、回调端口 ≥10000、
+ * 成功/失败 307 重定向到 portal 结果页、旧 secret 回退轮询）与
+ * {@link startOAuthCallbackServer} / 原 `runOAuthFlow` 完全一致。
+ */
+export async function prepareCodeartsLogin(
+  options: CodeartsLoginPrepareOptions = {},
+): Promise<CodeartsLoginPrepareOutcome> {
+  if (activeLoginSlot !== undefined) {
+    return {
+      ok: false,
+      error: 'login-in-progress',
+      message: '已有 CodeArts 登录进行中，请先在浏览器完成或关闭该登录窗口',
+    }
+  }
+  // 同步占位：本函数后面还有若干 await（生成密钥对、listen），
+  // 不在此刻占住的话并发调用会同时通过上面的判空。
+  activeLoginSlot = 'preparing'
+
   const ticketId = randomBytes(32).toString('hex')
   const pkce = generatePkcePair()
-  const keyPair = await generateDpopKeyPair()
-  const { port, server, result } = await startOAuthCallbackServer(ticketId, pkce, keyPair, options)
+
+  let server: ReturnType<typeof createServer>
+  let port: number
+  let result: Promise<LoginFlowResult>
+  try {
+    // DPoP 密钥对生成与监听都是异步的：任一失败都必须归还槽位，
+    // 否则此后所有登录都会被 `login-in-progress` 永久挡住。
+    const keyPair = await generateDpopKeyPair()
+    ;({ port, server, result } = await startOAuthCallbackServer(ticketId, pkce, keyPair, options))
+  } catch (error) {
+    if (activeLoginSlot === 'preparing') activeLoginSlot = undefined
+    throw error
+  }
   const loginUrl = buildOAuthLoginUrl(port, pkce, ticketId)
+
+  let resolveResult!: (value: LoginFlowResult) => void
+  let rejectResult!: (reason: unknown) => void
+  const credential = new Promise<LoginFlowResult>((resolve, reject) => {
+    resolveResult = resolve
+    rejectResult = reject
+  })
+  // 这个 Promise 是手工创建的、要过一会儿才被消费者 await，而回调处理器可能在
+  // 「构造完成」与「被 await」之间就把它 reject 掉（典型：用户浏览器回调极快，
+  // 或 exchange 立刻失败）。那一段窗口里 Node 会把它视为**未处理的拒绝**并打印
+  // `PromiseRejectionHandledWarning` / 触发 vitest 的 unhandled error。
+  //
+  // 先挂一个空处理器把「已处理」标记打上，可消除该告警；这不影响后续消费者 ——
+  // 它们仍能拿到同一个拒绝原因。
+  credential.catch(() => {})
+
+  let serverClosed = false
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+  /** 关闭回调服务器并停掉超时计时器（幂等）。 */
+  const closeServer = async (): Promise<void> => {
+    if (serverClosed) return
+    serverClosed = true
+    if (timeoutTimer !== undefined) clearTimeout(timeoutTimer)
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+
+  // 回调结果补上 loginUrl：`startOAuthCallbackServer` 的 result 里它是空串
+  // （服务器不知道调用方最终展示的 URL），而流程结果需要它。
+  result.then(
+    (outcome) => resolveResult({ ...outcome, loginUrl }),
+    (error) => rejectResult(error),
+  )
+
+  // 超时覆盖「用户操作 + exchange」整个窗口。原实现从「浏览器已打开」起算，
+  // 这里从「会话建立」起算 —— prepare 不再打开浏览器，两者实际只差毫秒级。
+  const timeoutMs = options.timeoutMs ?? OAUTH_CALLBACK_TIMEOUT_MS
+  timeoutTimer = setTimeout(() => {
+    rejectResult(new Error(OAUTH_TIMEOUT_MESSAGE))
+  }, timeoutMs)
+  timeoutTimer.unref?.()
+
+  const loginSession: CodeartsPendingLogin = {
+    port,
+    loginUrl,
+    awaitCredential: () => credential,
+    cancel: (reason = 'CodeArts 登录已取消') => {
+      rejectResult(new Error(reason))
+    },
+  }
+  // 用真实句柄替换占位，保持互斥连续（中间没有释放窗口）。
+  activeLoginSlot = loginSession
+  // 结算即释放会话：成功、失败、超时、取消都汇聚到这一条路径上。
+  void credential.then(releaseSession, releaseSession)
+
+  function releaseSession(): void {
+    if (activeLoginSlot === loginSession) activeLoginSlot = undefined
+    void closeServer()
+  }
+
+  return { ok: true, session: loginSession }
+}
+
+/**
+ * 运行完整的新式 IAM OAuth 登录流程（默认登录方式）。
+ *
+ * 现已成为 {@link prepareCodeartsLogin} 的阻塞式便捷封装，供「同步」调用方使用
+ * （`CodeArtsAuth.login()`、`/codearts-login` 命令、e2e 探针）；Account Hub
+ * 走的是两段式（prepare → 客户端弹窗 → awaitCredential），不经过这里。
+ */
+export async function runOAuthFlow(options: LoginFlowOptions = {}): Promise<LoginFlowResult> {
+  const outcome = await prepareCodeartsLogin(options)
+  if (!outcome.ok) throw new Error(outcome.message)
+  const loginSession = outcome.session
   try {
     const opener = options.openBrowser ?? openBrowser
-    await opener(loginUrl)
-    const outcome = await Promise.race([
-      result,
-      new Promise<never>((_, reject) => {
-        const timer = setTimeout(() => reject(new Error('CodeArts OAuth login timed out')), OAUTH_CALLBACK_TIMEOUT_MS)
-        timer.unref?.()
-      }),
-    ])
-    return { ...outcome, loginUrl }
-  } finally {
-    await new Promise((resolve) => server.close(resolve))
+    await opener(loginSession.loginUrl)
+  } catch (error) {
+    // 打开失败时不能把会话留在原地（会一直占用端口到超时）。
+    loginSession.cancel(`打开 CodeArts 登录页失败：${error instanceof Error ? error.message : String(error)}`)
+    throw error
   }
+  return loginSession.awaitCredential()
 }

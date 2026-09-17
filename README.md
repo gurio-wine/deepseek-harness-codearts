@@ -105,12 +105,50 @@ dsh plugin --profile <name> add "https://github.com/gurio-wine/dsh-account-hub.g
 
 - `/codearts-login` — 在浏览器中打开华为云 portal 授权页；授权后，插件经本地
   `/oauth/callback` 回调收取 `code`，并由 STS token 端点换取含 `refresh_token` 的
-  AK/SK/SecurityToken 凭据。
+  AK/SK/SecurityToken 凭据。该命令是**阻塞式**的（等到用户在浏览器完成授权）；
+  Account Hub 设置页走的是两段式非阻塞路径（见下）。
 - `/codearts-status` — 显示 `configured`、`source`、`expiresAt`、
   `refreshable` 以及最新的 `refreshError`。
 - `/codearts-refresh` — 手动静默续期凭据（refresh_token 换取；无 refresh_token 时提示重新登录）。
 - 编程式调用：`ctx.codeartsAuth.login()`、`ctx.codeartsAuth.status()`、
   `ctx.codeartsAuth.refresh()`、`ctx.codeartsAuth.logout()`。
+
+### 登录是两段式非阻塞的（2026-09 起）
+
+Account Hub 的 **CodeArts 面板**点「+ 新建账号」时，RPC **不再**在请求内等待浏览器
+登录。原实现（`account.create` 里 `await codearts.login(...)`）最长阻塞 180 秒，
+等它返回时触发点击的**用户手势早已过期** —— 客户端拿到 `loginUrl` 再开窗会被
+浏览器弹窗拦截，客户端的兜底逻辑于是自行开窗、把 DSH 页面顶掉。现在的形态与
+CodeBuddy 系、LobsterAI 完全一致（见 [AGENTS.md](AGENTS.md) 的「登录必须两段式」）：
+
+1. **第一段（同步返回）**：`CodeArtsAuth.prepareLogin()` → `prepareCodeartsLogin()`
+   起本地回调服务器（端口 ≥10000）、生成 PKCE/DPoP，返回 `{port, loginUrl,
+   awaitCredential, cancel}`；`pool.addAccount` 写入**占位条目**
+   （`refreshable: false`、无 `expiresAt`），随后立即 `return {ok: true, value:
+   {accountId, loginUrl}}`。**流程内不打开浏览器** —— 打开动作归客户端，
+   宿主再开一次会变成两个标签页。
+2. **第二段（后台）**：后台 `awaitCredential()` 完成后由
+   `CodeArtsAuth.persistLoginResult()` 写凭据并补全占位账号
+   （`expiresAt` / `refreshable`）；失败则 `pool.removeAccount` 移除占位，
+   避免留下无凭据的幽灵账号。
+
+配套约束：
+
+- **provider 级互斥**：同一时间只允许一个进行中的 CodeArts 登录会话，重复点击返回
+  `{ok:false, error:'login-in-progress'}`（判别联合，**不抛异常** —— 抛异常会被 RPC
+  统一包装成 `jet-hub/handler-failed`，客户端就拿不到可判别的错误码）。
+  不复用旧会话（会让一份凭据被多个占位 accountId 共享），也不静默新建
+  （每次点击都会堆一个 loopback 端口到 180 秒超时）。互斥采用**同步占位**
+  （`'preparing'` 槽位）：判空与 listen 之间隔着 `generateDpopKeyPair()` 等 await，
+  若只在 listen 成功后才登记，并发连发会全部通过判空、各起一个监听；
+  listen 失败会**归还槽位**，否则此后所有登录都会被永久挡住。
+- **`account.delete` 会 cancel 对应会话**（`jet-hub-rpc.ts` 的
+  `pendingCodeartsLogins` 登记表）：否则旧会话会一直占着回调端口到超时，
+  用户删掉占位账号后重新登录会一直拿到 `login-in-progress`。
+- `login()` 保留为**阻塞式便捷封装**（`prepare` + `awaitCredential` 的串联），
+  供 `/codearts-login` 命令与 e2e 探针等同步调用方使用，行为不变。
+- 端口 ≥10000、180 秒等待预算、PKCE（`code_challenge_method=SHA-256`）、
+  成功/失败 307 重定向到 portal 结果页、旧 `secret` 回退轮询全部保留原语义。
 
 ## LLM provider
 
@@ -203,12 +241,18 @@ bundle）。
 
 默认登录流程（新式 IAM OAuth，PKCE + DPoP）：
 
-1. 生成 PKCE 配对与 DPoP ES256 密钥对，并启动本地 `127.0.0.1` 回调服务器。
-2. 构造 portal `/authorize` URL 并打开华为云授权页面。
+1. 生成 PKCE 配对与 DPoP ES256 密钥对，并启动本地 `127.0.0.1` 回调服务器
+   （端口 ≥10000）。
+2. 构造 portal `/authorize` URL 并打开华为云授权页面（两段式下这一步由客户端
+   在用户手势内完成）。
 3. 授权后浏览器回调本地 `/oauth/callback`，携带授权码 `code`。
 4. 向 STS token 端点（`sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens`）用
    `code` 换取含 `refresh_token` 的凭据 JSON，并存储到 `CODEARTS_ACCESS_TOKEN` 下。
 5. 凭据到期前静默续期（见「续期（refresh）」），无需再次打开浏览器。
+
+上述 1–2 步在代码中即 `prepareCodeartsLogin()`（第一段），4–5 步的落盘即
+`persistLoginResult()`（第二段）；阻塞式 `runOAuthFlow()` / `login()` 只是
+「第一段 → 打开浏览器 → 第二段」的串联。
 
 旧 ticket 流程保留为显式回退（编程式调用 `ctx.codeartsAuth.login({ flow: 'ticket' })`）：
 生成 `ticket_id`，打开 `devcloud.cn-north-4.huaweicloud.com/doer/redirect` 认证页，

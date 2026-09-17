@@ -1,6 +1,12 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
-import { runLoginFlow, runOAuthFlow } from './login.js'
+import {
+  prepareCodeartsLogin,
+  runLoginFlow,
+  runOAuthFlow,
+  type CodeartsLoginPrepareOptions,
+  type CodeartsLoginPrepareOutcome,
+} from './login.js'
 import {
   RefreshTokenExpiredError,
   credentialFromTokenResponse,
@@ -94,32 +100,98 @@ export class CodeArtsAuth extends Service {
     if (options.fetcher) this.fetchImpl = options.fetcher
   }
 
-  /** 运行登录流程（默认新式 OAuth；flow: 'ticket' 走旧流程回退）并持久化凭据。 */
+  /**
+   * 运行登录流程（默认新式 OAuth；flow: 'ticket' 走旧流程回退）并持久化凭据。
+   *
+   * **阻塞式**：会一直等到用户在浏览器完成授权（最长 180 秒）。
+   * Account Hub 用的是两段式 {@link prepareLogin} + {@link persistLoginResult}，
+   * 以便 RPC 立即返回登录 URL、不阻塞客户端；`/codearts-login` 命令与 e2e
+   * 探针等同步调用方继续用这里。
+   *
+   * 第一段（跑流程拿到 `LoginFlowResult`）与第二段（落盘）已拆开，
+   * 本方法只是二者的串联 —— 两段式的后台路径复用同一个第二段。
+   */
   async login(options: { flow?: 'oauth' | 'ticket'; refName?: string; accountId?: string; pool?: AccountPool } & LoginFlowOptions = {}): Promise<LoginResult> {
     this.active = true
-    const ref = options.refName ? credentialRef(options.refName) : credentialRef(CODEARTS_CREDENTIAL_REF)
     const flow: LoginFlowResult = options.flow === 'ticket'
       ? await runLoginFlow(options)
       : await runOAuthFlow(options)
+    return this.persistLoginResult(flow, options)
+  }
+
+  /**
+   * 两段式的**第一段**：准备一次新式 IAM OAuth 登录，返回登录 URL 与会话句柄。
+   *
+   * 只做「生成 PKCE/DPoP + 起本地回调服务器」，**不打开浏览器、不等待用户**。
+   * 调用方应立即把 `session.loginUrl` 交给客户端弹窗（用户手势必须发生在
+   * 同一轮交互里），随后用 {@link persistLoginResult} 在后台消费
+   * `session.awaitCredential()` 的结果。
+   *
+   * 这里**不写凭据、不动账号池** —— 凭据落盘与占位账号的补全由
+   * {@link persistLoginResult} 负责。
+   *
+   * 已有进行中的会话时返回 `login-in-progress`（provider 级互斥：
+   * 不新建监听、不复用旧会话）；调用方应把该错误原样透传给客户端提示用户。
+   */
+  async prepareLogin(options: CodeartsLoginPrepareOptions = {}): Promise<CodeartsLoginPrepareOutcome> {
+    // 会话出现即视为「本次登录有效」：清掉上一次的失效标记，
+    // 否则 status() 会一直显示旧的 refresh_token 失效提示。
+    this.active = true
+    return prepareCodeartsLogin(options)
+  }
+
+  /**
+   * 两段式的**第二段**：把一个已完成的登录结果落盘（凭据 + 账号池）。
+   *
+   * 时序约束（不可调换）：
+   * 1. `expiresAt` / `refreshable` 都来自换取的凭据，流程返回前无法得知，
+   *    因此占位账号只能以「pending 形态」存在（无 `expiresAt`、
+   *    `refreshable: false`）；
+   * 2. 先把凭据写入 `ctx.credentials`，**再**补全账号条目 —— 客户端轮询的
+   *    `login.poll` 以「该 ref 能否解析到凭据」为完成判据，反过来（先补全
+   *    账号字段再写凭据）会让轮询在凭据就绪前就报成功。
+   *
+   * `accountId` + `pool` 提供时**按 id 落位**：账号已存在（两段式的占位条目）
+   * 就补全，不存在（直接调用 `login()` 的注册路径）就新建 —— 用一次查找
+   * 决定走哪条，避免「先 addAccount 占位、第二段再 addAccount 补全」把
+   * 同一个 id 写成账号池里的两条记录。
+   *
+   * 不触碰 `active`：那是「登出竞态」的开关（见 {@link refresh}），
+   * 由 {@link login} / {@link prepareLogin} 在会话开始时置位。
+   */
+  async persistLoginResult(
+    flow: LoginFlowResult,
+    options: { refName?: string; accountId?: string; pool?: AccountPool } = {},
+  ): Promise<LoginResult> {
+    const ref = options.refName ? credentialRef(options.refName) : credentialRef(CODEARTS_CREDENTIAL_REF)
     await this.ctx.credentials.set(ref, flow.access)
     this.refreshTokenInvalid = false
     this.lastRefreshError = undefined
     this.scheduleRefresh()
     void this.refreshModels()
     const credential = parseCredential(flow.access)
-    // 多账号：accountId 提供时自动注册到 pool
+    // 多账号：accountId 提供时落位到账号池的一条记录（占位则补全，否则新建）。
     if (options.accountId && options.pool) {
       const expiresAt = credential?.expires_at ? Date.parse(credential.expires_at) : undefined
-      await options.pool.addAccount({
-        id: options.accountId,
-        provider: 'codearts',
-        nickname: options.accountId,
-        enabled: true,
-        credentialRef: options.refName ?? CODEARTS_CREDENTIAL_REF,
-        createdAt: Date.now(),
-        expiresAt: Number.isNaN(expiresAt) ? undefined : expiresAt,
-        refreshable: Boolean(credential?.refresh_token),
-      })
+      const existing = (await options.pool.listAllAccounts()).find((a) => a.id === options.accountId)
+      if (existing) {
+        await options.pool.updateAccount(options.accountId, {
+          nickname: options.accountId,
+          expiresAt: expiresAt !== undefined && !Number.isNaN(expiresAt) ? expiresAt : undefined,
+          refreshable: Boolean(credential?.refresh_token),
+        })
+      } else {
+        await options.pool.addAccount({
+          id: options.accountId,
+          provider: 'codearts',
+          nickname: options.accountId,
+          enabled: true,
+          credentialRef: options.refName ?? CODEARTS_CREDENTIAL_REF,
+          createdAt: Date.now(),
+          expiresAt: Number.isNaN(expiresAt) ? undefined : expiresAt,
+          refreshable: Boolean(credential?.refresh_token),
+        })
+      }
     }
     return {
       access: flow.access,
