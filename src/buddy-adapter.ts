@@ -805,8 +805,14 @@ export class BuddyAdapter extends LlmAdapter {
             )
           }
           // 取下一个未尝试过的可用账号（同样按本产品 id 过滤，否则 WorkBuddy
-          // 永远取不到候选账号，限流后无法自动切换）
-          const next = await this.options.accountPool.getAvailableAccount(this.product.id, options.model)
+          // 永远取不到候选账号，限流后无法自动切换）。
+          //
+          // 必须把 `tried` 传给池：见 `AccountPool.getAvailableAccount` 的说明 ——
+          // 池按「重置时间最早到期」排序，刚失败的账号可能仍排第一，
+          // 不排除就会拿回同一个、命中下面的 `tried.has` 而立即 break。
+          const next = await this.options.accountPool.getAvailableAccount(
+            this.product.id, options.model, tried,
+          )
           if (!next || tried.has(next.entry.id)) break
           tried.add(next.entry.id)
           credential = next.credential as BuddyCredential

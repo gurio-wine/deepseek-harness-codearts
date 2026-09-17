@@ -449,13 +449,29 @@ export class AccountPool {
    * resolveCredential 入口）此时还不知道要发哪个模型，只能退化为
    * "任取一个启用账号"。但 `enabled` 过滤在任何情况下都生效：
    * 停用账号绝不参与自动选择，空 modelId 也不例外。
+   *
+   * @param provider - provider id（`this.product.id`，不要写死字面量）
+   * @param modelId - 目标模型；空串表示不按模型过滤
+   * @param excludeAccountIds - 需要跳过的账号 id。
+   *
+   * **为什么需要 `excludeAccountIds`**：调用方在「请求级轮换」时会逐个换号
+   * 重试，必须能拿到**下一个**账号而不是每次都拿回同一个。
+   * 本池默认按「重置时间最早到期」排序，当失败类别**不写限流标记**时
+   * （如 5xx / 请求错误 —— 它们不是限流，不该留徽章），
+   * 刚失败的账号仍是排序第一，调用方若不排除它就会原地打转、
+   * 换号形同虚设。Go 侧对应的是 `PickExcluding(tried)`（`pool.go:131`）。
+   *
+   * 在池这一层排除（而非让调用方自己跳过）是必要的：调用方只能拿到
+   * 「池认为最优的一个」，无法枚举候选自己去重。
    */
   async getAvailableAccount(
     provider: string,
     modelId: string,
+    excludeAccountIds?: ReadonlySet<string>,
   ): Promise<{ entry: ProviderAccountEntry; credential: CodeArtsCredential | BuddyCredential } | null> {
     const candidates = this.readAccounts()
       .filter(a => a.provider === provider && a.enabled)
+      .filter(a => excludeAccountIds === undefined || !excludeAccountIds.has(a.id))
       .filter(a => {
         // 空 modelId（未知目标模型）：无可比对的键，保持候选不变。
         if (modelId.length === 0) return true

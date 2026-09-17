@@ -557,7 +557,13 @@ export class LobsteraiAdapter extends LlmAdapter {
               parsed?.resetTimeMs ?? Date.now() + LOBSTERAI_RATE_LIMIT_FALLBACK_MS,
             )
           }
-          const next = await this.options.accountPool.getAvailableAccount(this.product.id, options.model)
+          // 必须把 `tried` 传给池：失败类别为 5xx / 请求错误时**不写限流标记**
+          // （它们不是限流，不该留徽章），刚失败的账号仍是池里排序第一，
+          // 不排除就会拿回同一个账号、命中下面的 `tried.has` 而**立即 break**
+          // —— 换号形同虚设。对齐 Go 的 `PickExcluding(tried)`（`pool.go:131`）。
+          const next = await this.options.accountPool.getAvailableAccount(
+            this.product.id, options.model, tried,
+          )
           if (!next || tried.has(next.entry.id)) break
           tried.add(next.entry.id)
           credential = next.credential as LobsteraiCredential
