@@ -6,7 +6,7 @@ deepseek-harness 插件：执行 CodeArts（华为云）登录流程，默认走
 为显式回退（`flow: 'ticket'`）。插件还注册一个 `codearts` LLM provider 路由，使该
 凭证可直接用于 CodeArts 后端模型调用。
 
-此外插件内置另外两个 provider 路由：
+此外插件内置另外三个 provider 路由：
 
 - **buddy（腾讯 CodeBuddy）** — 见 [buddy provider](#buddy-provider)；
   另支持「一键领取积分」（每日签到）。
@@ -17,6 +17,18 @@ deepseek-harness 插件：执行 CodeArts（华为云）登录流程，默认走
 四个 provider 的 Jet Hub 面板都提供「**显示列表**」按钮，可逐个开关模型以控制其
 是否出现在对话框的模型选择里（黑名单制，默认全部显示）——
 见 [模型列表开关](#模型列表开关黑名单)。
+
+## 仓库来源
+
+本仓库是**独立维护**的 GitHub 仓库
+（[gurio-wine/deepseek-harness-codearts](https://github.com/gurio-wine/deepseek-harness-codearts)），
+也是安装与升级的**唯一上游**。它的原始来源是 Gitee 上的
+[iJetLi/deepseek-harness-codearts](https://gitee.com/iJetLi/deepseek-harness-codearts)：
+早期为镜像同步，现已脱离该仓库独立演进，功能与修复不再回传。谨向原始作者致谢。
+
+本仓库并非 GitHub 意义上的 fork（不是从某个 GitHub 仓库 fork 出来的），两者是并行
+的两个托管位置。本地检出若保留了 `upstream` 远端指向 Gitee，仅作为历史回溯通道，
+**不要**把它当作升级来源，也不要把它的分支合并回来。
 
 ## 安装
 
@@ -30,13 +42,13 @@ deepseek-harness 插件：执行 CodeArts（华为云）登录流程，默认走
 
 ```yaml
 allowBuilds:
-  dsh-codearts-auth@git+https://gitee.com/iJetLi/deepseek-harness-codearts.git: true
+  dsh-codearts-auth@git+https://github.com/gurio-wine/deepseek-harness-codearts.git: true
 ```
 
-再用 `dsh plugin add` 从 gitee 拉取并安装：
+再用 `dsh plugin add` 从 GitHub 拉取并安装：
 
 ```sh
-dsh plugin --profile <name> add "https://gitee.com/iJetLi/deepseek-harness-codearts.git"
+dsh plugin --profile <name> add "https://github.com/gurio-wine/deepseek-harness-codearts.git"
 ```
 
 `add` 以 `git+https` 方式安装，pnpm 会运行 `prepare` 脚本自动构建 `lib/`，无需
@@ -104,9 +116,10 @@ Tokens 福利）。
 凭据来自默认的新式 IAM OAuth 流程（含 `refresh_token`）。请求发起时会解析最新
 凭据，若已过期则先静默续期，再用新 AK/SK/SecurityToken 签名，无需重新打开浏览器。
 
-除 `codearts` 外，插件另注册两个独立的腾讯系路由：`buddy`（见
+除 `codearts` 外，插件另注册三个独立路由：`buddy`（见
 [buddy provider](#buddy-provider)）与 `workbuddy`（见
-[WorkBuddy provider](#workbuddy-provider)）。三者互不覆盖，可同时使用。
+[WorkBuddy provider](#workbuddy-provider)）两个腾讯系路由，以及 `lobsterai`
+（见 [LobsterAI provider](#lobsterai-provider)）。四者互不覆盖，可同时使用。
 
 ## 凭证
 
@@ -279,18 +292,6 @@ Jet Hub（设置页）的账号面板按 provider 分组展示，WorkBuddy 是�
   `credits.status` 目前仅供外部脚本或直接 RPC 调用使用。
 - 对应 LLM provider 的设置命名空间为 `llm-workbuddy`。
 
-### 积分余额（Credits Balance）
-
-账号卡片上的「积分」一行显示该账号的**可用积分**，与 IDE 顶部显示的
-`Credits Balance` 是同一个数值。鼠标悬停可看到各资源包的明细与到期时间。
-
-**两个产品通用**——CodeBuddy 中国版与 WorkBuddy 国际版都实现同一接口
-（只是 baseURL 随 `product.endpoint` 切换）：
-
-```
-POST /v2/billing/meter/get-user-resource    body {}
-```
-
 ### 模型列表开关（黑名单）
 
 Jet Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的**全部模型**，每个模型
@@ -321,12 +322,26 @@ Jet Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的**�
 账号卡片上的「积分」一行显示该账号的**可用积分**，与 IDE 顶部显示的
 `Credits Balance` 是同一个数值。鼠标悬停可看到各资源包的明细与到期时间。
 
-**支持范围**：CodeBuddy 中国版与 WorkBuddy 国际版通用（都实现同一接口，
-只是 baseURL 随 `product.endpoint` 切换）：
+**支持范围**覆盖三个 provider、两套端点，语义一致：
 
-```
-POST /v2/billing/meter/get-user-resource    body {}
-```
+- **CodeBuddy 系（`buddy` / `workbuddy` 通用，仅 baseURL 随 `product.endpoint`
+  切换）**：
+
+  ```
+  POST /v2/billing/meter/get-user-resource    body {}
+  ```
+
+- **LobsterAI**：
+
+  ```
+  GET /api/user/profile-summary    → data.totalCreditsRemaining
+  ```
+
+  不要用 `/api/user/quota`（只有 `freeCreditsTotal=300`，不含活动积分，实测某账号
+  `profile-summary` 有 5297.72 而 `quota` 只有 300）。
+
+「余额为 0」与「查不到」严格区分：失败时 `balance` 为 `null` 并带 `error`，
+卡片显示原因而非 0。
 
 **CodeArts 不支持**：它是华为云账号体系，没有这两条腾讯计费接口。因此 CodeArts
 面板**不显示「积分」行，也不显示「刷新积分」按钮**，且不会发起
