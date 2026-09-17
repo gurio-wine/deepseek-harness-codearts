@@ -19,9 +19,9 @@
 
 `lobsterai` 与上述两者**完全不同源**：登录方式、请求头、续期载荷、签到流程、版本号来源都不一样，因此实现是独立一套 `src/lobsterai*.ts`。它只**共用架构模式**（产品配置驱动、账号池、限流切换、模型黑名单），**不共用 `BuddyProduct` 类型** —— 那里面 `apiDomain` / `productCode` / `attributionName` / `userAgentByModelFamily` / `appendSessionParams` 等字段对 LobsterAI 全部无意义。详见 README 的「LobsterAI provider」章节与 `docs/lobsterai-integration-plan.md`。
 
-`trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。它比 `lobsterai` 还要再少一步：**回调 query 直接携带 refreshToken**，没有 authCode 交换；续期走 `POST …/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**产品配置 + 认证 + 模型路由（`src/trae-cn-adapter.ts`）均已实现**，签到是后续任务。两个关键事实决定了它的适配器与其它 provider 结构不同：**SSE 是具名事件流**（`event:output`，不是 OpenAI 的 `data:{choices}`），且**业务失败发生在 HTTP 200 的 `event:error` 帧里** —— 故换号循环必须接住流内失败，错误分类按业务码而非状态码（`src/trae-cn-errors.ts`）。回调 URL 形态（T5）与 chat 端点路径（T6）**尚未真机实测**，实现采「候选表 + 常量」策略，详见 README 的「Trae CN provider」章节。
+`trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。它比 `lobsterai` 还要再少一步：**回调 query 直接携带 refreshToken**，没有 authCode 交换；续期走 `POST …/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**产品配置 + 认证 + 模型路由（`src/trae-cn-adapter.ts`）+ 签到与积分余额（`src/trae-cn-credits.ts`）均已实现**。三个关键事实决定了它的适配器与其它 provider 结构不同：**SSE 是具名事件流**（`event:output`，不是 OpenAI 的 `data:{choices}`）、**业务失败发生在 HTTP 200 的 `event:error` 帧里**（故换号循环必须接住流内失败，错误分类按业务码而非状态码，见 `src/trae-cn-errors.ts`）、**签到必须带设备四件套**（见「积分领取」）。回调 URL 形态（T5）、chat 端点路径（T6）与签到/余额的若干字段名（T7 / T8）**尚未真机实测**，实现采「候选表 + 常量」策略，详见 README 的「Trae CN provider」章节。
 
-Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**CodeBuddy 与 LobsterAI 两个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。
+Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**当前由 CodeBuddy 与 LobsterAI 两个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。Trae CN 的**后端**签到与余额已就绪（`src/trae-cn-credits.ts`），但客户端能力矩阵尚未登记它，故其面板暂时也不显示该按钮（见「积分能力必须在请求前判定」）。
 
 - **包名**：`dsh-account-hub`
 - **入口**：`lib/index.js`（宿主侧）、`lib/client/jet-hub.js`（客户端 bundle）
@@ -156,7 +156,7 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 
 ## 积分领取（每日签到）
 
-两套**协议完全不同**的实现，各自独立：
+三套**协议完全不同**的实现，各自独立：
 
 **CodeBuddy** —— `src/credits.ts`（国际版 WorkBuddy 后端无签到接口）：
 
@@ -172,13 +172,22 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 - `clientVersion` 是**必填** query 参数，动态拉取（缓存 12h），失败回退 `product.fallbackClientVersion`
 - `platform=win32` 等参数是**客户端形态伪装**，非 Windows 上也照发
 
-两套都遵守的共同约定：
+**Trae CN** —— `src/trae-cn-credits.ts`（两步 + 设备四件套）：
+
+- 状态 `POST /trae/api/v2/ug/checkin_credits/status` → 未领则 `POST /trae/api/v2/ug/checkin_credits/claim`，两者 body 均为 `{"req_source":1}`
+- **幂等判据用 `checked_in`（账号级当日）**；`did_checked_in` 是**设备级**语义（换设备仍 false），**不要用**
+- **claim 必须带设备头**：`x-device-id`（**取自凭据**的 Aha 设备号，16 位十进制）+ `x-device-type: windows` + `x-os-version` + `x-app-version: 3.3.100`；缺了回 `code:9004`
+- `Origin` / `Referer` = `https://www.trae.cn`（编译期常量 `product.portalBase`，不从凭据推断）
+- 无 auth 时是 **HTTP 200 + `code:1001` + `enable:false`**（不是 401）—— 判定**以 body `code` 为准**；`1001` 统一译为「凭据已失效，请重新登录」
+
+三套都遵守的共同约定：
 
 - `credits.claimAll` / `credits.status` **处理该 provider 下的全部账号，含已停用**：停用只影响账号池的自动选择与限流切换，与「该账号今天领了没」无关
 - 逐账号**顺序执行**（并发易触发风控），单个账号失败不中断整批
-- 返回同一个 `ClaimOutcome` 判别联合，使 `computeClaimSummary` 与前端摘要 UI 两套协议共用
+- 返回同一个 `ClaimOutcome` 判别联合，使 `computeClaimSummary` 与前端摘要 UI 三套协议共用
+- **领取流程自带多步预检的 provider 传 `precheckStatus: false`**（LobsterAI 与 Trae CN）：它们的 `claim` 内部已经查过状态，外部再查一次纯属重复请求
 
-**积分余额（Credits Balance）** 覆盖三个产品、两套端点，语义一致（「查不到」与「余额为 0」严格区分），与签到是彼此独立的能力 —— 不要因为「国际版没有签到」就推断也查不到余额（CodeBuddy 系两个产品通用同一端点）：
+**积分余额（Credits Balance）** 覆盖四个产品、三套端点，语义一致（「查不到」与「余额为 0」严格区分），与签到是彼此独立的能力 —— 不要因为「国际版没有签到」就推断也查不到余额（CodeBuddy 系两个产品通用同一端点）：
 
 - **CodeBuddy 系（buddy / workbuddy 通用，仅 baseURL 随 `product.endpoint` 切换）**：端点 `POST /v2/billing/meter/get-user-resource`，body `{}`
   - 响应**双层嵌套**：`data.Response.Data.Accounts[]`（签到是单层 `data`，此处最易解析错）
@@ -186,6 +195,13 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
   - **不用**截断过的 `TotalDosage`
   - 包名回退链：`PackageName` → `SubProductName` → `PackageCode`
 - **LobsterAI**：`GET /api/user/profile-summary` → `data.totalCreditsRemaining`；**不要**用 `/api/user/quota`（只有 `freeCreditsTotal=300`，不含活动积分，实测某账号 profile-summary 有 5297.72 而 quota 只有 300）
+- **Trae CN**：`POST /trae/api/v2/pay/web_user_ent_usage`，body `{"require_usage":true}`
+  - 礼包按 **`available_endpoint` 分池**：`0`=通用积分、`1`=Work 积分
+  - **展示口径**：通用池（endpoint=0）之和是**主数字**（`total`）；Work 池走**单独的 `workTotal` 字段**，**绝不合并** —— chat 只扣通用池，合并会让用户以为 Work 额度能用来对话
+  - 返回类型 `TraeCnCreditBalance` 是 `CreditBalance` 的**超集**（多 `pools` / `workTotal`），故收集器能直接复用。⚠️ **但 `CreditBalanceRow` 目前只渲染 `total`，还没渲染 `workTotal`** —— 双池在界面上分开展示要等第四步改前端（架构上无法绕过：Card 是固定组件），改动后须 `pnpm build:all` 重建 bundle
+  - **不要**用 `ug/activity/info` 的活动口径（写 200 work 实到 150 通用，口径陷阱）
+  - 包名回退链：`name` → `package_name` → `gift_name` → …（`BALANCE_NAME_FIELDS`）；非通用池的包名在 `packages` 里带 `[Work 积分]` 前缀
+  - **字段名 T7 待校准**：礼包数组位置与余额字段用候选表 + 「`available_endpoint` 指纹扫描」兜底，余额取数三级回退（remain 类字段 → 总额−已用 → 把 `total_amount` 当余额并**如实把 total 置 0**）
 - 累加后一律 `roundCredits` 规整两位小数（多包浮点噪声会放大成 655.67000031）
 - 「余额为 0」与「查不到」严格区分：失败时 `balance` 为 `null` + `error`，卡片显示原因而非 0
 - RPC：`credits.balances`；前端 `AccountCard` 的 `CreditBalanceRow`，面板有「刷新积分」按钮
@@ -203,10 +219,12 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 | `buddy` | ✓ | ✓ |
 | `workbuddy` | ✓ | ✗（国际版后端无签到接口） |
 | `lobsterai` | ✓ | ✓（`client-activities` 三步流程） |
+| `trae-cn` | ✗（**待第四步登记**，后端已就绪） | ✗（同上） |
 
 要点：
 
 - **默认关闭**：未登记的 provider 视为两项全无。新增 provider 忘登记时，最坏结果是暂时看不到积分，而不是每次打开面板都发一个必然失败的请求
+- **`trae-cn` 当前正处于这个「默认关闭」状态**：后端三个积分端点（`src/trae-cn-credits.ts` + `jet-hub-rpc.ts` 分发）已实现并有单测覆盖，但本表尚未登记它，故 Trae CN 面板暂时不显示积分行与两个积分按钮。**这是刻意的分步交付**（第四步任务负责登记），不是缺陷
 - **门控在发请求之前**，不是在 UI 上吞错误：`loadCredits` / `claimCredits` 函数内部各有一道守卫（按钮不渲染只是 UI 便利，不是安全边界），`AccountCard` 的积分行与「刷新积分」按钮也按能力渲染
 - **历史缺陷**（用户报障）：客户端在面板挂载时对所有 provider 无条件调用 `credits.balances`，CodeArts 面板每次打开都在控制台报 `unsupported provider: codearts`，并把账号卡片的「积分」渲染成「查询失败」。后端 `productById()` 的拒绝是正确契约，不该被当成运行时故障
 - 改动能力矩阵后必须同步 `PROVIDERS` 列表：`tests/unit/credits-capabilities.spec.ts` 有一条断言锁死两者条目集合相等

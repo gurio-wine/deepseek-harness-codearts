@@ -6,15 +6,18 @@ deepseek-harness 插件：执行 CodeArts（华为云）登录流程，默认走
 为显式回退（`flow: 'ticket'`）。插件还注册一个 `codearts` LLM provider 路由，使该
 凭证可直接用于 CodeArts 后端模型调用。
 
-此外插件内置另外三个 provider 路由：
+此外插件内置另外四个 provider 路由：
 
 - **buddy（腾讯 CodeBuddy）** — 见 [buddy provider](#buddy-provider)；
   另支持「一键领取积分」（每日签到）。
 - **workbuddy（腾讯 WorkBuddy 国际版）** — 见 [WorkBuddy provider](#workbuddy-provider)。
 - **lobsterai（有道 LobsterAI / 龙虾）** — 见 [LobsterAI provider](#lobsterai-provider)；
   另支持「一键领取积分」（每日签到）。
+- **trae-cn（字节跳动 Trae 国内版）** — 见
+  [Trae CN provider](#trae-cn-provider字节跳动-trae-国内版)；
+  后端已实现签到与积分余额（双池），前端能力矩阵登记见该节说明。
 
-四个 provider 的 Account Hub 面板都提供「**显示列表**」按钮，可逐个开关模型以控制其
+五个 provider 的 Account Hub 面板都提供「**显示列表**」按钮，可逐个开关模型以控制其
 是否出现在对话框的模型选择里（黑名单制，默认全部显示）——
 见 [模型列表开关](#模型列表开关黑名单)。
 
@@ -388,7 +391,7 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 账号卡片上的「积分」一行显示该账号的**可用积分**，与 IDE 顶部显示的
 `Credits Balance` 是同一个数值。鼠标悬停可看到各资源包的明细与到期时间。
 
-**支持范围**覆盖三个 provider、两套端点，语义一致：
+**支持范围**覆盖四个 provider、三套端点，语义一致：
 
 - **CodeBuddy 系（`buddy` / `workbuddy` 通用，仅 baseURL 随 `product.endpoint`
   切换）**：
@@ -406,10 +409,35 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
   不要用 `/api/user/quota`（只有 `freeCreditsTotal=300`，不含活动积分，实测某账号
   `profile-summary` 有 5297.72 而 `quota` 只有 300）。
 
+- **Trae CN**：
+
+  ```
+  POST /trae/api/v2/pay/web_user_ent_usage    body {"require_usage":true}
+  ```
+
+  响应里的礼包按 `available_endpoint` **分池**（0=通用积分、1=Work 积分）。
+  `fetchTraeCnCreditBalance` 返回的 `total` 是**通用池**合计（chat 实际扣的就是
+  它），Work 池走**单独的 `workTotal` 字段**，两者**绝不合并成一个数**。
+  **不要**用 `ug/activity/info` 的活动口径：实测它写「200 work 积分」而实际到账
+  150 通用积分，是口径陷阱。详见 [Trae CN provider](#trae-cn-provider字节跳动-trae-国内版)
+  的「签到与积分余额」。
+
 「余额为 0」与「查不到」严格区分：失败时 `balance` 为 `null` 并带 `error`，
 卡片显示原因而非 0。
 
-**CodeArts 不支持**：它是华为云账号体系，没有这两条腾讯计费接口。因此 CodeArts
+> **Trae CN 的前端是两步走的，当前只完成了后端。** 三个积分端点的 provider 分发
+> 已实现（`src/trae-cn-credits.ts` + `src/jet-hub-rpc.ts`），但有两件事**尚未**做，
+> 且**都属于第四步**：
+> 1. `plugin-src/client/credits-capabilities.js` 还没登记 `trae-cn`，而该表**默认
+>    关闭** —— 故当前 Trae CN 面板不显示「积分」行、也不显示「刷新积分」/
+>    「一键领取积分」按钮，后端能力对用户**暂时完全不可见**（这是刻意的默认：
+>    宁可暂时看不到积分，也不要每次打开面板就发必然失败的请求）；
+> 2. `CreditBalanceRow` 目前只渲染 `total` 与 `packages`，**还没有**渲染
+>    `workTotal` —— 所以「通用 / Work 分开展示」这条口径虽然后端已经算好并返回，
+>    在界面上要等第四步改前端才真正落地（届时 Work 池的那一行同样需要
+>    `pnpm build:all` 重建客户端 bundle 才生效）。
+
+**CodeArts 不支持**：它是华为云账号体系，没有上述任何一条计费接口。因此 CodeArts
 面板**不显示「积分」行，也不显示「刷新积分」按钮**，且不会发起
 `credits.balances` 请求。这一点由 `plugin-src/client/credits-capabilities.js`
 的能力矩阵在**请求前**判定，而非等后端返回错误再吞掉。
@@ -422,9 +450,12 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 
 ### 一键领取积分（每日签到）
 
-**CodeBuddy 与 LobsterAI 两个面板提供**该按钮（两者的签到协议完全不同，
-实现各自独立）。CodeArts 是华为云账号体系不参与；WorkBuddy
-国际版后端没有签到接口，故其面板也不显示。
+**当前由 CodeBuddy 与 LobsterAI 两个面板提供**该按钮。签到在本插件里共有**三套
+互不相通的实现**（CodeBuddy / LobsterAI / Trae CN，协议、端点、幂等判据全不同，
+各自独立成文件）；Trae CN 那套**后端已就绪**，但客户端能力矩阵尚未登记它，
+故其面板**暂时**还不显示该按钮。CodeArts 是华为云账号体系不参与；
+WorkBuddy 国际版后端没有签到接口，故其面板也不显示。
+详见「积分余额」一节末尾的说明。
 
 在 Account Hub 对应面板标题栏点击「**一键领取积分**」，插件会对该面板下
 **全部账号**顺序执行每日签到领取：
@@ -452,6 +483,23 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 > 拉取失败时回退内置兜底版本并在日志告警 —— 比参考实现的
 > 「取不到就完全放弃签到」更宽容。
 
+**Trae CN（两步 + 设备四件套，见 `src/trae-cn-credits.ts`）**：
+
+1. 先查签到状态（`POST /trae/api/v2/ug/checkin_credits/status`，body
+   `{"req_source":1}`）；
+2. `checked_in` 为真则跳过领取（幂等短路），服务端显式 `enable:false`
+   则报 `inactive`；
+3. 否则调领取端点（`POST …/checkin_credits/claim`，同样 body
+   `{"req_source":1}`）。
+
+> **Trae 的签到必须带设备头**（与腾讯系、LobsterAI 都不同）：`x-device-id`
+> 取自凭据里的 **Aha 设备号**（16 位十进制），另带 `x-device-type: windows` /
+> `x-os-version` / `x-app-version`。claim 严格校验，缺了直接回 `code:9004`。
+> 幂等判据是 **`checked_in`（账号级当日）**，**不是** `did_checked_in`
+> ——后者是设备级语义，换台设备仍为 false，拿它判幂等会对已领账号重复发请求。
+> 无 auth 时服务端返回的是 **HTTP 200 + `code:1001` + `enable:false`**
+> （不是 401），故判定一律**以 body `code` 为准**。
+
 完成后按钮下方给出结果摘要（如「3 个账号领取成功（+300 积分），1 个今日已领取」）。
 领取按账号隔离：单个账号凭据缺失、损坏或请求失败不会中断整批，只计入失败数；
 摘要**只显示各类计数**（如「1 个失败」），不展示每个账号的失败原因——原因保留在
@@ -469,6 +517,8 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 - CodeBuddy 的请求**不需要** `X-Device-Token`（图灵盾）——已实测验证。
 - LobsterAI 的签到**不需要签名**，只用 `Authorization: Bearer`；也**不发**腾讯系的
   `X-Domain` / `X-Product` / `X-Product-Code` 头。
+- Trae CN 的签到用 `Authorization: Cloud-IDE-JWT`（另带两个等值 token 头）+
+  `Origin` / `Referer` = `https://www.trae.cn`；**不发**任何腾讯系或 LobsterAI 归属头。
 
 想单独验证领取闭环（会真实改动账号当日签到状态）可运行
 `pnpm test:e2e:workbuddy-claim` 或 `pnpm test:e2e:lobsterai-claim`，
@@ -663,3 +713,77 @@ event:error         data:{"code":4008,"message":…}  ← 失败（HTTP 仍为 2
 `listModels()` 实时读 `pool.disabledModelsFor('trae-cn')` 应用黑名单；
 图片输入报 `UNSUPPORTED_CONTENT`（未实测支持，不静默丢弃）；
 **不声明** reasoning 等级（是否支持 `reasoning_effort` 未实测，仅透传调用方显式传的值）。
+
+### 签到与积分余额
+
+实现是独立一套 `src/trae-cn-credits.ts`（协议与 CodeBuddy 系三步都不同），
+三个 RPC 端点在同一处按 provider 分发（`src/jet-hub-rpc.ts`）。
+
+**端点与请求体**（host `https://api.trae.cn`，鉴权 `Cloud-IDE-JWT`）：
+
+| 用途 | 端点 | body |
+|---|---|---|
+| 签到状态 | `POST /trae/api/v2/ug/checkin_credits/status` | `{"req_source":1}` |
+| 签到领取 | `POST /trae/api/v2/ug/checkin_credits/claim` | `{"req_source":1}` |
+| 积分余额 | `POST /trae/api/v2/pay/web_user_ent_usage` | `{"require_usage":true}` |
+
+**请求头**（除三个鉴权头外）：
+
+```
+Origin:  https://www.trae.cn
+Referer: https://www.trae.cn
+x-device-id:   <凭据里的 Aha 设备号，16 位十进制>
+x-device-type: windows
+x-os-version:  Windows 10.0.22631
+x-app-version: 3.3.100
+```
+
+- 设备四件套是 **claim 的硬要求**，缺失时服务端回 `code:9004`。
+  `x-device-id` **取自凭据**（`device_id` 字段），不是登录 URL 里那个随机 hex32；
+- `Origin` / `Referer` 取编译期常量 `product.portalBase`，**不从凭据推断**
+  （与 `X-Domain` 那条约定同因）；
+- `req_source:1` 照抄**唯一次实测成功**的组合。调研未定论 `{}` 与
+  `{"req_source":1}` 哪个才是 9004 的真因，带重复字段的成本是零。
+
+**幂等判据是 `checked_in`（账号级当日）**，`did_checked_in` 是**设备级**语义
+（换设备仍为 false），**不要用**。领取流程自身先查状态、已领则短路，
+故 RPC 分发处传 `precheckStatus: false`（对齐 LobsterAI 的多步流程）。
+
+**余额按 `available_endpoint` 分池**：
+
+| 池 | `available_endpoint` | 返回字段 | 展示 |
+|---|---|---|---|
+| 通用积分 | `0` | `total` | **主数字**（chat 实际扣的是这个池） |
+| Work 积分 | `1` | `workTotal` | 单独一项（如「通用 154.22 / Work 2000」） |
+
+**两池绝不合并成一个数**：合并会让用户以为 Work 的额度可以用来对话，
+从而对「明明显示还有 2000 却说余额不足」感到莫名其妙。返回类型是
+`CreditBalance` 的**超集** `TraeCnCreditBalance`（多出 `pools` 与 `workTotal`），
+故 `collectCreditBalances` 能直接复用；非通用池的包名在 `packages` 里带
+`[Work 积分]` 前缀，避免明细里那个 2000 看起来像通用额度。
+
+> ⚠️ **UI 尚未消费 `workTotal`**（第四步的工作）：`CreditBalanceRow` 只会渲染
+> `total`，所以「通用 / Work 分开展示」目前**只是后端口径**，界面上还看不到 ——
+> 见「积分余额」一节末尾的说明。改动前端后必须 `pnpm build:all` 重建客户端
+> bundle 才生效。
+
+**判定一律以 body `code` 为准，不看 HTTP 状态**（对齐 CodeBuddy 既有约定）：
+无 auth 时服务端返回的是 **HTTP 200 + `code:1001` + `enable:false`**，按状态码判
+会把它当成成功。`code:1001` 在两个端点上的文案统一为「凭据已失效，请重新登录」。
+
+> ⚠️ **待校准项（T7 / T8）**：调研报告给出的是「典型值」而非全量 schema，故
+> 积分包与领取积分两处采**候选表 + 脱敏日志**策略，而不是发明字段名：
+> - **T7**：礼包数组的位置（`TRAE_CN_BALANCE_ARRAY_KEYS`，另按
+>   `available_endpoint` 指纹做广度优先扫描兜底）与余额字段
+>   （`TRAE_CN_BALANCE_REMAIN_FIELDS`；找不到 remain 类字段时按
+>   「总额 − 已用」回退，再退到「把 `total_amount` 当余额」并**如实把 total 置 0**，
+>   免得 UI 把它显示成 1:1 的比值）；
+> - **T8**：领取响应里的积分字段（`TRAE_CN_CLAIM_CREDIT_FIELDS`），未命中时按 0
+>   计并输出一行**只含字段名、不含值**的日志；
+> - `x-os-version` 的构建号：调研记录里被脱敏成 `10.0.xxxxx`，这里填了一个形态
+>   合法的真实构建号（留 `xxxxx` 字面量一定过不了校验）。claim 若拿到 9004，
+>   按本机客户端实际发送的值替换。
+>
+> 这三处的调试出口是 `TraeCnCreditsOptions.onDebug`，在 RPC 分发处接到
+> `ctx.logger.info`（**看宿主日志，面板上看不到**），输出一律只有键名与结构判定。
+> 真机各跑一次即可把候选表收敛成唯一形态。

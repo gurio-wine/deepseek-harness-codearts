@@ -36,6 +36,14 @@ import {
   claimLobsteraiDailyCheckin,
   fetchLobsteraiCreditBalance,
 } from './lobsterai-credits.js'
+import { TRAE_CN } from './trae-cn-product.js'
+import type { TraeCnCredential } from './trae-cn-oauth.js'
+import type { TraeCnProduct } from './trae-cn-product.js'
+import {
+  claimTraeCnDailyCheckin,
+  fetchTraeCnCheckinStatus,
+  fetchTraeCnCreditBalance,
+} from './trae-cn-credits.js'
 import {
   resetAccount,
   resetAllAccounts,
@@ -761,6 +769,20 @@ function registerJetHubEndpoints(
             } satisfies RpcCreditsStatusResponse,
           }
         }
+        if (req.provider === TRAE_CN.id) {
+          // Trae CN **有**独立的状态端点（`checkin_credits/status`），但它只给出
+          // 「今天领了没」与 `enable` 两项，其余字段（连续天数 / 每日积分 /
+          // 活动名…）协议里没有已确认的对应字段，故由 fetchTraeCnCheckinStatus
+          // 如实补零。与 LobsterAI 的「压根没有状态端点」不是同一种情况。
+          const accounts = await pool.listAccounts(req.provider)
+          const results = await collectCreditsStatus<TraeCnCredential, TraeCnProduct>(accounts, TRAE_CN, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            fetchStatus: (credential, product) =>
+              fetchTraeCnCheckinStatus(credential, product, { onDebug: (msg) => ctx.logger?.info?.(msg) }),
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return { ok: true, value: { accounts: results } satisfies RpcCreditsStatusResponse }
+        }
         const product = productById(req.provider)
         if (product === undefined) {
           return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
@@ -791,6 +813,19 @@ function registerJetHubEndpoints(
           })
           return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
         }
+        if (req.provider === TRAE_CN.id) {
+          // Trae CN 的领取流程**自身**就是两步（status → 未领则 claim），
+          // 内部已按 `checked_in` 幂等预检 —— 外部再查一次纯属重复请求，
+          // 故与其他多步流程（LobsterAI）一样传 precheckStatus: false。
+          const value = await collectClaimResults<TraeCnCredential, TraeCnProduct>(accounts, TRAE_CN, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            claim: (credential, product) =>
+              claimTraeCnDailyCheckin(credential, product, { onDebug: (msg) => ctx.logger?.info?.(msg) }),
+            precheckStatus: false,
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
+        }
         const product = productById(req.provider)
         if (product === undefined) {
           return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
@@ -814,6 +849,17 @@ function registerJetHubEndpoints(
           const values = await collectCreditBalances(accounts, LOBSTERAI, {
             resolve: (ref) => ctx.credentials.resolve(ref),
             fetchBalance: (credential, product) => fetchLobsteraiCreditBalance(credential, product),
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
+        }
+        if (req.provider === TRAE_CN.id) {
+          const values = await collectCreditBalances<TraeCnCredential, TraeCnProduct>(accounts, TRAE_CN, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            // 双池拆分（通用 / Work）由 fetchTraeCnCreditBalance 完成：它的
+            // 返回值是 `CreditBalance` 的超集，故能直接喂给共用的收集器与卡片。
+            fetchBalance: (credential, product) =>
+              fetchTraeCnCreditBalance(credential, product, { onDebug: (msg) => ctx.logger?.info?.(msg) }),
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
           return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
