@@ -19,6 +19,8 @@
 
 `lobsterai` 与上述两者**完全不同源**：登录方式、请求头、续期载荷、签到流程、版本号来源都不一样，因此实现是独立一套 `src/lobsterai*.ts`。它只**共用架构模式**（产品配置驱动、账号池、限流切换、模型黑名单），**不共用 `BuddyProduct` 类型** —— 那里面 `apiDomain` / `productCode` / `attributionName` / `userAgentByModelFamily` / `appendSessionParams` 等字段对 LobsterAI 全部无意义。详见 README 的「LobsterAI provider」章节与 `docs/lobsterai-integration-plan.md`。
 
+`trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。它比 `lobsterai` 还要再少一步：**回调 query 直接携带 refreshToken**，没有 authCode 交换；续期走 `POST …/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**当前只实现了产品配置 + 认证（登录/续期/状态）**：模型路由与签到是后续任务，故 `trae-cn` 暂不出现在 `ctx.llm` 路由列表中。回调 URL 的确切形态**尚未真机实测**（记为待校准点 T5）—— 实现采「候选参数表 + 每条回调输出脱敏日志」策略，详见 README 的「Trae CN provider」章节。
+
 Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**CodeBuddy 与 LobsterAI 两个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。
 
 - **包名**：`dsh-account-hub`
@@ -62,7 +64,7 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 
 ## 工作方式
 
-本插件定义的所有 `ctx.xxxAuth` 服务（`codeartsAuth`、`buddyAuth`、`workbuddyAuth`、`lobsteraiAuth`）均遵循统一接口：
+本插件定义的所有 `ctx.xxxAuth` 服务（`codeartsAuth`、`buddyAuth`、`workbuddyAuth`、`lobsteraiAuth`、`traeCnAuth`）均遵循统一接口：
 
 - `login(options?)` — 执行浏览器登录流程
 - `status()` — 查询凭据状态（configured、source、expiresAt、refreshable）
@@ -71,7 +73,7 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 
 另有按凭据 ref 续期**指定账号**的 `refreshAccountCredential(refName)` —— 供 Account Hub 账号卡片的「刷新」按钮使用。**不要**用 `refresh()` 去刷账号池里的账号：它读写的是该 provider 的**默认单凭据 ref**（如 `BUDDY_ACCESS_TOKEN`），而账号卡片对应的是 `BUDDY_ACCOUNT_XXX`，会刷到另一个凭据上。
 
-服务名由产品 id 派生（`${product.id}Auth`）：两个 `BuddyAuth` 实例分别注册为 `buddyAuth` 与 `workbuddyAuth`，`LobsteraiAuth` 注册为 `lobsteraiAuth`，互不覆盖。
+服务名默认由产品 id 派生（`${product.id}Auth`）：两个 `BuddyAuth` 实例分别注册为 `buddyAuth` 与 `workbuddyAuth`，`LobsteraiAuth` 注册为 `lobsteraiAuth`，互不覆盖。**`trae-cn` 是刻意的例外**：其 id 带连字符，服务名由产品配置显式给出 `traeCnAuth`（见「LLM Provider 约定」）。
 
 各 provider 的登录/续期机制不同（详见 README.md），但均通过 `ctx.credentials` 统一管理凭据生命周期。
 
@@ -136,12 +138,18 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 
 ## LLM Provider 约定
 
-- provider 名称：`codearts` / `buddy` / `workbuddy` / `lobsterai`
+- **provider 名称**：`codearts` / `buddy` / `workbuddy` / `lobsterai` / `trae-cn`
+- **provider id 与 cordis 服务名是两件事**，不要机械派生。默认规则是
+  `${product.id}Auth`，但 **`trae-cn` 是刻意的例外**：它的 id 带连字符
+  （对齐用户与生态叫法），机械派生会得到非标识符风格的 `trae-cnAuth`。
+  该 provider 的服务名由产品配置的 `serviceName` **显式给出** `traeCnAuth`。
+  新增 provider 时：id 可以带连字符，服务名必须是合法的 JS 标识符风格。
 - 端点格式为 OpenAI 兼容
 - 请求签名/鉴权方式因 provider 而异：
   - `codearts`：华为云 `SDK-HMAC-SHA256` 签名方案
   - `buddy` / `workbuddy`：Bearer access_token + 额外自定义头（`X-Product-Code` 随产品切换）
   - `lobsterai`：Bearer access_token + `X-LobsterAI-Client-*` 头（**无签名**，也**不带**腾讯系归属头）
+  - `trae-cn`：`Cloud-IDE-JWT <access>` + 同值的 `X-Ide-Token` / `X-Cloudide-Token`（无签名、无归属头）
 - provider 在 `ctx.llm` 上注册，配置在 profile 中可选
 - `buddy` 与 `workbuddy` 共用 `BuddyAdapter`，行为差异全部由 `src/product.ts` 的 `BuddyProduct` 配置驱动；新增同源产品只需加一份配置并注册实例
 - `lobsterai` 用独立的 `LobsteraiAdapter`（协议不同源，见项目概述）；它的产品配置是 `src/lobsterai-product.ts` 的 `LobsteraiProduct`，与 `BuddyProduct` **平行而非继承**

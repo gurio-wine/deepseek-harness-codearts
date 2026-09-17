@@ -8,6 +8,7 @@ import { registerLobsteraiLlm } from './lobsterai-adapter.js'
 import { CODEARTS_CREDENTIAL_REF, CodeArtsAuth } from './service.js'
 import { BUDDY_CREDENTIAL_REF, BuddyAuth } from './buddy-auth.js'
 import { LobsteraiAuth } from './lobsterai-auth.js'
+import { TraeCnAuth } from './trae-cn-auth.js'
 import { AccountPool } from './account-pool.js'
 import { registerJetHubRpc } from './jet-hub-rpc.js'
 import { CODEBUDDY, WORKBUDDY } from './product.js'
@@ -358,6 +359,22 @@ export function apply(ctx: Context): void {
     product: LOBSTERAI,
   })
 
+  // ===== Trae CN (字节跳动 Trae 国内版) 服务 =====
+  // 第五条协议线，与其余四者均不同源：loopback 回调直接携带 refreshToken
+  // （无 authCode 交换）+ `ExchangeToken` 续期 + `Cloud-IDE-JWT` 鉴权
+  // （见 src/trae-cn-oauth.ts）。
+  //
+  // **本轮只注册认证服务**，不注册 LLM 适配器与 settings namespace：
+  // 模型路由（stream / listModels / classify）是后续任务，此处提前注册一个
+  // 没有适配器的 provider 只会让模型设置页出现一个点了就报错的空路由。
+  // 届时补上时，注意同时注册 `llm-trae-cn` namespace（否则模型设置页会在
+  // refFor → deriveKeyRef(provider) 处崩溃，见 registerProviderSettings 的说明）。
+  //
+  // 服务名**不是** `${product.id}Auth`：产品 id 为 `trae-cn`，机械派生会得到
+  // 带连字符的 `trae-cnAuth`。服务名由产品配置的 serviceName 显式给出
+  // `traeCnAuth`，与另外四个 provider 的命名风格保持一致。
+  const traeCn = new TraeCnAuth(ctx)
+
   // ===== 多账号静默续期调度 =====
   // 替代原有的单账号 scheduleRefresh()，使用 refreshAll() 遍历所有账号续期
   const REFRESH_INTERVAL_MS = 30 * 60 * 1000  // 每 30 分钟检查一次
@@ -375,6 +392,9 @@ export function apply(ctx: Context): void {
     try {
       await lobsterai.refreshAll(pool)
     } catch { /* 静默 */ }
+    try {
+      await traeCn.refreshAll(pool)
+    } catch { /* 静默 */ }
   }
 
   // 启动时如果有任何可续期账号，安排定期续期
@@ -389,6 +409,7 @@ export function apply(ctx: Context): void {
         buddy.stop()
         workbuddy.stop()
         lobsterai.stop()
+        traeCn.stop()
       }, 'jet-hub: multi-account refresh scheduler')
     }
   })
@@ -399,6 +420,7 @@ export function apply(ctx: Context): void {
     buddy.stop()
     workbuddy.stop()
     lobsterai.stop()
+    traeCn.stop()
   }, 'codearts-auth.scheduler (legacy)')
 
   // ===== Account Hub RPC 注册 =====

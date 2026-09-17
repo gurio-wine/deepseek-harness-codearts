@@ -521,3 +521,77 @@ Bearer `access_token` 鉴权。
 > 是否支持 `reasoning_effort`、各模型真实上下文窗口（内置表统一填 131072，
 > 是桥接层的估计值）、图片输入、`prompt_cache_key`。这些在实现里都取了
 > **保守默认**（不声明 / 不发送），不会因未知而失败。
+
+## Trae CN provider（字节跳动 Trae 国内版）
+
+独立路由 `trae-cn`，上游 API 基址 `https://api.trae.cn`，登录门户
+`https://www.trae.cn`。
+
+该 provider 与既有四条线**均不同源**，因此实现是独立一套 `src/trae-cn*.ts`，
+只共用架构模式（产品配置驱动、账号池、限流切换、模型黑名单）。
+
+| 项 | 腾讯系 | LobsterAI | **Trae CN** |
+|---|---|---|---|
+| 登录 | 轮询后端 API | 本地回调收 `authCode` → exchange | **本地回调直接收 refreshToken** |
+| 换 token | 轮询结果自带 | `authCode` 换 access+refresh | **无 authCode 交换**（登录页自己完成 `GetRefreshToken`） |
+| 续期 | `X-Refresh-Token` 头 | `POST /api/auth/refresh` | **`POST …/oauth/ExchangeToken`（body 四字段）** |
+| 鉴权 | `Bearer` + 归属头 | `Bearer` | **`Cloud-IDE-JWT`**（另带两个等值 token 头） |
+
+### 登录机制（两段式）
+
+第一段起本地 loopback 服务器（随机端口），构造登录 URL：
+
+```
+https://www.trae.cn/authorization?clientID=…&auth_callback_url=http://127.0.0.1:{port}/authorize
+                                &machine_id={hex32}&device_id={hex32}
+```
+
+`machine_id` / `device_id` 每次登录随机生成 hex32。**注意它们与签到用的设备号
+无关** —— 签到的 `x-device-id` 取自凭据里的 Aha 设备号（16 位十进制），
+服务端不校验这两者的一致性。
+
+第二段：用户在浏览器完成登录后，登录页回调本地服务器（**回调 query 直接携带
+refreshToken**，而非 authCode），随后立即调 `ExchangeToken` 换取 access token。
+`prepareLogin()` 立即返回 `loginUrl`，由客户端在同一用户手势内开窗；
+`login()` 保留为阻塞式便捷封装。
+
+### 凭据（五件套，按账号整体配对）
+
+| 字段 | 说明 |
+|---|---|
+| `refresh_token` | 刷新令牌（`ExchangeToken` 的 `RefreshToken`） |
+| `user_id` | 用户 ID（`ExchangeToken` 的 `UserID`，**必填**，续期缺它只能重新登录） |
+| `client_id` | OAuth 客户端 ID（`ono9krqynydwx5`） |
+| `device_id` | Aha 设备号（16 位十进制；签到用） |
+| `machine_id` | 机器号（hex32；登录 URL 用） |
+
+- 单账号 ref：`TRAE_CN_ACCESS_TOKEN`；多账号：`TRAE_CN_ACCOUNT_<SUFFIX>`；
+- access token 用法：`Authorization: Cloud-IDE-JWT <access>`，另带
+  `X-Ide-Token` 与 `X-Cloudide-Token`（三个头同值）；
+- 续期：`POST /cloudide/api/v3/trae/oauth/ExchangeToken`，
+  body `{ClientID, ClientSecret, RefreshToken, UserID}` —— `ClientSecret`
+  实测为占位串 `"-"`，服务端不校验。
+- 终态判定：HTTP 401/403 或响应缺 access token 才判 `refresh_token` 失效；
+  网络抖动 / 5xx / 429 走可重试路径。
+
+### 服务名与 provider 名的解耦
+
+provider id 是 `trae-cn`（带连字符，对齐用户与生态叫法），但 cordis 服务名
+**不是**机械派生的 `trae-cnAuth`，而是显式指定的 `ctx.traeCnAuth`
+（见 `src/trae-cn-product.ts` 的 `serviceName`）。理由是带连字符的属性名
+无法用点号语法访问，且与另外四个 provider 的命名风格不一致。
+
+> **待校准项（T5）**：回调 URL 的**确切形态**尚未真机实测。当前实现把
+> 「回调 query 携带 refreshToken」作为主路径，参数名按候选表
+> （`TRAE_CN_REFRESH_TOKEN_PARAMS` 等）依次尝试，并对**每条**回调输出
+> 一份**保留全部参数名、值已脱敏**的日志（脱敏采用白名单，
+> 白名单之外一律压成 `前6位…(len=N)`）。真机登录一次即可按日志把候选表
+> 收敛成唯一形态。设备号同理：拿不到 Aha 号时回退 `machine_id` 的十进制形态，
+> 并在凭据的 `device_id_source` 里标为 `machine-id-fallback`（**显式降级，
+> 不静默伪造**）。
+
+> **本轮范围**：仅产品配置 + 认证（登录 / 续期 / 状态）。
+> **模型路由（`stream` / `listModels` / `classify`）与签到见后续提交** ——
+> 故 `trae-cn` 目前不出现在 `ctx.llm` 的路由列表里。
+> 补模型路由时须同时注册 `llm-trae-cn` settings namespace，否则模型设置页会在
+> `refFor → deriveKeyRef(provider)` 处崩溃。

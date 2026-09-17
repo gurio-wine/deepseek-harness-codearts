@@ -8,6 +8,7 @@ import { runBuddyLoginFlow } from '../../src/buddy-oauth.js'
 import { CodeArtsAuth } from '../../src/service.js'
 import { BuddyAuth } from '../../src/buddy-auth.js'
 import { LobsteraiAuth } from '../../src/lobsterai-auth.js'
+import { TraeCnAuth } from '../../src/trae-cn-auth.js'
 import { WORKBUDDY } from '../../src/product.js'
 import { LOBSTERAI } from '../../src/lobsterai-product.js'
 
@@ -405,6 +406,71 @@ describe('LobsterAI provider 注册', () => {
     const ctx = createMockContext()
     apply(ctx as never)
     const stop = vi.spyOn(ctx.lobsteraiAuth, 'stop')
+    await ctx.fiber.dispose()
+    expect(stop).toHaveBeenCalled()
+  })
+})
+
+describe('Trae CN provider 注册（本轮只有认证服务）', () => {
+  it('暴露 traeCnAuth；服务名不是机械派生的 trae-cnAuth', () => {
+    const ctx = createMockContext()
+    apply(ctx as never)
+    expect(ctx.traeCnAuth).toBeInstanceOf(TraeCnAuth)
+    // provider id 带连字符（对齐用户叫法），但服务名必须是合法的标识符风格 ——
+    // 这两个形态的**解耦**正是本用例锁住的东西。
+    expect(ctx.traeCnAuth.name).toBe('traeCnAuth')
+    expect((ctx as unknown as Record<string, unknown>)['trae-cnAuth']).toBeUndefined()
+    expect(ctx.traeCnAuth.product.id).toBe('trae-cn')
+    expect(ctx.traeCnAuth.credentialRefName).toBe('TRAE_CN_ACCESS_TOKEN')
+  })
+
+  it('与既有四个 provider 的服务实例两两不同（同名二次注册会抛错）', () => {
+    const ctx = createMockContext()
+    apply(ctx as never)
+    expect(ctx.traeCnAuth).not.toBe(ctx.buddyAuth)
+    expect(ctx.traeCnAuth).not.toBe(ctx.workbuddyAuth)
+    expect(ctx.traeCnAuth).not.toBe(ctx.lobsteraiAuth)
+    expect(ctx.traeCnAuth).not.toBe(ctx.codeartsAuth)
+  })
+
+  it('traeCnAuth 只读自己的凭据 ref（不串用其他 provider 凭据）', async () => {
+    const ctx = createMockContext()
+    apply(ctx as never)
+    // 只写入 LobsterAI 的 ref：Trae CN 必须报告未配置。
+    await ctx.credentials.set('LOBSTERAI_ACCESS_TOKEN', JSON.stringify({
+      access_token: 'AT', refresh_token: 'RT', expires_at: String(Date.now() + 7_200_000),
+    }))
+    expect((await ctx.traeCnAuth.status()).configured).toBe(false)
+
+    await ctx.credentials.set('TRAE_CN_ACCESS_TOKEN', JSON.stringify({
+      access_token: 'AT2', refresh_token: 'RT2', expires_at: String(Date.now() + 7_200_000),
+    }))
+    expect((await ctx.traeCnAuth.status()).configured).toBe(true)
+  })
+
+  it('**不注册** LLM 路由与 LLM settings namespace（模型路由是后续任务）', () => {
+    const ctx = createMockContext()
+    apply(ctx as never)
+    // 提前注册一个没有适配器的 provider 只会让模型设置页出现一个点了就报错的空路由。
+    expect(ctx.llm.registeredProviders).not.toContain('trae-cn')
+    expect(ctx.settings.registeredNamespaces).not.toContain('llm-trae-cn')
+    // 但认证服务本身必须在。
+    expect(ctx.traeCnAuth).toBeInstanceOf(TraeCnAuth)
+  })
+
+  it('不注册任何 trae-cn 斜杠命令（入口在 Account Hub 设置页）', () => {
+    const ctx = createMockContext()
+    apply(ctx as never)
+    const names = ctx.commands.definitions.map((d) => d.name)
+    for (const removed of ['trae-cn-login', 'trae-cn-status', 'trae-cn-refresh']) {
+      expect(names, removed).not.toContain(removed)
+    }
+  })
+
+  it('dispose 时停止 Trae CN 的续期调度', async () => {
+    const ctx = createMockContext()
+    apply(ctx as never)
+    const stop = vi.spyOn(ctx.traeCnAuth, 'stop')
     await ctx.fiber.dispose()
     expect(stop).toHaveBeenCalled()
   })
