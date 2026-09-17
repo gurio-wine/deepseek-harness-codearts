@@ -239,6 +239,47 @@ async function waitFor<T>(get: () => T | undefined, timeoutMs = 5000): Promise<T
   }
 }
 
+/** 已占用的高位端口（{@link reserveHighPort} 登记，供 {@link closeReservedPort} 释放）。 */
+const reservedPorts = new Map<number, ReturnType<typeof createServer>>()
+
+/**
+ * 真实占住一个 **≥ {@link MIN_CALLBACK_PORT}** 的随机端口，返回该端口号。
+ *
+ * 刻意**直接绑定随机高位端口**（与生产代码 `randomCallbackPort()` 同一做法），
+ * 而不是循环 `listen(0)` 去采样：Windows 的动态端口范围默认是 1024–14999
+ * （`netsh int ipv4 show dynamicport tcp`），且 `listen(0)` 是**顺序分配**的 ——
+ * 连开 12 个会得到 3527,3528,…,3538。靠采样拿 ≥10000 的端口，在 Windows 上
+ * 几乎必然失败。
+ *
+ * 随机高位端口也可能落在**系统保留段**（`netsh int ipv4 show
+ * excludedportrange protocol=tcp`，实测约 1/40 概率 EACCES），故失败即换端口
+ * 重试；这与 `listenOnCallbackPort` 自身的重试策略同源。
+ */
+async function reserveHighPort(attempts = 20): Promise<number> {
+  for (let i = 0; i < attempts; i++) {
+    const port = Math.floor(Math.random() * (65_536 - MIN_CALLBACK_PORT)) + MIN_CALLBACK_PORT
+    const server = createServer()
+    const bound = await new Promise<boolean>((resolve) => {
+      server.once('error', () => resolve(false))
+      server.listen(port, '127.0.0.1', () => resolve(true))
+    })
+    if (bound) {
+      reservedPorts.set(port, server)
+      return port
+    }
+    server.close()
+  }
+  throw new Error(`无法占住任何 ≥${MIN_CALLBACK_PORT} 的端口（保留段过多）`)
+}
+
+/** 释放 {@link reserveHighPort} 占住的端口（幂等）。 */
+async function closeReservedPort(port: number): Promise<void> {
+  const server = reservedPorts.get(port)
+  if (server === undefined) return
+  reservedPorts.delete(port)
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+}
+
 describe('buildOAuthLoginUrl', () => {
   it('matches the reverse-engineered portal authorize parameters', () => {
     const pkce = { codeVerifier: 'VERIFIER', codeChallenge: 'CHALLENGE' }
@@ -542,33 +583,35 @@ describe('prepareCodeartsLogin / awaitCredential（两段式）', () => {
     // 这里用 `listenOnCallbackPort` 的测试注入口确定性地复现「首次挑端口失败」：
     // 先真实占住一个 ≥10000 的端口，让首次尝试必然 EADDRINUSE（与保留段的
     // EACCES 走同一条 error 路径），重试端口则给一个空白端口。
-    let blockedPort = 0
-    const blocker = createServer()
-    for (let i = 0; i < 30 && blockedPort < MIN_CALLBACK_PORT; i++) {
-      const candidate = await new Promise<number>((resolve) => {
-        blocker.listen(0, '127.0.0.1', () => {
-          const address = blocker.address()
-          const port = typeof address === 'object' && address ? address.port : 0
-          blocker.close(() => resolve(port))
-        })
-      })
-      if (candidate >= MIN_CALLBACK_PORT) blockedPort = candidate
-    }
-    expect(blockedPort).toBeGreaterThanOrEqual(MIN_CALLBACK_PORT)
-    await new Promise<void>((resolve) => { blocker.listen(blockedPort, '127.0.0.1', () => resolve()) })
+    //
+    // ⚠️ 占位端口**必须直接绑定随机的 ≥10000 端口**（与生产代码
+    // `randomCallbackPort()` 同一做法），不能靠循环 `listen(0)` 去采样：
+    // Windows 的动态端口范围默认是 1024–14999（`netsh int ipv4 show dynamicport
+    // tcp`），且 `listen(0)` 是**顺序分配**的（实测连开 12 个得到
+    // 3527,3528,…,3538）。采样 30 次几乎必然全部 <10000，`blockedPort` 恒为 0，
+    // 断言 `>= MIN_CALLBACK_PORT` 在改动前就必然失败 —— 那是用例取样方式的问题，
+    // 不是被测代码（生产侧「端口 <10000 就换随机端口重试」的分支一直是好的）。
+    const blockedPort = await reserveHighPort()
+    // 重试端口必须是**真实的空白高位端口**，不能写 `() => 0`：`0` 的语义是
+    // 「请系统分配」，而系统分配同样落在动态范围（1024–14999）里、通常 <10000，
+    // 于是 `listenOnCallbackPort` 会不断 close 重试直到用尽 CALLBACK_PORT_ATTEMPTS
+    // 并以「未能获得 ≥10000 的端口」reject —— 用例会以另一种方式失败。
+    const freePort = await reserveHighPort()
+    await closeReservedPort(freePort)
 
     const callbackServer = createServer((_req, res) => res.end('ok'))
     try {
-      // 首次端口 = 被占用端口（必然失败），重试端口 = 0（由系统分配，必然可用）。
+      // 首次端口 = 被占用端口（必然 EADDRINUSE），重试端口 = 空白高位端口（必然可用）。
       const port = await listenOnCallbackPort(callbackServer, {
         initialPort: blockedPort,
-        pickPort: () => 0,
+        pickPort: () => freePort,
       })
       expect(port).toBeGreaterThanOrEqual(MIN_CALLBACK_PORT)
+      expect(port).toBe(freePort)
       expect(port).not.toBe(blockedPort)
     } finally {
       await new Promise<void>((resolve) => callbackServer.close(() => resolve()))
-      await new Promise<void>((resolve) => blocker.close(() => resolve()))
+      await closeReservedPort(blockedPort)
     }
   })
 

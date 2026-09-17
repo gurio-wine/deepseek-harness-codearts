@@ -280,20 +280,34 @@ export class LobsteraiAuth extends Service {
     this.lastRefreshError = undefined
     this.scheduleRefresh()
     const credential = parseCredential(flow.access)
-    // 多账号：accountId 提供时自动注册到 pool
+    // 多账号：accountId 提供时按 id 落位到账号池的一条记录（占位则补全，否则新建）。
+    // 与 CodeArtsAuth.persistLoginResult 对称：AccountPool.addAccount 不按 id 去重，
+    // 两段式的占位条目若在这里再 addAccount 一次，池里会出现同 id 的两条记录。
     if (options.accountId !== undefined && options.pool !== undefined) {
-      await options.pool.addAccount({
-        id: options.accountId,
-        provider: this.product.id,
-        nickname: credential?.nickname !== undefined && credential.nickname.length > 0
-          ? credential.nickname
-          : options.accountId,
-        enabled: true,
-        credentialRef: options.refName ?? this.credentialRefName,
-        createdAt: Date.now(),
-        expiresAt: credential ? lobsteraiCredentialExpiresAtMs(credential) : undefined,
-        refreshable: credential !== undefined && isLobsteraiRefreshable(credential),
-      })
+      const expiresAt = credential ? lobsteraiCredentialExpiresAtMs(credential) : undefined
+      const refreshable = credential !== undefined && isLobsteraiRefreshable(credential)
+      const nickname = credential?.nickname !== undefined && credential.nickname.length > 0
+        ? credential.nickname
+        : options.accountId
+      const existing = (await options.pool.listAllAccounts()).find((a) => a.id === options.accountId)
+      if (existing) {
+        await options.pool.updateAccount(options.accountId, {
+          nickname,
+          expiresAt,
+          refreshable,
+        })
+      } else {
+        await options.pool.addAccount({
+          id: options.accountId,
+          provider: this.product.id,
+          nickname,
+          enabled: true,
+          credentialRef: options.refName ?? this.credentialRefName,
+          createdAt: Date.now(),
+          expiresAt,
+          refreshable,
+        })
+      }
     }
     return {
       access: flow.access,

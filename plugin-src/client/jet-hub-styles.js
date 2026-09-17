@@ -108,6 +108,13 @@ const STYLES = `
 .dim-jh-probeDetails { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 2px; }
 .dim-jh-probeDetails li { font-size: 12px; line-height: 18px; }
 
+/* 弹窗被拦截时的手动登录链接。
+   这里**不是**装饰性链接，而是唯一的登录入口，因此必须一眼可见、可点、
+   并且在窄面板里也能换行（登录 URL 很长）。 */
+.dim-jh-manualLogin { margin-bottom: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, #e37400 35%, var(--dsw-alias-border-l2, #eef0f3)); background: rgb(227 116 0 / 8%); font-size: 12px; line-height: 18px; color: #b45309; }
+.dim-jh-manualLogin a { color: #1677ff; font-weight: 600; word-break: break-all; text-decoration: underline; }
+.dim-jh-manualLogin p { margin: 0 0 6px; }
+
 /* 登录弹窗 */
 .dim-jh-loginOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .dim-jh-loginDialog { background: var(--dsw-alias-bg-layer-1, #fff); border-radius: 12px; padding: 24px; min-width: 320px; box-shadow: 0 8px 32px rgba(0,0,0,0.15); }

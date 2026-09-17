@@ -39,6 +39,29 @@ const PROVIDERS = Object.freeze([
  * 现在两项能力（balance / dailyCheckin）都在同一张表里显式登记，并在请求前判定。
  */
 
+/**
+ * 登录弹窗的固定窗口名。
+ *
+ * 固定名字（而非 `_blank`）有两个作用：
+ * 1. **重复点击不开新窗** —— 同名窗口会被浏览器复用，用户连点「+ 新建账号」
+ *    也不会攒出一堆登录标签页；
+ * 2. 它与 `createAccount` 里 `window.open('')` 的空窗用的是同一个名字，因此
+ *    「先开空窗占住用户手势、后填 URL」不会再多开一个窗口。
+ *
+ * **绝不能加 `noopener`**：`window.open(url, name, 'noopener')` 的返回值恒为
+ * `null`，我们就再也拿不到窗口句柄，既无法 `location.replace` 填 URL，
+ * 也无法在轮询结束后 `close()` 收尾。
+ */
+const LOGIN_WINDOW_NAME = 'dsh-account-hub-login';
+
+/**
+ * 登录窗口特性：固定尺寸、允许缩放与滚动条。
+ *
+ * 这些特性只在**该名字的窗口首次创建**时生效；后续同名 `window.open` 会复用
+ * 已存在的窗口并忽略特性串 —— 正是我们要的「总是同一个登录窗」。
+ */
+const LOGIN_WINDOW_FEATURES = 'width=800,height=600,resizable=yes,scrollbars=yes';
+
 function ProviderLogo({ provider }) {
   const p = PROVIDERS.find(p => p.id === provider);
   if (!p) return null;
@@ -427,6 +450,13 @@ function ProviderPanel({ provider, rpcCall }) {
   // 账号发网络请求，不能拖慢账号列表本身的渲染。
   const [credits, setCredits] = React.useState({});
   const [creditsLoading, setCreditsLoading] = React.useState(false);
+  /**
+   * 弹窗被拦截时的**手动登录链接**（`{ url }` | null）。
+   *
+   * 空窗开不出来时不顶掉 DSH 页面，而是在面板内渲染一个由用户亲自点击的
+   * `<a href>` —— 用户手势由浏览器直接识别，不经过任何 await。
+   */
+  const [manualLogin, setManualLogin] = React.useState(null);
   const mounted = React.useRef(true);
   /**
    * 最新账号列表的 ref 镜像。
@@ -572,40 +602,83 @@ function ProviderPanel({ provider, rpcCall }) {
 
   const createAccount = async () => {
     setCreating(true);
-    let accountId = '';
-    let loginUrl = '';
+    // 弹窗被拦截时展示的手动登录链接（{ url } | null）。渲染在面板内，
+    // **绝不**用 location.href 顶掉 DSH 页面。
+    setManualLogin(null);
+    /**
+     * 手势内先开的空窗。
+     *
+     * 必须在**任何 await 之前**打开：`window.open` 只有在用户手势的同步调用栈里
+     * 才不会被拦截。宿主侧虽然已把 `account.create` 改成秒回，但客户端不该依赖
+     * 「RPC 恰好够快」—— 只要有一次慢了，await 之后就再也开不出窗口。
+     * 因此这里先开一个 `about:blank` 空窗占住手势，RPC 返回后再填 URL。
+     */
+    const loginWindow = window.open('', LOGIN_WINDOW_NAME, LOGIN_WINDOW_FEATURES);
+    console.log('[jet-hub] account.create request, provider =', provider, '/ popup =', loginWindow);
+
+    /** 关闭手势内开的空窗（幂等；已被拦截时为 no-op）。 */
+    const closeLoginWindow = () => {
+      try {
+        if (loginWindow && !loginWindow.closed) loginWindow.close();
+      } catch { /* 跨源或已被用户关闭：忽略 */ }
+    };
+
     try {
-      console.log('[jet-hub] account.create request, provider =', provider);
       const res = await rpcCall('account.create', { provider });
       console.log('[jet-hub] account.create response =', res);
-      accountId = res.accountId;
-      loginUrl = res.loginUrl;
-      if (loginUrl) {
-        // 尝试弹窗；如果被拦截则跳转到当前标签页
-        const loginWindow = window.open(loginUrl, '_blank', 'width=800,height=600');
-        console.log('[jet-hub] window.open result =', loginWindow);
-        if (!loginWindow || loginWindow.closed) {
-          window.location.href = loginUrl;
-        }
-        // 轮询等待登录完成
-        const pollTimer = setInterval(async () => {
-          try {
-            const pollRes = await rpcCall('login.poll', { accountId, provider });
-            if (pollRes.done) {
-              clearInterval(pollTimer);
-              if (loginWindow && !loginWindow.closed) loginWindow.close();
-              await loadAccounts();
-            }
-          } catch { /* 继续轮询 */ }
-        }, 1000);
-        setTimeout(() => { clearInterval(pollTimer); }, 300000);
-      } else {
+      const accountId = res?.accountId;
+      const loginUrl = res?.loginUrl;
+      if (!accountId) {
+        // 响应残缺（既没 accountId 也就无从轮询）：同样按错误处理并收窗。
+        closeLoginWindow();
+        setError('后端返回的账号信息不完整（缺少 accountId）。');
+        setPhase('error');
+        return;
+      }
+      if (!loginUrl) {
+        // 后端没给地址：空窗留着就是一张白页，必须关掉。
+        closeLoginWindow();
         setError('后端未返回登录地址（loginUrl 为空）。');
         setPhase('error');
+        return;
       }
+      if (loginWindow && !loginWindow.closed) {
+        // 手势内开的那个窗口还在：直接把它导航到登录页。
+        // 用 location.replace 而不是 href —— 空窗的 about:blank 不留在历史里，
+        // 用户点「后退」不会退到一张白页。
+        loginWindow.location.replace(loginUrl);
+        console.log('[jet-hub] login window navigated to', loginUrl);
+      } else {
+        // 空窗被激进拦截器挡下了。这里**不再**退化成 location.href：
+        // 那会把 DSH 页面整个顶掉（用户丢失当前工作界面，且登录完成后
+        // 无法回到设置页）—— 这正是本次要删除的兜底行为。
+        // 改为在面板内渲染一个真实链接，由用户自己点击打开。
+        setManualLogin({ url: loginUrl });
+      }
+      // 轮询等待登录完成
+      const pollTimer = setInterval(async () => {
+        try {
+          const pollRes = await rpcCall('login.poll', { accountId, provider });
+          if (pollRes.done) {
+            clearInterval(pollTimer);
+            closeLoginWindow();
+            await loadAccounts();
+          }
+        } catch { /* 继续轮询 */ }
+      }, 1000);
+      setTimeout(() => { clearInterval(pollTimer); }, 300000);
     } catch (caught) {
       console.error('[jet-hub] create account failed:', caught);
-      setError('新建账号失败：' + (caught?.message || '未知错误'));
+      // 所有错误路径都要收掉空窗，否则就是一张永远白屏的孤儿窗。
+      closeLoginWindow();
+      if (caught?.code === 'login-in-progress') {
+        // 宿主侧的 provider 级互斥（lobsterai / codearts）：已有未结算的登录会话。
+        // 这不是「失败」，而是一句给用户的状态说明，故直接展示后端 message
+        // （它已是可直接展示的中文文案），不加「新建账号失败：」前缀，也不再开窗。
+        setError(caught.message || '已有登录进行中');
+      } else {
+        setError('新建账号失败：' + (caught?.message || '未知错误'));
+      }
       setPhase('error');
     } finally {
       setCreating(false);
@@ -737,6 +810,19 @@ function ProviderPanel({ provider, rpcCall }) {
           'data-tone': claimNotice.tone,
           role: claimNotice.tone === 'error' ? 'alert' : 'status',
         }, React.createElement('div', null, claimNotice.text))
+      : null,
+    // 弹窗被拦截时的兜底入口。刻意**不做成按钮 + window.open(url)**：
+    // 那需要在 onClick 里再开窗，而此刻用户手势是新鲜的、本可以成功 —— 但
+    // 用手势内空窗的方案已经试过一次并失败了（拦截器策略），再失败一次用户
+    // 就彻底没有入口。原生 <a href> 由浏览器自己处理导航，不受脚本开窗策略影响。
+    manualLogin
+      ? React.createElement('div', { className: 'dim-jh-manualLogin', role: 'status' },
+          React.createElement('p', null, '登录窗口被浏览器拦截了。请点击下面的链接在浏览器中完成登录：'),
+          React.createElement('a', {
+            href: manualLogin.url,
+            target: '_blank',
+            rel: 'noreferrer noopener',
+          }, '打开登录页面'))
       : null,
     phase === 'loading'
       ? React.createElement('div', { className: 'dim-jh-empty' }, '正在读取账号列表…')
