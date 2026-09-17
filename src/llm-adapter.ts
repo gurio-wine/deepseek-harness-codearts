@@ -966,8 +966,14 @@ export class CodeArtsAdapter extends LlmAdapter {
         // （外层 for(;;) 会在拿到新凭据后重新签名发请求）。用 tried 集合
         // 保证每个账号只尝试一次，试完才判定"全部受限"——避免只试一个
         // 就下结论，导致 UI 限流状态与实际判定不一致。
-        if (this.options.accountPool && isRateLimited(errorText)) {
+        //
+        // 积分/额度耗尽（业务码 11114，中文文案「积分不足」等）是**另一种失败**：
+        // 它不匹配 RATE_LIMIT_PATTERN，若不并进这个分支，错误会直接抛给用户，
+        // 用户只能手动停用那个没额度的账号。两种失败都该换号，故这里取并集；
+        // 差别只在冷却时长（积分耗尽用 24h，见 parseQuotaExhausted 的说明）。
+        if (this.options.accountPool && (isRateLimited(errorText) || isQuotaExhausted(errorText))) {
           const parsed = parseRateLimitError(errorText, options.model)
+            ?? parseQuotaExhausted(errorText, options.model)
           if (parsed) {
             if (currentAccountId) {
               await this.options.accountPool.updateModelRateLimit(
@@ -982,8 +988,9 @@ export class CodeArtsAdapter extends LlmAdapter {
               authRefreshed = false // Reset auth refresh flag for new credential
               continue // Retry request with new credential
             }
+            // 试完全部候选：限流与积分耗尽都归为不可重试的 QUOTA_EXCEEDED。
             throw new LlmError(
-              `codearts: 模型 ${options.model} 所有账号均受限，请稍后再试`,
+              `codearts: 模型 ${options.model} 所有账号均不可用（限流或积分耗尽），请稍后再试`,
               'QUOTA_EXCEEDED',
             )
           }
@@ -1491,6 +1498,93 @@ export function isRateLimited(body: string): boolean {
  * 兜底，丢掉服务端给出的真实重置时刻（UI 限流徽章因此显示错误时间）。
  */
 const RESET_TIME_PATTERN = /(?:将在|reset at)\s+([\d-]+\s+[\d:]+)\s+(UTC[+-]\d+(?::\d+)?)/i
+
+/**
+ * CodeBuddy 系表示「**账号积分/额度耗尽**」的业务码。
+ *
+ * 与 {@link RATE_LIMIT_BUSINESS_CODE}（6004，模型级频率限制）是**两种不同的失败**：
+ * 6004 是该模型当前用超了频次、过一段时间会自行恢复；11114 是**该账号的积分/
+ * 额度用完了**，不充值就永远不会恢复，且影响该账号下的**所有模型**。
+ *
+ * 报文形态（对齐 workbuddy2api / codebuddy2api 的实现）：
+ * `{"code":11114,"msg":"积分不足，请前往购买"}`，HTTP 状态可能是 400 或 402。
+ */
+const QUOTA_BUSINESS_CODE = 11114
+
+/**
+ * 积分耗尽被记录成「限流重置时间」时使用的冷却时长（24 小时）。
+ *
+ * 积分耗尽是**账号级**、需充值才能恢复的终态，用一个远长于限流的冷却把它从
+ * 候选里挡掉。取 24h（而非 lobsterai hard-credit 的 12h）更保守：宁可让用户
+ * 手动重置，也不要让一个空账号被反复选中、每次请求都白跑一轮。
+ */
+const QUOTA_EXHAUSTED_COOLDOWN_MS = 24 * 3_600_000
+
+/**
+ * 积分/额度耗尽的**自然语言兜底**判据（中英文都要列全）。
+ *
+ * 为什么不能只依赖 DSH 上游的 `isQuotaExceededError`：它只覆盖英文措辞
+ * （insufficient quota/balance/credits、out of credits 等），而腾讯后端实测
+ * 返回**中文**文案「积分不足，请前往购买」/「资源已用尽」，只认英文会把这类
+ * 错误漏判成普通 400（INVALID_REQUEST），换号分支被整体跳过。
+ *
+ * ⚠️ **绝不能命中「上下文超限」**。两者都是 HTTP 400，但语义完全不同：
+ * 超限是「本次请求的 prompt 太长」（归 CONTEXT_WINDOW_EXCEEDED，需压缩上下文），
+ * 换账号毫无用处——同样的上下文会再次超限。因此这里**只匹配「余额/额度/积分」
+ * 类措辞**，绝不收录 `exceeded` / `too long` / `context` / `length` 这类
+ * 超限也会出现的通用词，也不收录 `limit`（超限报文里就有 context limit）。
+ */
+const QUOTA_EXHAUSTED_PATTERN =
+  /积分不足|积分已用尽|积分用完|积分耗尽|没有积分|积分余额不足|额度不足|额度已用尽|额度用完|额度耗尽|免费额度已用尽|资源已用尽|余额不足|余额已用尽|insufficient credits?|credits? (?:are |is )?insufficient|insufficient (?:credit|quota|balance|funds)|out of credits?|no credits? left|credits? (?:exhausted|depleted|used up)|(?:credit|quota|balance) (?:exhausted|depleted|used up)|quota exhausted|quota exceeded/i
+
+/**
+ * 结构化判定：响应体是可解析 JSON 且**顶层** `code` 为该业务码。
+ *
+ * 与 {@link hasRateLimitBusinessCode} 同一写法与理由：不采用「全文包含 11114」
+ * （`requestId` 是 UUID，任意数字子串都可能偶然出现），兼容 `"11114"`（字符串）
+ * 与 `11114`（数字）两种编码。
+ */
+function hasQuotaBusinessCode(body: string): boolean {
+  try {
+    const data = JSON.parse(body) as Record<string, unknown>
+    const code = data.code
+    return code === QUOTA_BUSINESS_CODE || code === String(QUOTA_BUSINESS_CODE)
+  } catch {
+    // 非 JSON：交给文案兜底
+    return false
+  }
+}
+
+/**
+ * 判断错误文本是否为「账号积分/额度耗尽」。
+ *
+ * 判据顺序与 {@link isRateLimited} 一致：结构化业务码优先（与语言无关、不受
+ * 服务端改文案影响），文案兜底（覆盖 SSE 流内错误与网关裸文本等拿不到 code 的场景）。
+ */
+export function isQuotaExhausted(body: string): boolean {
+  return hasQuotaBusinessCode(body) || QUOTA_EXHAUSTED_PATTERN.test(body)
+}
+
+/**
+ * 积分耗尽时的账号标记参数（与 {@link parseRateLimitError} **同构**返回，
+ * 让调用方的换号循环无需为两种失败各写一套）。
+ *
+ * 与限流的语义差异：积分耗尽是**账号级**耗尽（该账号所有模型都不可用），而现有
+ * `updateModelRateLimit` + `getAvailableAccount` 是**模型级**标记。这里刻意用
+ * 「模型级标记」近似它——给当前请求的模型记一个 24h 冷却，既不新增 AccountPool
+ * 字段（避免 settings schema 迁移），又能让换号循环的模型级过滤自动跳过该账号。
+ *
+ * ⚠️ 这个近似的可见后果：UI 的限流/冷却徽章会显示在**当前模型**上，而不是整个
+ * 账号上；账号下其它模型不会被挡（下次换个模型仍会试到这个空账号）。用户可在
+ * Jet Hub 账号卡片上手动「重置」清掉这个标记。
+ */
+export function parseQuotaExhausted(
+  body: string,
+  currentModel: string,
+): { modelId: string; resetTimeMs: number } | null {
+  if (!isQuotaExhausted(body)) return null
+  return { modelId: currentModel, resetTimeMs: Date.now() + QUOTA_EXHAUSTED_COOLDOWN_MS }
+}
 
 /** 从限流错误中提取重置时间 */
 export function parseRateLimitError(

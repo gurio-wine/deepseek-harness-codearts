@@ -18,7 +18,7 @@ import {
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import { AccountPool } from './account-pool.js'
-import { isRateLimited, parseRateLimitError } from './llm-adapter.js'
+import { isQuotaExhausted, isRateLimited, parseQuotaExhausted, parseRateLimitError } from './llm-adapter.js'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
@@ -823,12 +823,21 @@ export class BuddyAdapter extends LlmAdapter {
       // 其余可用账号。每个失败账号都会被记录，只有真正试完全部候选才报
       // "所有账号均受限"——避免只试一个就下结论（那会让 UI 显示的限流
       // 状态与实际判定不一致）。
-      if (this.options.accountPool && isRateLimited(errorText)) {
+      //
+      // 积分/额度耗尽（业务码 11114，中文文案「积分不足」等）是**账号级**的
+      // 另一种失败：它不匹配 RATE_LIMIT_PATTERN，若不并进这个分支，换号会被
+      // 整体跳过、错误直接抛给用户（HTTP 400 还会把它退化成 INVALID_REQUEST），
+      // 用户只能手动停用那个没额度的账号。两种失败都该换号，故这里取并集。
+      if (this.options.accountPool && (isRateLimited(errorText) || isQuotaExhausted(errorText))) {
         const tried = new Set<string>()
         if (currentAccountId) tried.add(currentAccountId)
 
         for (;;) {
+          // 限流走服务端声明的重置时刻（抠不到则 1h 兜底）；积分耗尽没有可解析
+          // 的重置时刻，用 24h 长冷却挡住该账号——它是需充值才能恢复的终态，
+          // 短冷却只会让它被反复选中、每次请求白跑一轮。
           const parsed = parseRateLimitError(errorText, options.model)
+            ?? parseQuotaExhausted(errorText, options.model)
           if (!parsed) break
           // 记录当前账号在该模型上的限流重置时间（UI 据此展示限流标记）
           if (currentAccountId) {
@@ -855,12 +864,14 @@ export class BuddyAdapter extends LlmAdapter {
             return
           }
           errorText = await response.text().catch(() => '')
-          if (!isRateLimited(errorText)) {
-            // 新账号失败但不是限流：按原错误分类抛出，不要再吞成"均受限"
+          if (!isRateLimited(errorText) && !isQuotaExhausted(errorText)) {
+            // 新账号失败但既非限流也非积分耗尽：按原错误分类抛出，不要再吞成"均受限"
             throw new LlmError(`buddy: ${errorDetail(errorText)}`, httpErrorCode(response.status, errorText), { status: response.status })
           }
         }
-        throw new LlmError(`buddy: 模型 ${options.model} 所有账号均受限，请稍后再试`, 'QUOTA_EXCEEDED')
+        // 试完全部候选：两种失败都归为不可重试的 QUOTA_EXCEEDED
+        // （积分耗尽更是终态 —— 不充值就永远失败，重试没有意义）。
+        throw new LlmError(`buddy: 模型 ${options.model} 所有账号均不可用（限流或积分耗尽），请稍后再试`, 'QUOTA_EXCEEDED')
       }
       throw new LlmError(`buddy: ${errorDetail(errorText)}`, httpErrorCode(response.status, errorText), { status: response.status })
     }
