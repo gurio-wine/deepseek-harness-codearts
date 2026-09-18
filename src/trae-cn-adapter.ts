@@ -20,7 +20,7 @@
  * | 端点 | **IDE 网关** `TRAE_CN_IDE_API_BASE` + `TRAE_CN_CHAT_PATH`（T6 已校准：路径本就对，错的是 host） |
  * | 网关头 | 必须带齐 `x-app-id` / 纯数字 `x-ide-version-code` 等全套（缺了 500/401），见 `chatHeaders` |
  * | 图片 | **按模型给**：真机目录 12/16 项多模态 → `['text','image']`，其余 `['text']` |
- * | 思考等级 | 仅透传 `reasoning_effort`，不主动补档 |
+ * | 思考等级 | **声明档位**（13/16 项，真机 vscdb `reasoning_effort_config`），下发字段名 `reasoning_effort_level` |
  *
  * 可原样复用的只有 `src/sse.ts` 的工具函数（它们处理的是 harness 侧的协议层
  * 陷阱，与厂商无关）。
@@ -28,7 +28,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
-import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk,
 } from '@deepseek-ai/dsh-llm'
@@ -74,6 +74,30 @@ const TRAE_CN_MAX_ROTATE = 3
 /** 限流/额度/风控类冷却时长（毫秒，1 小时）。 */
 const TRAE_CN_COOLDOWN_MS = 3_600_000
 
+/**
+ * 思考档位 id → 展示名。
+ *
+ * ## 为什么是这三个词，而不是 Trae 的原始文案
+ *
+ * id 取自真机（`light` / `high` / `extra_high`），展示名取**中文**（对齐本插件
+ * 其余面向用户的文案语言）。Trae 客户端自己的中文文案是「轻 / 高 / 极高」
+ * （`ai.model.reasoning_effort.*`，见官方 `index.mjs` 的 i18n 表），本表在其
+ * 前面补上英文原词，让用户在 DSH 里既认得出档位、又对得上 Trae 界面。
+ *
+ * 未登记的 id 直接回退成 id 本身（与 `buddy-adapter` 的 `EFFORT_NAMES` 同款），
+ * 这样真机将来加档位时不会显示成空白。
+ */
+const TRAE_CN_EFFORT_NAMES: Readonly<Record<string, string>> = {
+  light: '轻 Light',
+  high: '高 High',
+  extra_high: '极高 Extra high',
+}
+
+/** 档位 id 的展示名；未登记的 id 回退为 id 本身。 */
+function effortDisplayName(id: string): string {
+  return TRAE_CN_EFFORT_NAMES[id] ?? id
+}
+
 /** 兜底模型目录中的一个条目。 */
 export interface TraeCnFallbackModel {
   /** 模型 ID（传给 chat 请求体的 `model`）。 */
@@ -108,6 +132,26 @@ export interface TraeCnFallbackModel {
    * 保留字段是为了让目录与真机逐列对齐（否则后来者会以为目录里本来就没有它）。
    */
   maxTokens: number
+  /**
+   * 可选思考档位（真机 vscdb `reasoning_effort_config.options`，逐字符照抄）。
+   *
+   * 空/缺省 = **不暴露选择器**：DSH 的模型选择器只读 `resolveModel().reasoning`，
+   * 不声明该字段时显示「当前模型未提供推理等级」，这是诚实的（同
+   * `src/buddy-adapter.ts` 的 `reasoningEfforts` 约定）。
+   *
+   * id 逐字符照抄真机值（`light` / `high` / `extra_high`），**不做规整化** ——
+   * 它会原样进请求体（见 `buildBody`），改写会让上游认不出档位。
+   */
+  reasoningEfforts?: readonly string[]
+  /**
+   * 默认档位（真机 `reasoning_effort_config.default_level`），**必须**在
+   * {@link reasoningEfforts} 内。
+   *
+   * DSH 的 `resolveCallInfo` 会在调用方省略 `reasoningEffort` 时把它 materialize
+   * 进请求，故它同时是「用户没选档位时实际下发的值」。声明了却不在
+   * efforts 里会被 DSH 判为 `INVALID_MODEL_REASONING` 直接抛错。
+   */
+  defaultReasoningEffort?: string
 }
 
 /**
@@ -143,20 +187,20 @@ export interface TraeCnFallbackModel {
  */
 export const TRAE_CN_FALLBACK_MODELS: readonly TraeCnFallbackModel[] = [
   { id: 'Doubao-Seed-Evolving', name: 'Seed-Evolving', supportsImages: true, contextWindow: 262_144, maxTokens: 64_000 },
-  { id: 'Doubao-Seed-2.1-Pro', name: 'Seed-2.1-Pro-0915', supportsImages: true, contextWindow: 262_144, maxTokens: 64_000 },
-  { id: 'Doubao-Seed-2.1-Turbo', name: 'Seed-2.1-Turbo', supportsImages: true, contextWindow: 262_144, maxTokens: 32_000 },
-  { id: 'Doubao-Seed-Code', name: 'Seed-Code', supportsImages: true, contextWindow: 262_144, maxTokens: 32_000 },
-  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000 },
-  { id: 'glm-5.3', name: 'GLM-5.3', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000 },
-  { id: 'glm-5.2', name: 'GLM-5.2', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000 },
-  { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000 },
-  { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000 },
-  { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000 },
-  { id: 'kimi-k3', name: 'Kimi-K3', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
-  { id: 'kimi-k2.8-preview', name: 'Kimi-K2.8-Preview', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
+  { id: 'Doubao-Seed-2.1-Pro', name: 'Seed-2.1-Pro-0915', supportsImages: true, contextWindow: 262_144, maxTokens: 64_000, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
+  { id: 'Doubao-Seed-2.1-Turbo', name: 'Seed-2.1-Turbo', supportsImages: true, contextWindow: 262_144, maxTokens: 32_000, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
+  { id: 'Doubao-Seed-Code', name: 'Seed-Code', supportsImages: true, contextWindow: 262_144, maxTokens: 32_000, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
+  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
+  { id: 'glm-5.3', name: 'GLM-5.3', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
+  { id: 'glm-5.2', name: 'GLM-5.2', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['high', 'extra_high'], defaultReasoningEffort: 'high' },
+  { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
+  { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
+  { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
+  { id: 'kimi-k3', name: 'Kimi-K3', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'extra_high' },
+  { id: 'kimi-k2.8-preview', name: 'Kimi-K2.8-Preview', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'extra_high' },
   { id: 'minimax-m3', name: 'MiniMax-M3', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000 },
-  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
-  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
+  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
+  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
   { id: 'qwen-3.7-plus', name: 'Qwen3.7-Plus', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
 ]
 
@@ -473,9 +517,22 @@ export class TraeCnAdapter extends LlmAdapter {
     }
     // 上下文窗口：静态表的值来自真机目录的 dev 档（见 TraeCnFallbackModel）。
     if (entry !== undefined) resolved.context = { contextWindow: entry.contextWindow }
-    // 思考等级：**刻意不声明**。Trae 是否支持 `reasoning_effort` 未实测；不声明时
-    // 模型选择器会显示「当前模型未提供推理等级」，这是诚实的；声明了却无效会让
-    // 用户以为档位生效了。
+    // 思考档位：DSH 的「思考程度」选择器**唯一**的数据源就是本字段
+    // （`resolveModel().reasoning`）——不声明时模型选择器里整行不渲染，
+    // 用户只能看到「当前模型未提供推理等级」。档位数据来自真机 vscdb 的
+    // `reasoning_effort_config`（13/16 项有档位，见 TRAE_CN_FALLBACK_MODELS）。
+    // 无档位的模型（minimax-m3 / qwen-3.7-plus / Doubao-Seed-Evolving）与不在
+    // 表内的模型**保持不声明**：那是诚实的，而不是给一个上游不认的档位。
+    const efforts = entry?.reasoningEfforts ?? []
+    if (efforts.length > 0) {
+      resolved.reasoning = {
+        // id **逐字符照抄**真机值：它会原样进请求体，规整化会让上游认不出档位。
+        efforts: efforts.map((id) => ({ id: ReasoningEffortId(id), name: effortDisplayName(id) })),
+        ...entry?.defaultReasoningEffort !== undefined && efforts.includes(entry.defaultReasoningEffort)
+          ? { defaultEffort: ReasoningEffortId(entry.defaultReasoningEffort) }
+          : {},
+      }
+    }
     return resolved
   }
 
@@ -766,9 +823,25 @@ export class TraeCnAdapter extends LlmAdapter {
     if (options.temperature !== undefined) body.temperature = options.temperature
     if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens
     if (options.stop !== undefined && options.stop.length > 0) body.stop = options.stop
-    // 思考等级：仅在调用方显式传入时透传，不主动补档（未在 Trae 上实测支持，
-    // 补档可能造成非法参数 400）。
-    if (options.reasoningEffort !== undefined) body.reasoning_effort = options.reasoningEffort
+    // 思考档位：仅在调用方显式传入时透传（**不主动补档** —— DSH 已按
+    // `reasoning.defaultEffort` 在调用方省略时补好，适配器再补一次会与 DSH
+    // 的口径分叉）。
+    //
+    // 字段名 `reasoning_effort_level`（**2026-09-18 真机定案**，不是 `reasoning_effort`）：
+    // 官方客户端对本端点用的就是它，依据有三，方向一致：
+    //   1. `ai-modules-chat/dist/index.mjs` 的 `resolveReasoningEffortRequestField`
+    //      默认返回 `{field:'reasoning_effort_level', value:f}`，只有字节内网账号
+    //      （`scope===BYTEDANCE`）才走 `reasoning_effort`；插件所用的是普通国内
+    //      账号，故取前者。
+    //   2. 同一 bundle 的 `sT` 直接以 `reasoning_effort_level` 为键产出该字段，
+    //      且只在模型真机档位表校验通过时才带（与本文件的 `reasoningEfforts` 同源）。
+    //   3. `ai_agent.dll` 的 serde 字段块里 `reasoning_effort` 与
+    //      `reasoning_effort_level` 并列存在（两个字段服务端都收），印证是**两套
+    //      账号体系各用一个**，而非我们猜错名字。
+    // ⚠️ 真机 A/B **无法**用「是否报错」区分二者：该账号在带与不带档位时都回
+    // `code:4008`（配额），即字段校验阶段被 4008 掩盖。故此处以静态证据定案，
+    // 并把「上游是否真的按档位思考」留给将来的对比实验（见 README）。
+    if (options.reasoningEffort !== undefined) body.reasoning_effort_level = options.reasoningEffort
     return JSON.stringify(body)
   }
 

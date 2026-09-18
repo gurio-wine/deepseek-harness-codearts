@@ -661,9 +661,73 @@ describe('TraeCnAdapter resolveModel', () => {
     expect((await adapter.resolveModel('trae-cn', 'DeepSeek-V4-Pro-Official')).inputModalities).toEqual(['text'])
   })
 
-  it('**不声明** reasoning（是否支持思考等级未实测）', async () => {
+  it('**声明** reasoning：glm-5.2 是真机的 high/extra_high 两档，默认 high', async () => {
     const { adapter } = makeAdapter(() => sseResponse(''))
-    expect((await adapter.resolveModel('trae-cn', 'glm-5.2')).reasoning).toBeUndefined()
+    // 这条断言曾经锁死的是**缺陷**：resolveModel 刻意不声明 reasoning，
+    // 于是 DSH 的「思考程度」选择器整行不渲染（那是唯一数据源）。
+    const reasoning = (await adapter.resolveModel('trae-cn', 'glm-5.2')).reasoning
+    expect(reasoning?.efforts.map((e) => e.id)).toEqual(['high', 'extra_high'])
+    expect(reasoning?.defaultEffort).toBe('high')
+  })
+
+  it('档位 id **逐字符**照抄真机值（含 extra_high 这种非标准档）', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''))
+    // DSH 的 ReasoningEffortId 是 branded string、**不校验取值**；
+    // 改写 id 会让请求体里的档位与上游对不上。
+    const ids = (await adapter.resolveModel('trae-cn', 'glm-5.3')).reasoning?.efforts.map((e) => e.id)
+    expect(ids).toEqual(['light', 'high', 'extra_high'])
+  })
+
+  it('kimi 两项的默认档是 extra_high（真机 default_level，与其余模型不同）', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''))
+    for (const model of ['kimi-k3', 'kimi-k2.8-preview']) {
+      const reasoning = (await adapter.resolveModel('trae-cn', model)).reasoning
+      expect(reasoning?.defaultEffort, model).toBe('extra_high')
+      expect(reasoning?.efforts.map((e) => e.id), model).toContain('extra_high')
+    }
+  })
+
+  it('无档位的三个模型与表外模型**仍不声明** reasoning', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''))
+    // 真机 support_thinking:false —— 声明了会让用户以为档位生效。
+    for (const model of ['minimax-m3', 'qwen-3.7-plus', 'Doubao-Seed-Evolving']) {
+      expect((await adapter.resolveModel('trae-cn', model)).reasoning, model).toBeUndefined()
+    }
+    expect((await adapter.resolveModel('trae-cn', 'brand-new')).reasoning).toBeUndefined()
+  })
+
+  it('档位形状满足 DSH 校验（四种畸形各防一条，避免 resolveModel 被改成非法形态）', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''))
+    for (const model of TRAE_CN_FALLBACK_MODELS) {
+      const reasoning = (await adapter.resolveModel('trae-cn', model.id)).reasoning
+      if (reasoning === undefined) continue
+      // 1. efforts 不能为空数组（DSH: INVALID_MODEL_REASONING）
+      expect(reasoning.efforts.length, model.id).toBeGreaterThan(0)
+      for (const effort of reasoning.efforts) {
+        // 2. id / 3. name 都不能为空串
+        expect(effort.id.length, model.id).toBeGreaterThan(0)
+        expect(effort.name.length, model.id).toBeGreaterThan(0)
+      }
+      // 4. id 不能重复
+      const ids = reasoning.efforts.map((e) => e.id)
+      expect(new Set(ids).size, model.id).toBe(ids.length)
+      // 5. defaultEffort 必须在 efforts 内（否则 DSH 直接抛错）
+      if (reasoning.defaultEffort !== undefined) {
+        expect(ids, model.id).toContain(reasoning.defaultEffort)
+      }
+    }
+  })
+
+  it('档位与 listModels 一致：表里声明了档位的模型正是选择器里有档位的那些', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''))
+    for (const model of TRAE_CN_FALLBACK_MODELS) {
+      const declared = (await adapter.resolveModel('trae-cn', model.id)).reasoning !== undefined
+      const expected = (model.reasoningEfforts?.length ?? 0) > 0
+      expect(declared, model.id).toBe(expected)
+    }
+    // 真机 13/16 项有档位 —— 数一下，避免整表被改成全有/全无还绿。
+    const withEffort = TRAE_CN_FALLBACK_MODELS.filter((m) => (m.reasoningEfforts?.length ?? 0) > 0)
+    expect(withEffort).toHaveLength(13)
   })
 
   it('未知模型回退为 id 作展示名且不报错（模态保守判纯文本）', async () => {
@@ -772,6 +836,18 @@ describe('TraeCnAdapter 请求构造', () => {
     expect(body.temperature).toBe(0.3)
     expect(body.max_tokens).toBe(512)
     expect(body.stop).toEqual(['END'])
+    expect(body).not.toHaveProperty('reasoning_effort_level')
+    // 字段名是 `reasoning_effort_level`：另一个名字**不得**出现（见下一条）。
+    expect(body).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('档位下发用**真机定案的字段名** `reasoning_effort_level`，不是 `reasoning_effort`', async () => {
+    const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
+    await collect(adapter, generateOptions({ reasoningEffort: 'extra_high' as never }))
+    const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>
+    // 官方客户端对普通国内账号用的就是这个键（字节内网账号才用 reasoning_effort，
+    // 见 buildBody 的注释）。写错会让档位静默失效。
+    expect(body.reasoning_effort_level).toBe('extra_high')
     expect(body).not.toHaveProperty('reasoning_effort')
   })
 

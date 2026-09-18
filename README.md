@@ -872,6 +872,37 @@ id 形态极不规则（`qwen3.8-flash` 无连字符、`qwen-3.7-plus` 有、
   上限时自动填进请求体，而本仓库另外四个 provider 一个都没设该字段 ——
   由适配器替用户决定输出上限是行为变更，不在本次范围内。
 
+**思考档位（reasoning effort）已接线**：13/16 项声明档位，另 3 项
+（`minimax-m3` / `qwen-3.7-plus` / `Doubao-Seed-Evolving`）刻意不声明。
+
+- 档位数据来自真机 **vscdb 缓存**（`User/globalStorage/state.vscdb` 的
+  `reasoning_effort_config{support_thinking, options, default_level}`，
+  2026-09-18 只读提取）。两套模型池各有一份：**`chat_v3`（IDE 对话，即本插件
+  走的路径）** 与 `solo_agent`（SOLO）——本插件取 **`chat_v3`** 那套。两者档位
+  集合相同，但默认档不同（如 `glm-5.3` 在 chat_v3 是 `high`、solo_agent 是
+  `extra_high`），**不可混用**；
+- 档位 id **逐字符照抄**（`light` / `high` / `extra_high`，**不是** buddy 系的
+  `low`/`max`/`xhigh`）。DSH 的 `ReasoningEffortId` 是 branded string、
+  **不校验取值**，改写会让请求里的档位与上游对不上。展示名对齐 Trae 客户端中文
+  文案（轻 / 高 / 极高）并附英文原词；
+- 默认档照抄真机 `default_level`：多数为 `high`，**`kimi-k3` 与
+  `kimi-k2.8-preview` 是 `extra_high`**；
+- 不声明 `reasoning` 的模型在 DSH 模型选择器里显示「当前模型未提供推理等级」
+  ——那是**唯一**数据源（`resolveModel().reasoning`），不声明时该行根本不渲染。
+
+**下发字段名是 `reasoning_effort_level`，不是 `reasoning_effort`**（2026-09-18 定案）。
+官方客户端的 `ai-modules-chat` bundle 里，`resolveReasoningEffortRequestField`
+默认产出 `reasoning_effort_level`，只有**字节内网账号**（`scope===BYTEDANCE`）
+才走 `reasoning_effort`；本插件用的是普通国内账号，故取前者。`ai_agent.dll` 的
+serde 字段块里两者**并列存在**，印证这是「两套账号体系各用一个」而非猜测。
+
+> ⚠️ **已知未验证项**：上游是否**真的按档位改变思考**尚未做对比实验。真机
+> A/B **无法**用「是否报错」区分两个字段名 —— 测试账号在带与不带档位时都回
+> `code:4008`（配额），字段校验阶段被 4008 掩盖（该账号在
+> `pay/web_user_ent_usage` 上仍显示通用池 2650 积分，故 4008 不是「余额为 0」，
+> 但也不是可用来判定字段名的信号）。字段名本身由上述静态证据三方互证定案；
+> 「档位是否生效」需一次能跑通的对话来对比 `reasoning_content` 长度。
+
 **为何不接远端模型目录**（三端点实测结论，2026-09-18）：
 
 | 端点 | 实测结果 |
@@ -902,7 +933,8 @@ id 形态极不规则（`qwen3.8-flash` 无连字符、`qwen-3.7-plus` 有、
 **与其它 provider 一致的约定**：`stream()` 把 `options.model` 传给
 `resolveCredential` 与 `refresh`（硬约定，见「账号池与多账号」）；
 `listModels()` 实时读 `pool.disabledModelsFor('trae-cn')` 应用黑名单；
-**不声明** reasoning 等级（是否支持 `reasoning_effort` 未实测，仅透传调用方显式传的值）。
+**声明** reasoning 档位（13/16 项，真机 vscdb；下发字段 `reasoning_effort_level`，
+仅透传调用方显式传的值、不主动补档 —— 补档由 DSH 按 `defaultEffort` 完成）。
 
 > ⚠️ **图片输入有意不一致**：目录照实报 `['text','image']`（那是**模型**的能力），
 > 而 `stream()` 仍对图片块抛 `UNSUPPORTED_CONTENT`（那是**本适配器**的能力 ——
