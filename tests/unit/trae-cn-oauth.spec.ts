@@ -12,6 +12,7 @@ import {
   exchangeTraeCnAuthCode,
   exchangeTraeCnToken,
   generateTraeCnDeviceId,
+  generateTraeCnDevicePublicKey,
   generateTraeCnLoginTraceId,
   generateTraeCnMachineId,
   generateTraeCnPkce,
@@ -317,8 +318,18 @@ describe('buildTraeCnDeviceInfo / buildTraeCnLoginUrl', () => {
     expect(info.DeviceName.length).toBeGreaterThan(0)
   })
 
-  it('DeviceInfo.DevicePublicKey 为空串（authCode 路径不发 DeviceProof，见注释）', () => {
-    expect(buildTraeCnDeviceInfo(REAL_DEVICE_ID, REAL_MACHINE_ID).DevicePublicKey).toBe('')
+  it('DeviceInfo.DevicePublicKey 缺省生成 EC P-256 SPKI PEM（官方 vDe() 同款）', () => {
+    const pem = buildTraeCnDeviceInfo(REAL_DEVICE_ID, REAL_MACHINE_ID).DevicePublicKey
+    // SPKI PEM 形态：头尾标记 + base64 段（P-256 公钥 91 字节 → 124 字符）。
+    expect(pem.startsWith('-----BEGIN PUBLIC KEY-----')).toBe(true)
+    expect(pem.trimEnd().endsWith('-----END PUBLIC KEY-----')).toBe(true)
+    const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '')
+    expect(b64.length).toBe(124)
+  })
+
+  it('DeviceInfo.DevicePublicKey 显式传入时原样使用（调用方可控制形态）', () => {
+    const pem = generateTraeCnDevicePublicKey()
+    expect(buildTraeCnDeviceInfo(REAL_DEVICE_ID, REAL_MACHINE_ID, undefined, pem).DevicePublicKey).toBe(pem)
   })
 })
 

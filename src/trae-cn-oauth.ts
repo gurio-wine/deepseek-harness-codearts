@@ -49,7 +49,7 @@
  */
 
 import { createServer, type Server } from 'node:http'
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import { jwtExpiresAtMs } from './buddy.js'
 import {
@@ -147,6 +147,22 @@ export function generateTraeCnPkce(): TraeCnPkce {
   const codeVerifier = randomBytes(48).toString('base64url')
   const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
   return { codeVerifier, codeChallenge, codeChallengeMethod: 'S256' }
+}
+
+/**
+ * 生成设备公钥（对齐官方 `main.js` 的 `vDe()`）。
+ *
+ * 官方实现逐字：`generateKeyPairSync("ec",{namedCurve:"P-256",publicKeyEncoding:
+ * {type:"spki",format:"pem"},…})`，每次登录生成新对，SPKI PEM 填入
+ * `DeviceInfo.DevicePublicKey`。实测留空串时 exchange 回 400「无效参数」。
+ */
+export function generateTraeCnDevicePublicKey(): string {
+  const { publicKey } = generateKeyPairSync('ec', {
+    namedCurve: 'P-256',
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  })
+  return publicKey
 }
 
 // ── 设备标识生成（**形态即风控**） ──
@@ -590,13 +606,14 @@ export interface TraeCnAuthExchangeResult {
  * | `DeviceName` | `net.exe user %USERNAME%` 的 Full Name | 主机名（`os.hostname()`，非空） |
  * | `DeviceBrand` / `DeviceCPU` / `DeviceModel` | 系统信息 | **空串**（不猜硬件型号） |
  * | `OSInfo` / `OSVersion` | 系统信息 | 常量（`windows` / `Windows 10 Home`） |
- * | `DevicePublicKey` | EC P-256 SPKI PEM（`vDe()` 生成） | **空串**（见下） |
+ * | `DevicePublicKey` | EC P-256 SPKI PEM（`vDe()` 每次登录生成新对） | 同款现场生成（见下） |
  *
- * `DevicePublicKey` 留空是**刻意的**：官方用它配合私钥签名做 `DeviceProof`
- * （`wDe()`），而**登录的 authCode 路径根本不发 `DeviceProof`** —— 真机请求体
- * 逐字确认只有 `{ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}`。
- * 即该字段在这条路径上是**未被使用的注册材料**；伪造一个 PEM 只会引入一个
- * 无法解释的值。若真机发现服务端强校验它，再接 `generateKeyPairSync`。
+ * `DeviceBrand`/`DeviceCPU`/`DeviceModel` 留空串是**刻意的**（不猜硬件型号）。
+ * `DevicePublicKey` 曾按「该路径不发 `DeviceProof`」也留空串，实测
+ * （2026-09-18 真机登录）exchange 回 400 `10101 无效参数` —— 服务端至少
+ * 校验它非空合法，故改为与官方 `vDe()` 一致：每次登录生成新 EC P-256
+ * 密钥对，SPKI PEM 填入。`DeviceProof` 在登录路径上确实不发（真机请求体
+ * 逐字确认只有 `{ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}`）。
  */
 export interface TraeCnDeviceInfo {
   DeviceID: string
@@ -624,6 +641,8 @@ export function buildTraeCnDeviceInfo(
   deviceId: string,
   machineId: string,
   deviceName?: string,
+  /** EC P-256 SPKI PEM（`vDe()` 生成）；官方实现从不发空串，缺省时现场生成。 */
+  devicePublicKey?: string,
 ): TraeCnDeviceInfo {
   return {
     DeviceID: deviceId,
@@ -636,7 +655,9 @@ export function buildTraeCnDeviceInfo(
     DeviceName: deviceName ?? hostname(),
     DeviceModel: '',
     ClientVersion: TRAE_CN_IDE_VERSION,
-    DevicePublicKey: '',
+    // 官方每次登录都生成新密钥对并把 SPKI PEM 放这里（main.js vDe()）。
+    // 实测留空串时 exchange 回 400「无效参数」；本插件同样每次登录生成新的。
+    DevicePublicKey: devicePublicKey ?? generateTraeCnDevicePublicKey(),
     DeviceBrand: '',
     DeviceCPU: '',
     OSInfo: TRAE_CN_LOGIN_OS_INFO,

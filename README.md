@@ -655,9 +655,11 @@ body **不含** `ClientSecret` / `DeviceProof`）；续期用
 / `DeviceType` / `DeviceName` / `DeviceModel` / `ClientVersion`
 / `DevicePublicKey` / `DeviceBrand` / `DeviceCPU` / `OSInfo` / `OSVersion`）。
 本插件能如实提供的只有前四项与 `ClientVersion`/`OSInfo`/`OSVersion`；
-`DeviceBrand`/`DeviceCPU`/`DeviceModel`/`DevicePublicKey` 一律**留空**——
-不猜硬件型号、不伪造 PEM（该字段在 authCode 路径上未被使用，真机请求体里
-根本没有 `DeviceProof`）。`DeviceName` 取主机名（真机取 `net.exe user` 的 Full Name）。
+`DeviceBrand`/`DeviceCPU`/`DeviceModel` **留空**（不猜硬件型号）。
+`DevicePublicKey` 为 EC P-256 SPKI PEM，**每次登录现场生成**（官方 `vDe()`
+同款）——曾因「该路径不发 DeviceProof」留空串，2026-09-18 真机实测 exchange
+回 400 `10101 无效参数`，服务端至少校验其非空合法。
+`DeviceName` 取主机名（真机取 `net.exe user` 的 Full Name）。
 
 **回调分层**（畸形请求不得终结登录）：
 
