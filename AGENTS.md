@@ -20,9 +20,9 @@
 
 `lobsterai` 与上述两者**完全不同源**：登录方式、请求头、续期载荷、签到流程、版本号来源都不一样，因此实现是独立一套 `src/lobsterai*.ts`。它只**共用架构模式**（产品配置驱动、账号池、限流切换、模型黑名单），**不共用 `BuddyProduct` 类型** —— 那里面 `apiDomain` / `productCode` / `attributionName` / `userAgentByModelFamily` / `appendSessionParams` 等字段对 LobsterAI 全部无意义。详见 README 的「LobsterAI provider」章节与 `docs/lobsterai-integration-plan.md`。
 
-`trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。**登录协议已用真机校准（2026-09-17）**：本地回调 + **PKCE(S256)**，回调投递 `authCodeInfo`（双重编码 JSON）→ `POST /trae/api/v3/oauth/ExchangeToken`（body 五字段 `{ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}`）；续期走**另一个**端点 `POST /cloudide/api/v3/trae/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**登录 URL 的 `client_id` 是 snake_case**（写成 `clientID` 会让授权页停在「认证中」，是曾经的报障根因），且必须带 `auth_type=local` / `login_channel=native_ide` / `login_version=1` 与 PKCE 参数。**产品配置 + 认证 + 模型路由（`src/trae-cn-adapter.ts`）+ 签到与积分余额（`src/trae-cn-credits.ts`）均已实现**。三个关键事实决定了它的适配器与其它 provider 结构不同：**SSE 是具名事件流**（`event:output`，不是 OpenAI 的 `data:{choices}`）、**业务失败发生在 HTTP 200 的 `event:error` 帧里**（故换号循环必须接住流内失败，错误分类按业务码而非状态码，见 `src/trae-cn-errors.ts`）、**签到必须带设备四件套**（见「积分领取」）。回调 URL 形态（T5）**已校准**；chat 端点路径（T6）与签到/余额的若干字段名（T7 / T8）**尚未真机实测**，实现采「候选表 + 常量」策略；**签到设备号来源（T9）待校准**（凭据里存的是 exchange 返回的 `BoundDeviceID`，而真机签到成功时用的是 16 位十进制设备号，形态不同），详见 README 的「Trae CN provider」章节。
+`trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。**登录协议已用真机校准（2026-09-17）**：本地回调 + **PKCE(S256)**，回调投递 `authCodeInfo`（双重编码 JSON）→ `POST /trae/api/v3/oauth/ExchangeToken`（body 五字段 `{ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}`）；续期走**另一个**端点 `POST /cloudide/api/v3/trae/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**登录 URL 的 `client_id` 是 snake_case**（写成 `clientID` 会让授权页停在「认证中」，是曾经的报障根因），且必须带 `auth_type=local` / `login_channel=native_ide` / `login_version=1` 与 PKCE 参数。**产品配置 + 认证 + 模型路由（`src/trae-cn-adapter.ts`）+ 签到与积分余额（`src/trae-cn-credits.ts`）均已实现**。三个关键事实决定了它的适配器与其它 provider 结构不同：**SSE 是具名事件流**（`event:output`，不是 OpenAI 的 `data:{choices}`）、**业务失败发生在 HTTP 200 的 `event:error` 帧里**（故换号循环必须接住流内失败，错误分类按业务码而非状态码，见 `src/trae-cn-errors.ts`）、**签到必须带设备四件套**（见「积分领取」）。**T5 / T6 / T7 / T9 均已真机校准**（2026-09-18）：T6 的真实病因是 **host** 而非路径（`/api/ide/*` 不在 `api.trae.cn`，在 IDE 网关 `TRAE_CN_IDE_API_BASE`；路径 `/api/ide/v1/chat` 本来就对，且必须带齐 `x-app-id` / **纯数字** `x-ide-version-code` 等全套网关头）；T7 余额端点**无 code 信封**、礼包在根层 `user_entitlement_pack_list`、额度嵌在 `entitlement_base_info...quota.credits_limit` 减 `usage.credits_amount`；T9 签到**不校验设备号形态**（只认设备头是否存在）。**模型目录刻意走真机 16 项静态表、不接远端**（三端点实测只回旧池/seed，新池任何 HTTP 端点都拿不到，详见 README 的「Trae CN provider」章节）。
 
-Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**由 CodeBuddy、LobsterAI 与 Trae CN 三个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。Trae CN 的签到与余额**前后端及宿主接线均已就绪**（`src/trae-cn-credits.ts` + 客户端能力矩阵 + `jet-hub-rpc.ts` 三处分支与 `traeCn` 实例传参）。登录协议（T5）已真机校准，仅签到设备号来源（T9）等少量细节待校准，见「积分能力必须在请求前判定」与 README 的「Trae CN provider」章节。
+Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**由 CodeBuddy、LobsterAI 与 Trae CN 三个面板提供** —— 国际版 WorkBuddy 后端没有签到接口，CodeArts 是华为云账号体系不参与。Trae CN 的签到与余额**前后端及宿主接线均已就绪**（`src/trae-cn-credits.ts` + 客户端能力矩阵 + `jet-hub-rpc.ts` 三处分支与 `traeCn` 实例传参）。T5 / T7 / T9 均已真机校准，见「积分能力必须在请求前判定」与 README 的「Trae CN provider」章节。
 
 - **包名**：`dsh-account-hub`
 - **入口**：`lib/index.js`（宿主侧）、`lib/client/jet-hub.js`（客户端 bundle）
@@ -177,7 +177,7 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 
 - 状态 `POST /trae/api/v2/ug/checkin_credits/status` → 未领则 `POST /trae/api/v2/ug/checkin_credits/claim`，两者 body 均为 `{"req_source":1}`
 - **幂等判据用 `checked_in`（账号级当日）**；`did_checked_in` 是**设备级**语义（换设备仍 false），**不要用**
-- **claim 必须带设备头**：`x-device-id`（**取自凭据**的 `device_id`，即登录 exchange 返回的 `BoundDeviceID`）+ `x-device-type: windows` + `x-os-version` + `x-app-version: 3.3.100`；缺了回 `code:9004`。⚠️ **T9 待校准**：真机第一轮签到成功时用的是 16 位十进制设备号，与 `BoundDeviceID`（14 位字母数字）形态不同，「签到认哪个号」尚无定论；拿到 9004 时按凭据里的值与宿主日志校准，**不要**拿 `machine_id` 折算一个假的 16 位号顶上
+- **claim 必须带设备头**：`x-device-id`（**取自凭据**的 `device_id`，即登录 exchange 返回的 `BoundDeviceID`）+ `x-device-type: windows` + `x-os-version` + `x-app-version: 3.3.100`；缺了回 `code:9004`。✅ **T9 已校准（2026-09-18）**：status / claim **都不校验设备号形态** —— 16 位十进制号、`BoundDeviceID`、空串全回 `code:0`；**完全不带设备头**时 `did_checked_in:false`（这正好印证它是设备级语义）。故照常取凭据值，**不要**拿 `machine_id` 折算一个假的 16 位号顶上；`9004` 只可能意味着「服务端不认可我们构造的设备身份」（此时文案会指向 `x-os-version` / `x-app-version`）
 - `Origin` / `Referer` = `https://www.trae.cn`（编译期常量 `product.portalBase`，不从凭据推断）
 - 无 auth 时是 **HTTP 200 + `code:1001` + `enable:false`**（不是 401）—— 判定**以 body `code` 为准**；`1001` 统一译为「凭据已失效，请重新登录」
 
@@ -198,11 +198,12 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 - **LobsterAI**：`GET /api/user/profile-summary` → `data.totalCreditsRemaining`；**不要**用 `/api/user/quota`（只有 `freeCreditsTotal=300`，不含活动积分，实测某账号 profile-summary 有 5297.72 而 quota 只有 300）
 - **Trae CN**：`POST /trae/api/v2/pay/web_user_ent_usage`，body `{"require_usage":true}`
   - 礼包按 **`available_endpoint` 分池**：`0`=通用积分、`1`=Work 积分
-  - **展示口径**：通用池（endpoint=0）之和是**主数字**（`total`）；Work 池走**单独的 `workTotal` 字段**，**绝不合并** —— chat 只扣通用池，合并会让用户以为 Work 额度能用来对话
+  - **展示口径**：通用池（endpoint=0）之和是**主数字**（`total`）；Work 池走**单独的 `workTotal` 字段**，**绝不合并**。**Work 积分的准确口径**：Work 专属积分**只在 TraeWork（`work.trae.cn` 网页版 / 桌面版）能花**；TraeCode / IDE 对话（即本插件走的路径）**只消耗通用积分**；在 TraeWork 中两类积分按**到期时间先后**扣，Work 专属**仅在到期时间相同时**优先；**2026-09 起签到发的是通用积分**。合并两池会让用户以为 Work 额度能用来对话
   - 返回类型 `TraeCnCreditBalance` 是 `CreditBalance` 的**超集**（多 `pools` / `workTotal`），故收集器能直接复用。**前端已消费 `workTotal`**：`CreditBalanceRow` 在该字段存在且可解析时渲染「通用 X / Work Y」两段（Work 用弱化色，绝不与通用相加）；其余 provider 的余额对象没有该字段，渲染逐元素不变，由 `tests/unit/jet-hub-credit-balance-row.spec.ts` 的整树深比较守住。改前端后须 `pnpm build:all` 重建 bundle
   - **不要**用 `ug/activity/info` 的活动口径（写 200 work 实到 150 通用，口径陷阱）
   - 包名回退链：`name` → `package_name` → `gift_name` → …（`BALANCE_NAME_FIELDS`）；非通用池的包名在 `packages` 里带 `[Work 积分]` 前缀
-  - **字段名 T7 待校准**：礼包数组位置与余额字段用候选表 + 「`available_endpoint` 指纹扫描」兜底，余额取数三级回退（remain 类字段 → 总额−已用 → 把 `total_amount` 当余额并**如实把 total 置 0**）
+  - ✅ **T7 已按真机校准（2026-09-18）**：该端点响应**没有 `code` 信封**（顶层是 `is_credits_billing` / `usage_summary` / `user_entitlement_pack_list`），沿用 code 信封会让余额**恒失败**；礼包数组在**根层** `user_entitlement_pack_list`，额度嵌在 `entitlement_base_info.product_extra.package_extra.quota.credits_limit`（回退 `entitlement_base_info.quota`）减 `usage.credits_amount`（可为 `{}`，按 0 计），`available_endpoint` 也在 `entitlement_base_info` 里。候选表 + 指纹扫描 + 三级回退**全部保留作兜底**，但主路径是嵌套口径
+  - ⚠️ **T8 仍待校准**：领取响应里「本次获得积分」的字段名（`TRAE_CN_CLAIM_CREDIT_FIELDS`），未命中时按 0 计并输出只含键名的调试行
 - 累加后一律 `roundCredits` 规整两位小数（多包浮点噪声会放大成 655.67000031）
 - 「余额为 0」与「查不到」严格区分：失败时 `balance` 为 `null` + `error`，卡片显示原因而非 0
 - RPC：`credits.balances`；前端 `AccountCard` 的 `CreditBalanceRow`，面板有「刷新积分」按钮
@@ -226,7 +227,7 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 
 - **默认关闭**：未登记的 provider 视为两项全无。新增 provider 忘登记时，最坏结果是暂时看不到积分，而不是每次打开面板都发一个必然失败的请求
 - **`trae-cn` 已登记**：全部就绪（`src/trae-cn-credits.ts` + `jet-hub-rpc.ts` 分发与三处宿主分支 + 客户端能力矩阵与 `PROVIDERS` 条目），面板显示积分行与两个积分按钮，可新建账号（`47f253f` 补齐接线）
-- **`trae-cn` 的 `balance` 是双池**：`total` 是通用池（chat 实际扣的），Work 池走超集字段 `workTotal`，`CreditBalanceRow` 在该字段存在且可解析时渲染「通用 X / Work Y」，**绝不合并**（合并会让用户以为 Work 额度能用于对话）。其余 provider 的余额对象没有该字段，渲染路径完全不变
+- **`trae-cn` 的 `balance` 是双池**：`total` 是通用池（IDE 对话实际扣的），Work 池走超集字段 `workTotal`，`CreditBalanceRow` 在该字段存在且可解析时渲染「通用 X / Work Y」，**绝不合并**（Work 专属积分只在 TraeWork 能花，合并会让用户以为它能用于对话）。其余 provider 的余额对象没有该字段，渲染路径完全不变
 - **门控在发请求之前**，不是在 UI 上吞错误：`loadCredits` / `claimCredits` 函数内部各有一道守卫（按钮不渲染只是 UI 便利，不是安全边界），`AccountCard` 的积分行与「刷新积分」按钮也按能力渲染
 - **历史缺陷**（用户报障）：客户端在面板挂载时对所有 provider 无条件调用 `credits.balances`，CodeArts 面板每次打开都在控制台报 `unsupported provider: codearts`，并把账号卡片的「积分」渲染成「查询失败」。后端 `productById()` 的拒绝是正确契约，不该被当成运行时故障
 - 改动能力矩阵后必须同步 `PROVIDERS` 列表：`tests/unit/credits-capabilities.spec.ts` 有一条断言锁死两者条目集合相等。**该断言的匹配器必须写成 `[a-z-]+` 而不是 `[a-z]+`** —— 后者会让带连字符的 id（`trae-cn`）在 `PROVIDERS` 里隐形，漏登记时断言反而是绿的

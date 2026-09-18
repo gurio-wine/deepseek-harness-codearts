@@ -59,6 +59,64 @@
  */
 export const TRAE_CN_API_BASE = 'https://api.trae.cn'
 
+/**
+ * Trae CN **IDE 网关**基址（`/api/ide/*` 专用，**编译期常量**）。
+ *
+ * ## 为什么必须与 {@link TRAE_CN_API_BASE} 分开（T6 真机校准，2026-09-18）
+ *
+ * `/api/ide/*` **不在** `api.trae.cn` 上：实测该 host 上的
+ * `/api/ide/v1/ping` 回 **404**，而在本 host 上回 **200**。
+ * 官方 product.json 的 `bootConfig.agent.trae.normal` 指定的就是本 host。
+ * 对话（`/api/ide/v1/chat`）因此必须打到本网关 —— 原实现把它拼在
+ * `api.trae.cn` 后面，是 T6 的真实错误（**路径本来就对，错的是 host**）。
+ *
+ * 签到 / 续期 / 余额**仍然走 `api.trae.cn`**：那三条协议线不在 IDE 网关下，
+ * 换过来会 404。两个 base 不可互相替换。
+ */
+export const TRAE_CN_IDE_API_BASE = 'https://trae-api-cn.mchost.guru'
+
+/**
+ * IDE 网关请求头：应用 ID（`x-app-id`）。
+ *
+ * 实测该网关按这几个头做客户端形态校验：**缺了直接 500 / 401，带上才是 200**
+ * （所以它们不是「可选的遥测字段」，而是请求能否成立的一部分）。
+ * 取自官方 product.json（公开标识，非机密）。
+ */
+export const TRAE_CN_IDE_APP_ID = '6eefa01c-1036-4c7e-9ca5-d891f63bfcd8'
+
+/**
+ * IDE 网关请求头：客户端版本号（`x-ide-version-code` 与 `x-app-version-code`）。
+ *
+ * ⚠️ **必须是纯数字**：真机实测发 `"3.3.100"` 会被网关 **400** 拒掉，
+ * 发 `"107"` 才是 200。注意它与 {@link TRAE_CN_IDE_VERSION}（`3.3.100`，
+ * 登录 URL 的 `x_app_version`）**不是一个号**，也不可互换 ——
+ * 一个进 URL/请求体，一个进网关头，形态要求还不同。
+ */
+export const TRAE_CN_IDE_VERSION_CODE = '107'
+
+/**
+ * IDE 网关请求头：IDE 版本（`x-ide-version`，形如 `1.107.1`）。
+ *
+ * 与 {@link TRAE_CN_IDE_VERSION}（`3.3.100`）同名不同物，故本常量**刻意不叫**
+ * `TRAE_CN_IDE_VERSION` —— 那个名字已被登录协议的 IDE 版本占用（真机 main.log
+ * 逐字），改它会牵动登录 URL / `DeviceInfo.ClientVersion` / exchange body 三处。
+ */
+export const TRAE_CN_IDE_GATEWAY_VERSION = '1.107.1'
+
+/** IDE 网关请求头：版本通道（`x-ide-version-type`，真机 `stable`）。 */
+export const TRAE_CN_IDE_VERSION_TYPE = 'stable'
+
+/** IDE 网关请求头：流量类型（`request-traffic-type`，真机 `normal`）。 */
+export const TRAE_CN_REQUEST_TRAFFIC_TYPE = 'normal'
+
+/**
+ * IDE 网关请求头：`User-Agent`。
+ *
+ * 真机值为 `TraeClient/TTNet`（官方客户端自己的 UA），**不是**浏览器 UA。
+ * 网关按 UA 归因客户端形态，故照抄实测值而不是留空。
+ */
+export const TRAE_CN_GATEWAY_USER_AGENT = 'TraeClient/TTNet'
+
 /** Trae CN 登录门户基址（**编译期常量**）。 */
 export const TRAE_CN_PORTAL_BASE = 'https://www.trae.cn'
 
@@ -242,38 +300,31 @@ export const TRAE_CN_LOGIN_OS_VERSION = 'Windows 10 Home'
 export const TRAE_CN_AUTHORIZATION_PATH = '/authorization'
 
 /**
- * chat（流式对话）端点路径。
+ * chat（流式对话）端点**路径**（拼在 {@link TRAE_CN_IDE_API_BASE} 之后）。
  *
- * ## 为什么是常量 + 候选表，而不是直接内联
+ * ## ✅ T6 已真机校准（2026-09-18）：路径本来就对，错的是 host
  *
- * ⚠️ **T6 待校准**：调研报告给出了模型目录端点（`/api/ide/v1/get_detail_param`）
- * 与积分端点，但**未给出 chat 端点的确切路径**。本值来自**本机客户端的只读提取**
- * （`resources/app/modules/ai-agent/ai_agent.dll` 的字符串池），不是凭空发明：
- * 该池里 `/api/ide/v1/chat` 与调研报告已确认的 SSE 事件序列（`metadata` →
- * `timing_cost` → `output` → `done`）**出现在同一段字符串里**，且与同为 IDE 协议族的
- * `get_detail_param` / `model_list` / `llm_raw_chat` 并列。
+ * 本值取自本机客户端的只读提取（`resources/app/modules/ai-agent/ai_agent.dll`
+ * 的字符串池），真机实测**确认它就是正确路径** —— 上游返回的是正常 SSE
+ * （`event:output` 逐字），业务错误也在 HTTP 200 的 `event:error` 帧里
+ * （实测 `code:4001`），与 `src/trae-cn-errors.ts` 的设计假设一致。
  *
- * ## 候选表（真机校准时按序替换）
+ * 曾经的错误不在路径上：它被拼在 `api.trae.cn` 后面，而 `/api/ide/*` 在
+ * 那个 host 上 **404**（真正的网关是 {@link TRAE_CN_IDE_API_BASE}）。
+ * 即「T6 的症状（404）与病因（host）不同」—— 若当初照候选表逐个试路径，
+ * 四条全都会 404，反而会把正确的路径排除掉。
  *
- * 同一字符串池里另有三个可能承载 chat 的路径，按可能性排序：
- * 1. {@link TRAE_CN_CHAT_PATH} = `/api/ide/v1/chat`（**主选**：与 SSE 事件序列同段）；
- * 2. `/api/ide/v1/llm_raw_chat`（客户端 Rust 侧 `[ModelService] llm_raw_chat error`
- *    日志与之同名，是「原始 LLM 调用」路径 —— 但它更可能是客户端**内部**命名，
- *    而非网关路径）；
- * 3. `/api/ide/v2/llm_raw_chat`（v2 版本）；
- * 4. `/api/ide/v1/chat_prompt`（疑似 prompt 构造而非对话）。
- *
- * 真机一次请求即可判定：若非主选，服务端会返回 404/未知路径错误，届时把本常量
- * 改成实测值并删除本候选表（**不要**在运行时做逐个试错 —— 那会把每次对话都变成
- * 最多 4 次请求，且失败模式难以归因）。
+ * 候选表（{@link TRAE_CN_CHAT_PATH_CANDIDATES}）因此**已失去运行时意义**，
+ * 保留仅为诊断留痕（见该常量的说明）。
  */
 export const TRAE_CN_CHAT_PATH = '/api/ide/v1/chat'
 
 /**
- * 候选端点表（仅用于诊断与人工校准，**运行时不使用**）。
+ * 候选端点表（仅用于诊断与历史留痕，**运行时不使用**）。
  *
- * 保留它是为了让「待校准」这件事在代码里可见：`TRAE_CN_CHAT_PATH` 一旦被真机
- * 证伪，排查者不必重新翻客户端文件，照着本表逐个试即可。
+ * 真机校准（2026-09-18）已确认主选 `/api/ide/v1/chat` 正确，其余三个候选
+ * 不再有排查价值。保留数组是为了让「曾经为什么这么猜」在代码里可查 ——
+ * 删除它会让后来者重新经历一次「路径 vs host」的误判。
  */
 export const TRAE_CN_CHAT_PATH_CANDIDATES: readonly string[] = [
   '/api/ide/v1/chat',
@@ -283,15 +334,28 @@ export const TRAE_CN_CHAT_PATH_CANDIDATES: readonly string[] = [
 ]
 
 /**
- * 模型目录端点路径。
+ * 模型目录端点路径（**刻意不接线**）。
  *
- * 调研报告实测确认：`POST /api/ide/v1/get_detail_param` → 41 项，
- * model id 形如 `DeepSeek-V4-Flash-Official` / `glm-5.2` / `kimi-k3`；
- * 倍率在 `display_contact_config.consumption_rate.data.rate`。
+ * ## 为什么本插件不接远端模型目录（2026-09-18 三端点实测结论）
  *
- * ⚠️ 本插件**当前不发这个请求**（任务边界：不发起任何真实网络请求）——
- * `listModels` 走静态兜底表，远端拉取逻辑由注入的 `fetchRemoteModels` 提供
- * 并在单测里 mock。本常量供后续（T6 真机校准与签到任务）复用。
+ * 结论：**新模型池在任何 HTTP 端点上都拿不到**，静态表才是正解。三条证据：
+ *
+ * | 端点 | 实测结果 |
+ * |---|---|
+ * | `model_list`（`{"type":"chat"}` + 完整网关头） | 只回 **6 项旧池**（Doubao-1.5 代） |
+ * | `batch_get_detail_param` | 只回 **4 个 seed 配置** |
+ * | 其余 ~200 种形状组合 | 18 项新池**一个都不出现** |
+ *
+ * 官方客户端之所以能看到新池，靠的是 `harness.dll` **内嵌的静态映射** +
+ * 本地缓存（vscdb），不是某个可调用的 HTTP 接口。
+ *
+ * 故 {@link TRAE_CN_FALLBACK_MODELS} 不是「兜底」，而是**唯一正确的目录**；
+ * 适配器的 `fetchRemoteModels` 保持未接线（接口保留，注入方留空）。
+ * 若将来上游真给出目录端点，改这里与 README 的「模型目录」小节即可。
+ *
+ * ⚠️ **待办**：`parseTraeCnModels` 解析器随之**无调用方**（远端不接就没有响应可解）。
+ * 刻意保留而不删：真接线时它仍是入口，且它的候选表是从客户端响应形态推出来的。
+ * 现状在 README 的「模型目录」小节有登记。
  */
 export const TRAE_CN_MODELS_PATH = '/api/ide/v1/get_detail_param'
 

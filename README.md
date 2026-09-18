@@ -428,8 +428,9 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
   ```
 
   响应里的礼包按 `available_endpoint` **分池**（0=通用积分、1=Work 积分）。
-  `fetchTraeCnCreditBalance` 返回的 `total` 是**通用池**合计（chat 实际扣的就是
-  它），Work 池走**单独的 `workTotal` 字段**，两者**绝不合并成一个数**。
+  `fetchTraeCnCreditBalance` 返回的 `total` 是**通用池**合计（本插件走的 IDE
+  对话消耗的就是它），Work 池走**单独的 `workTotal` 字段**，两者**绝不合并成一个数**
+  —— Work 专属积分只在 TraeWork（`work.trae.cn` 网页版 / 桌面版）能花。
   **不要**用 `ug/activity/info` 的活动口径：实测它写「200 work 积分」而实际到账
   150 通用积分，是口径陷阱。详见 [Trae CN provider](#trae-cn-provider字节跳动-trae-国内版)
   的「签到与积分余额」。
@@ -443,9 +444,10 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 >    `dailyCheckin` ✓），`PROVIDERS` 同步加入该 tab —— 面板因此显示「积分」行、
 >    「刷新积分」与「一键领取积分」按钮；
 > 2. `CreditBalanceRow` 见到余额对象带 `workTotal` 时切**双池形态**，显示
->    「通用 154.22 / Work 2000」；两池**绝不合并**，且 Work 用弱化色（chat 只扣
->    通用池）。没有 `workTotal` 的 provider 渲染**逐元素不变**，由
->    `tests/unit/jet-hub-credit-balance-row.spec.ts` 用整树深比较守住。
+>    「通用 154.22 / Work 2000」；两池**绝不合并**，且 Work 用弱化色（Work 专属
+>    积分只在 TraeWork 能花，IDE 对话只消耗通用池）。没有 `workTotal` 的 provider
+>    渲染**逐元素不变**，由 `tests/unit/jet-hub-credit-balance-row.spec.ts` 用
+>    整树深比较守住。
 >
 > ✅ 宿主侧接线已完成（`47f253f`）：`account.create` / `account.refresh` /
 > `account-probe.ts` 三处的 `trae-cn` 分支与 `registerJetHubRpc` 的 `traeCn`
@@ -508,8 +510,9 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 > **Trae 的签到必须带设备头**（与腾讯系、LobsterAI 都不同）：`x-device-id`
 > 取自凭据里的 `device_id`（= 登录 exchange 返回的 `BoundDeviceID`），另带
 > `x-device-type: windows` / `x-os-version` / `x-app-version`。claim 严格校验，
-> 缺了直接回 `code:9004`。⚠️ **T9 待校准**：真机第一轮签到成功时用的是 16 位
-> 十进制设备号，与 `BoundDeviceID` 形态不同，详见「Trae CN provider」章节。
+> 缺了直接回 `code:9004`。✅ **T9 已校准（2026-09-18）**：status / claim
+> **都不校验设备号形态**（16 位十进制号 / `BoundDeviceID` / 空串全回 `code:0`），
+> 只有**完全不带设备头**才会 `did_checked_in:false` —— 详见「Trae CN provider」章节。
 > 幂等判据是 **`checked_in`（账号级当日）**，**不是** `did_checked_in`
 > ——后者是设备级语义，换台设备仍为 false，拿它判幂等会对已领账号重复发请求。
 > 无 auth 时服务端返回的是 **HTTP 200 + `code:1001` + `enable:false`**
@@ -589,8 +592,9 @@ Bearer `access_token` 鉴权。
 
 ## Trae CN provider（字节跳动 Trae 国内版）
 
-独立路由 `trae-cn`，上游 API 基址 `https://api.trae.cn`，登录门户
-`https://www.trae.cn`。
+独立路由 `trae-cn`，上游 API 基址 `https://api.trae.cn`（登录 / 续期 / 签到 /
+余额），**IDE 网关** `https://trae-api-cn.mchost.guru`（`/api/ide/*`，即对话），
+登录门户 `https://www.trae.cn`。
 
 该 provider 与既有四条线**均不同源**，因此实现是独立一套 `src/trae-cn*.ts`，
 只共用架构模式（产品配置驱动、账号池、限流切换、模型黑名单）。
@@ -745,11 +749,13 @@ provider id 是 `trae-cn`（带连字符，对齐用户与生态叫法），但 
 > 全部逐字确认，`device_id` 的来源也已查清（exchange 响应的 `BoundDeviceID`）。
 > 旧的 `machine-id-fallback` 降级路径与 `aha` 来源标记已**删除**。
 >
-> ⚠️ **待校准项（T9）：签到设备号的来源**。签到端点的 `x-device-id` 读的是凭据里的
-> `device_id`（= `BoundDeviceID`），但真机**第一轮签到实测成功**时用的是 16 位
-> 十进制设备号，与 `BoundDeviceID` 形态不同 —— 「签到认哪个号」尚无定论。
-> 若签到返回 `code:9004`，按凭据里的值与宿主日志校准（候选是 exchange 响应里的
-> 其它设备字段或客户端设备注册服务的 16 位号，**不是** `MachineID`）。
+> ✅ **T9 已校准（2026-09-18）**：签到端点的 `x-device-id` 读的是凭据里的
+> `device_id`（= `BoundDeviceID`），而真机实测 status / claim **都不校验设备号
+> 形态** —— 16 位十进制号、`BoundDeviceID`、空串三者返回**逐字节相同**；
+> **完全不带设备头**时才出现 `did_checked_in:false`（这恰好印证它是设备级语义）。
+> 故照常取凭据值，**不要**拿 `machine_id` 折算一个假的 16 位号顶上
+> （伪造设备身份比缺字段更坏）。`code:9004` 因此只可能意味着「服务端不认可我们
+> 构造的设备身份」，此时按 `x-os-version` / `x-app-version` 的实测值校准。
 
 ### 模型路由（LLM 适配器）
 
@@ -759,20 +765,41 @@ provider id 是 `trae-cn`（带连字符，对齐用户与生态叫法），但 
 注意该 namespace 里的连字符是**正确**的：namespace 是字符串键而非 JS 标识符，
 与 cordis 服务名（`traeCnAuth`）走的是两套命名规则。
 
-**端点**：`POST https://api.trae.cn/api/ide/v1/chat`，请求头
-`Cloud-IDE-JWT <access>` + 同值 `X-Ide-Token` / `X-Cloudide-Token`，
-`Accept: text/event-stream`；请求体是标准 OpenAI chat-completions 消息数组
-（`model` / `messages` / `stream: true`），**不发**任何腾讯系或 LobsterAI 归属头。
+**端点**：`POST https://trae-api-cn.mchost.guru/api/ide/v1/chat`，请求头
+`Cloud-IDE-JWT <access>` + 同值 `X-Ide-Token` / `X-Cloudide-Token` +
+**IDE 网关全套头**（见下），`Accept: text/event-stream`；请求体是标准
+OpenAI chat-completions 消息数组（`model` / `messages` / `stream: true`），
+**不发**任何腾讯系或 LobsterAI 归属头。
 
-> ⚠️ **待校准项（T6）**：chat 端点路径**未经真机实测**。`TRAE_CN_CHAT_PATH`
-> 的值来自本机客户端 `resources/app/modules/ai-agent/ai_agent.dll` 的字符串池
-> （只读提取，未发网络请求）：`/api/ide/v1/chat` 与调研报告已确认的 SSE 事件序列
-> （`metadata` → `timing_cost` → `output` → `done`）**出现在同一段字符串里**，
-> 且与同为 IDE 协议族的 `get_detail_param` / `model_list` 并列。
-> 同池另有三个候选（`llm_raw_chat` / v2 `llm_raw_chat` / `chat_prompt`），
-> 全部列在 `TRAE_CN_CHAT_PATH_CANDIDATES` 里。真机一次请求即可判定；
-> 证伪时改常量并同步候选表（单测锁死了两者的一致性）。
-> **不做运行时逐个试错** —— 那会把每次对话变成最多 4 次请求。
+> ✅ **T6 已真机校准（2026-09-18）：路径本来就对，错的是 host。**
+> `/api/ide/*` **不在** `api.trae.cn` 上 —— 实测 `/api/ide/v1/ping` 在该 host
+> 回 **404**，在 IDE 网关 `trae-api-cn.mchost.guru` 回 **200**（该 host 由官方
+> product.json 的 `bootConfig.agent.trae.normal` 指定）。原实现把正确路径拼在
+> 错误的 base 后面，症状是 404 而病因在 host —— 若当初照候选表逐个试路径，
+> 四条会全部 404，反而把正确的那个排除掉。候选表
+> `TRAE_CN_CHAT_PATH_CANDIDATES` 因此已无运行时意义，仅作历史留痕。
+> 实测该网关上 chat 返回**正常 SSE**，业务错误在 HTTP 200 的 `event:error`
+> 帧里（实测 `code:4001`），与 `src/trae-cn-errors.ts` 的设计假设一致。
+
+**IDE 网关必须带齐的请求头**（实测缺了直接 500 / 401，带齐才是 200 ——
+它们不是遥测字段，而是请求能否成立的一部分）：
+
+```
+x-app-id:            6eefa01c-1036-4c7e-9ca5-d891f63bfcd8
+x-ide-version-code:  107            ← 必须纯数字；"3.3.100" 会 400
+x-app-version-code:  107
+x-ide-version:       1.107.1        ← 与登录用的 3.3.100 不是一个号
+x-ide-version-type:  stable
+request-traffic-type: normal
+x-device-id:         <凭据的 device_id>   ← 与签到头同源
+x-device-type:       windows
+x-os-version:        Windows 10.0.22631
+User-Agent:          TraeClient/TTNet     ← 官方客户端 UA，不是浏览器 UA
+```
+
+注意 `x-ide-version-code` 与登录 URL 的 `x_app_version`（`3.3.100`）**同名不同物、
+形态要求还不同**：一个进网关头且必须纯数字，一个进 URL/请求体。三个版本号
+（`107` / `1.107.1` / `3.3.100`）在 `src/trae-cn-product.ts` 里是三个独立常量。
 
 **SSE 不是 OpenAI 协议**。上游返回**具名事件**流，帧解析在 `src/trae-cn-sse.ts`：
 
@@ -808,12 +835,65 @@ event:error         data:{"code":4008,"message":…}  ← 失败（HTTP 仍为 2
 （3 个账号，含首次）。若流已经开始产出正文才报错，则**不再换号**（换号会让用户
 看到「半截回答 + 完整回答」两段内容，比直接报错更糟），改为直报。
 
-**模型目录**：暂用静态兜底表 `TRAE_CN_FALLBACK_MODELS`（8 项，从调研报告实测的
-41 项里每个模型家族取一项）。取舍：远端 `get_detail_param` 才是权威源，兜底表只在
-远端失败时顶替；**只取 8 项而不是抄全 41 项**，是为了让「兜底表正在生效」在 UI 上
-一眼可见（模型选择器只有 8 项时，用户与排查者立刻知道远端拉取失败了）。
-远端拉取逻辑由注入的 `fetchRemoteModels` 提供，解析器 `parseTraeCnModels` 对字段名
-做容忍式读取（**T6 待校准**：报告未给出条目的确切字段名）。
+**模型目录 = 真机 16 项静态表**（`TRAE_CN_FALLBACK_MODELS`，2026-09-18）。
+
+| id | 展示名 | 多模态 | max_tokens | 上下文（dev/max） |
+|---|---|---|---|---|
+| `Doubao-Seed-Evolving` | `Seed-Evolving` | ✓ | 64000 | 262144/1048576 |
+| `Doubao-Seed-2.1-Pro` | `Seed-2.1-Pro-0915` | ✓ | 64000 | 262144/1048576 |
+| `Doubao-Seed-2.1-Turbo` | `Seed-2.1-Turbo` | ✓ | 32000 | 262144 |
+| `Doubao-Seed-Code` | `Seed-Code` | ✓ | 32000 | 262144 |
+| `glm-5.3-flash` | `GLM-5.3-Flash` | ✓ | 64000 | 119040/1048576 |
+| `glm-5.3` | `GLM-5.3` | ✗ | 64000 | 119040/1048576 |
+| `glm-5.2` | `GLM-5.2` | ✗ | 64000 | 119040/1048576 |
+| `deepseek-v4.1-flash` | `DeepSeek-V4.1-Flash` | ✓ | 64000 | 119040/1048576 |
+| `DeepSeek-V4-Flash-Official` | `DeepSeek-V4-Flash 正式版` | ✗ | 64000 | 119040/1048576 |
+| `DeepSeek-V4-Pro-Official` | `DeepSeek-V4-Pro 正式版` | ✗ | 64000 | 119040/1048576 |
+| `kimi-k3` | `Kimi-K3` | ✓ | 64000 | 204800/1048576 |
+| `kimi-k2.8-preview` | `Kimi-K2.8-Preview` | ✓ | 64000 | 204800/1048576 |
+| `minimax-m3` | `MiniMax-M3` | ✓ | 64000 | 119040/1048576 |
+| `qwen3.8-flash` | `Qwen3.8-Flash` | ✓ | 64000 | 204800/1048576 |
+| `qwen3.8-max` | `Qwen3.8-Max` | ✓ | 64000 | 204800/1048576 |
+| `qwen-3.7-plus` | `Qwen3.7-Plus` | ✓ | 64000 | 204800/1048576 |
+
+来源：真机 `chat_v3` 模型目录（2026-09-18），由 Trae 客户端 **vscdb 缓存**与
+**160 处日志事件**互证；id / 展示名 / 多模态标记 / max_tokens / 窗口**逐字符**照抄。
+id 形态极不规则（`qwen3.8-flash` 无连字符、`qwen-3.7-plus` 有、
+`deepseek-v4.1-flash` 是点号、`minimax-m3` 全小写）——**任何规整化都会让请求打到
+不存在的模型上**，故原样保留。
+
+- 上下文窗口取 **dev 档**（如 `262144/1048576` → 262144）：它是客户端默认实际
+  使用的窗口。max 档（多数 1048576）是理论上限，按它声明会让 DSH 的上下文压缩
+  迟迟不触发；
+- `inputModalities` **按模型给**：多模态项（**12/16**）输出 `['text','image']`，
+  其余 `['text']`。`listModels` 与 `resolveModel` 读的是同一个 `supportsImages`
+  字段，两处口径强制同源（不一致会让选择器与请求路径自相矛盾）；
+- `maxTokens` **只记录不 materialize**：DSH 的 `defaultMaxTokens` 会在调用方未给
+  上限时自动填进请求体，而本仓库另外四个 provider 一个都没设该字段 ——
+  由适配器替用户决定输出上限是行为变更，不在本次范围内。
+
+**为何不接远端模型目录**（三端点实测结论，2026-09-18）：
+
+| 端点 | 实测结果 |
+|---|---|
+| `model_list`（`{"type":"chat"}` + 完整网关头） | 只回 **6 项旧池**（Doubao-1.5 代） |
+| `batch_get_detail_param` | 只回 **4 个 seed 配置** |
+| 其余约 200 种形状组合 | 18 项新池**一个都不出现** |
+
+官方客户端能看到新池，靠的是 `harness.dll` **内嵌静态映射** + 本地缓存（vscdb），
+不是任何可调用的 HTTP 接口。故 `fetchRemoteModels` **刻意不接线**，静态表即正解
+（`TRAE_CN_MODELS_PATH` 保留常量并注明不可用）。
+
+> ⚠️ **待办**：解析器 `parseTraeCnModels` 因此**当前无调用方**（远端不接就没有
+> 响应可解）。刻意保留而非删除 —— 真接线时它仍是入口，且它的候选字段表是从客户端
+> 响应形态推出来的。接线时需一并校准该表。
+>
+> 4 个旧死 id 的下落：`qwen3.7-max` **已下线**；`deepseek-v4-flash` /
+> `doubao-seed-2-1-pro` / `MiniMax-M3` 是拼写或大小写错误的**近似形态**
+> （真机分别是 `deepseek-v4.1-flash` / `Doubao-Seed-2.1-Pro` / `minimax-m3`）。
+> 真机目录里**没有** `deepseek//deepseek-chat` 与 `deepseek//deepseek-reasoner`
+> —— 那是账号自定义的 BYOK 条目，不属云端目录，已排除。
+
 消耗倍率（`display_contact_config.consumption_rate.data.rate`）会被解析出来，
 但**不塞进** `LlmModelInfo` —— DSH 该接口只有
 `provider`/`id`/`name`/`description`/`inputModalities` 五个字段，唯一的落点是
@@ -822,8 +902,14 @@ event:error         data:{"code":4008,"message":…}  ← 失败（HTTP 仍为 2
 **与其它 provider 一致的约定**：`stream()` 把 `options.model` 传给
 `resolveCredential` 与 `refresh`（硬约定，见「账号池与多账号」）；
 `listModels()` 实时读 `pool.disabledModelsFor('trae-cn')` 应用黑名单；
-图片输入报 `UNSUPPORTED_CONTENT`（未实测支持，不静默丢弃）；
 **不声明** reasoning 等级（是否支持 `reasoning_effort` 未实测，仅透传调用方显式传的值）。
+
+> ⚠️ **图片输入有意不一致**：目录照实报 `['text','image']`（那是**模型**的能力），
+> 而 `stream()` 仍对图片块抛 `UNSUPPORTED_CONTENT`（那是**本适配器**的能力 ——
+> `serializeTraeCnMessages` 只展平文本块，没有把 image 块编码成上游要的形态）。
+> 正常调用到不了那道抛错：DSH 会按 `inputModalities` 在路由层把图片投影成文本
+> 占位（`projectImagesForTextModel`）；抛错是防「绕过路由层直接调 `stream()`」
+> 的最后一道防线。两处**不要「顺手」改成一致**。
 
 ### 签到与积分余额
 
@@ -843,7 +929,7 @@ event:error         data:{"code":4008,"message":…}  ← 失败（HTTP 仍为 2
 ```
 Origin:  https://www.trae.cn
 Referer: https://www.trae.cn
-x-device-id:   <凭据里的 device_id（= 登录 exchange 的 BoundDeviceID，T9 待校准）>
+x-device-id:   <凭据里的 device_id（= 登录 exchange 的 BoundDeviceID）>
 x-device-type: windows
 x-os-version:  Windows 10.0.22631
 x-app-version: 3.3.100
@@ -851,11 +937,13 @@ x-app-version: 3.3.100
 
 - 设备四件套是 **claim 的硬要求**，缺失时服务端回 `code:9004`。
   `x-device-id` **取自凭据**（`device_id` 字段），不是登录 URL 里那个随机生成的
-  16 位号 —— 后者只参与登录握手与风控形态校验，不是设备身份；
+  16 位号 —— 后者只参与登录握手与风控形态校验，不是设备身份。
+  ✅ **T9 已校准（2026-09-18）**：设备**号形态**不被校验（16 位十进制号 /
+  `BoundDeviceID` / 空串全回 `code:0`），只有**完全不带设备头**才 `did_checked_in:false`；
 - `Origin` / `Referer` 取编译期常量 `product.portalBase`，**不从凭据推断**
   （与 `X-Domain` 那条约定同因）；
-- `req_source:1` 照抄**唯一次实测成功**的组合。调研未定论 `{}` 与
-  `{"req_source":1}` 哪个才是 9004 的真因，带重复字段的成本是零。
+- `req_source:1` 照抄**唯一次实测成功**的组合。✅ **T1 已校准**：带与不带服务端返回
+  **逐字节相同**，它不是 9004 的成因；保留它只因为成本是零。
 
 **幂等判据是 `checked_in`（账号级当日）**，`did_checked_in` 是**设备级**语义
 （换设备仍为 false），**不要用**。领取流程自身先查状态、已领则短路，
@@ -865,8 +953,15 @@ x-app-version: 3.3.100
 
 | 池 | `available_endpoint` | 返回字段 | 展示 |
 |---|---|---|---|
-| 通用积分 | `0` | `total` | **主数字**（chat 实际扣的是这个池） |
+| 通用积分 | `0` | `total` | **主数字**（本插件能实际用掉的就是它） |
 | Work 积分 | `1` | `workTotal` | 单独一项（如「通用 154.22 / Work 2000」） |
+
+**Work 积分的准确口径**（取代早先「chat 只扣通用池」的简写）：
+
+- **Work 专属积分只在 TraeWork 里能花**（`work.trae.cn` 网页版 / 桌面版）；
+- **TraeCode / IDE 对话只消耗通用积分** —— 也就是本插件走的那条路径；
+- 在 TraeWork 中两类积分按**到期时间先后**扣，Work 专属**仅在到期时间相同时**优先；
+- **2026-09 起签到发的是通用积分**（不是 Work 专属）。
 
 **两池绝不合并成一个数**：合并会让用户以为 Work 的额度可以用来对话，
 从而对「明明显示还有 2000 却说余额不足」感到莫名其妙。返回类型是
@@ -883,19 +978,22 @@ x-app-version: 3.3.100
 无 auth 时服务端返回的是 **HTTP 200 + `code:1001` + `enable:false`**，按状态码判
 会把它当成成功。`code:1001` 在两个端点上的文案统一为「凭据已失效，请重新登录」。
 
-> ⚠️ **待校准项（T7 / T8）**：调研报告给出的是「典型值」而非全量 schema，故
-> 积分包与领取积分两处采**候选表 + 脱敏日志**策略，而不是发明字段名：
-> - **T7**：礼包数组的位置（`TRAE_CN_BALANCE_ARRAY_KEYS`，另按
->   `available_endpoint` 指纹做广度优先扫描兜底）与余额字段
->   （`TRAE_CN_BALANCE_REMAIN_FIELDS`；找不到 remain 类字段时按
->   「总额 − 已用」回退，再退到「把 `total_amount` 当余额」并**如实把 total 置 0**，
->   免得 UI 把它显示成 1:1 的比值）；
-> - **T8**：领取响应里的积分字段（`TRAE_CN_CLAIM_CREDIT_FIELDS`），未命中时按 0
->   计并输出一行**只含字段名、不含值**的日志；
-> - `x-os-version` 的构建号：调研记录里被脱敏成 `10.0.xxxxx`，这里填了一个形态
->   合法的真实构建号（留 `xxxxx` 字面量一定过不了校验）。claim 若拿到 9004，
->   按本机客户端实际发送的值替换。
+> ✅ **T7 已按真机校准（2026-09-18）**：该端点响应**没有 `code` 信封** ——
+> 顶层是 `{"is_credits_billing":…,"usage_summary":{…},"user_entitlement_pack_list":[…]}`
+> （沿用 code 信封会让余额**恒失败**，与「余额为 0」无关）。礼包数组在**根层**
+> `user_entitlement_pack_list`；额度嵌在
+> `entitlement_base_info.product_extra.package_extra.quota.credits_limit`
+> （回退 `entitlement_base_info.quota`），**余额 = `credits_limit` −
+> `usage.credits_amount`**（`usage` 可为 `{}`，按「该包未产生用量」计 0）；
+> `available_endpoint` 也在 `entitlement_base_info` 里（不在条目顶层）。
+> 候选表（`TRAE_CN_BALANCE_ARRAY_KEYS` / `_REMAIN_FIELDS`）、指纹扫描与三级回退链
+> **全部保留作兜底**，但主路径是上述嵌套口径。真机样例：endpoint=0 包
+> limit 2000 / consumed 2000 → 通用池 **0**；endpoint=1 包 limit 2000 /
+> `usage:{}` → Work 池 **2000**。
 >
-> 这三处的调试出口是 `TraeCnCreditsOptions.onDebug`，在 RPC 分发处接到
+> ⚠️ **T8 仍待校准**：领取响应里「本次获得积分」的字段名
+> （`TRAE_CN_CLAIM_CREDIT_FIELDS`），未命中时按 0 计并输出一行**只含字段名、
+> 不含值**的日志。status / claim 的其它逻辑真机全通，未动。
+>
+> 两处的调试出口是 `TraeCnCreditsOptions.onDebug`，在 RPC 分发处接到
 > `ctx.logger.info`（**看宿主日志，面板上看不到**），输出一律只有键名与结构判定。
-> 真机各跑一次即可把候选表收敛成唯一形态。

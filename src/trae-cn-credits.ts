@@ -132,17 +132,21 @@ const CODE_TRANSPORT_FAILED = -1
 
 // ── 积分池 ──
 
-/** 通用积分池（`available_endpoint === 0`）—— chat 实际扣的就是它。 */
+/** 通用积分池（`available_endpoint === 0`）—— IDE 对话实际扣的就是它。 */
 export const TRAE_CN_POOL_UNIVERSAL = 0
-/** Work 积分池（`available_endpoint === 1`）—— 与通用池**不可合并展示**。 */
+/**
+ * Work 积分池（`available_endpoint === 1`）—— 与通用池**不可合并展示**。
+ *
+ * 口径见 {@link TraeCnCreditBalance}：它**只在 TraeWork 里能花**。
+ */
 export const TRAE_CN_POOL_WORK = 1
 
 /**
  * 积分池展示名。
  *
- * 两个池**必须分开显示**（如「通用 154.22 / Work 2000」）：
- * chat 只扣通用池，合并成一个数会让用户以为 Work 那部分可以用来对话，
- * 从而对「明明显示还有 2000 却说余额不足」感到莫名其妙。
+ * 两个池**必须分开显示**（如「通用 154.22 / Work 2000」），因为它们的**可用范围
+ * 不同**（口径见 {@link TraeCnCreditBalance}）：Work 专属积分只在 TraeWork 里
+ * 能花，合并成一个数会让用户以为那部分能拿来对话。
  */
 export function traeCnPoolName(endpoint: number): string {
   if (endpoint === TRAE_CN_POOL_UNIVERSAL) return '通用积分'
@@ -600,9 +604,20 @@ export interface TraeCnCreditPool {
 /**
  * Trae CN 的余额结果：在共用 {@link CreditBalance} 之上**追加**双池信息。
  *
- * 追加而非改写 `total` 的语义：`total` 仍是**主数字**（通用池，chat 实际扣的
- * 就是它），另给 `workTotal` 与 `pools` 让 UI 能按「通用 154.22 / Work 2000」
- * 分开展示。**绝不把两池相加** —— 那会让用户以为 Work 的额度可以用来对话。
+ * ## 双池语义（**准确版**，取代早先的「chat 只扣通用池」简写）
+ *
+ * - **Work 专属积分只在 TraeWork 里能花**（`work.trae.cn` 网页版 / 桌面版）；
+ * - **TraeCode / IDE 对话只消耗通用积分**（也就是本适配器走的那条路径）；
+ * - 在 TraeWork 中，两类积分按**到期时间先后**扣；Work 专属积分**仅在到期时间
+ *   相同时**才优先；
+ * - **2026-09 起签到发的是通用积分**（不是 Work 专属）。
+ *
+ * 展示口径因此是：`total` 仍是**主数字**（通用池，本插件唯一能用掉的那个），
+ * 另给 `workTotal` 与 `pools` 让 UI 能按「通用 154.22 / Work 2000」分开展示。
+ * **绝不把两池相加** —— 相加等于向用户暗示 Work 额度能用来对话。
+ *
+ * （早先注释写「chat 只扣通用池」，方向正确但过窄：它把「Work 在 TraeWork 里
+ * 能花」这半边事实省掉了，读者会以为 Work 积分是纯装饰。）
  */
 export interface TraeCnCreditBalance extends CreditBalance {
   /** 各积分池明细（至少一项；未出现的池不会凭空补 0 项）。 */
@@ -867,8 +882,10 @@ function parseTraeCnPackage(record: Record<string, unknown>): ParsedPackage {
  * 返回 `null` 表示**查不到**（网络 / 信封 / 业务码异常 / 找不到礼包数组），
  * 与「余额为 0」严格区分 —— 失败时 UI 应显示原因而不是 0。
  *
- * `total` = **通用池**（endpoint=0）有效礼包余额之和，是卡片的主数字；
- * Work 池（endpoint=1）走 {@link TraeCnCreditBalance.workTotal}，**不并入** total。
+ * `total` = **通用池**（endpoint=0）有效礼包余额之和，是卡片的主数字
+ * （本插件能实际用掉的就是它）；Work 池（endpoint=1）走
+ * {@link TraeCnCreditBalance.workTotal}，**不并入** total —— 它的可用范围
+ * 只在 TraeWork，口径见 {@link TraeCnCreditBalance}。
  */
 export async function fetchTraeCnCreditBalance(
   credential: TraeCnCredential,

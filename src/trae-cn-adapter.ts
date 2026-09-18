@@ -17,8 +17,9 @@
  * | 鉴权 | `Cloud-IDE-JWT <access>` + 同值 `X-Ide-Token` / `X-Cloudide-Token` |
  * | `stream` | **恒为 `true`** —— chat 端点只返回 SSE |
  * | 错误判定 | **按 SSE 业务码**，不按 HTTP 状态码（几乎恒为 200），见 `src/trae-cn-errors.ts` |
- * | 端点 | `TRAE_CN_CHAT_PATH` 常量 + 候选表；**待真机校准**，见该常量的说明 |
- * | 图片 | **不支持**，`inputModalities` 恒为 `['text']`（未实测） |
+ * | 端点 | **IDE 网关** `TRAE_CN_IDE_API_BASE` + `TRAE_CN_CHAT_PATH`（T6 已校准：路径本就对，错的是 host） |
+ * | 网关头 | 必须带齐 `x-app-id` / 纯数字 `x-ide-version-code` 等全套（缺了 500/401），见 `chatHeaders` |
+ * | 图片 | **按模型给**：真机目录 12/16 项多模态 → `['text','image']`，其余 `['text']` |
  * | 思考等级 | 仅透传 `reasoning_effort`，不主动补档 |
  *
  * 可原样复用的只有 `src/sse.ts` 的工具函数（它们处理的是 harness 侧的协议层
@@ -34,8 +35,22 @@ import type {
 import { AccountPool } from './account-pool.js'
 import { isTraeCnExpired, traeCnAccessHeaders } from './trae-cn-oauth.js'
 import type { TraeCnCredential } from './trae-cn-oauth.js'
-import { TRAE_CN, TRAE_CN_CHAT_PATH } from './trae-cn-product.js'
+import {
+  TRAE_CN,
+  TRAE_CN_CHAT_PATH,
+  TRAE_CN_GATEWAY_USER_AGENT,
+  TRAE_CN_IDE_API_BASE,
+  TRAE_CN_IDE_APP_ID,
+  TRAE_CN_IDE_GATEWAY_VERSION,
+  TRAE_CN_IDE_VERSION_CODE,
+  TRAE_CN_IDE_VERSION_TYPE,
+  TRAE_CN_REQUEST_TRAFFIC_TYPE,
+} from './trae-cn-product.js'
 import type { TraeCnProduct } from './trae-cn-product.js'
+// 设备四件套的两个形态常量**复用 credits 模块**（同一条客户端形态伪装口径）：
+// 两处各写一份会在其中一处校准时悄悄分叉，而网关与签到端点对客户端形态的
+// 判定口径本来就该是同一个。
+import { TRAE_CN_DEVICE_TYPE, TRAE_CN_OS_VERSION } from './trae-cn-credits.js'
 import {
   classifyTraeCnError,
   recordsTraeCnCooldown,
@@ -66,45 +81,92 @@ export interface TraeCnFallbackModel {
   /** 展示名。 */
   name: string
   /**
-   * 上下文窗口（**估计值，非远端权威值**）。
+   * 上下文窗口（**真机目录给出的开发档，非估计值**）。
    *
-   * ⚠️ **T8**：调研报告给出 41 个模型 id，但**未给出各自的上下文窗口**。
-   * 这里统一填 `131_072`（对齐本插件其它 provider 的取值口径），并在
-   * `resolveModel` 里如实标注它是估计值。真机校准前不宜声称精确。
+   * 真机目录（2026-09-18）为每项给出 `ctx(dev/max)` 两档，本字段取 **dev 档**：
+   * 它是客户端默认实际使用的窗口（如 `262144/1048576` → 262144）。
+   * max 档（多数为 1048576）**刻意不取** —— 目录里它是理论上限，
+   * 而 `resolveModel` 声明的窗口会被 DSH 用来决定何时压缩上下文，
+   * 按上限声明会让压缩迟迟不触发。
    */
   contextWindow: number
+  /**
+   * 是否接受图片输入（真机目录的「多模态」标记，12/16 项为真）。
+   *
+   * 与 `src/product.ts` 的 `supportsImages` 同语义同字段名：适配器据此在
+   * `listModels` / `resolveModel` 里输出 `['text','image']` 或 `['text']`。
+   */
+  supportsImages: boolean
+  /**
+   * 该模型的最大输出 token 数（真机目录的 `max_tokens`：`64000` 或 `32000`）。
+   *
+   * **刻意只记录、不落进 `defaultMaxTokens`**：DSH 的
+   * `LlmResolvedModelInfo.defaultMaxTokens` 会在调用方未给 `maxTokens` 时自动
+   * 填进请求体，而本仓库另外四个 provider 一个都没设该字段
+   * （`grep defaultMaxTokens src/` 零命中）—— 由适配器替用户决定输出上限是
+   * 行为变更，不在本次「目录换真机表」的范围内。
+   * 保留字段是为了让目录与真机逐列对齐（否则后来者会以为目录里本来就没有它）。
+   */
+  maxTokens: number
 }
 
 /**
- * 静态兜底模型目录（**从调研报告实测的 41 项里取核心几项**）。
+ * 静态模型目录 —— **真机 16 项，唯一正确的目录**（2026-09-18）。
  *
- * 取舍说明（任务书要求「报告里说明取舍」）：
- * - 报告实测到 41 项，**全量抄录没有意义** —— 远端 `get_detail_param` 才是权威源，
- *   静态表只在远端失败时顶替（如离线、网关故障、T6 字段名猜错导致解析为空）；
- * - 这里取的是**用户最可能需要的几个家族各一项**：DeepSeek（官方直连）、
- *   GLM、Kimi、Doubao/Seed、MiniMax、Qwen。留一个家族一项而不是把 41 项抄全，
- *   是为了让「兜底表在生效」这件事**在 UI 上一眼可见**（模型选择器只有 8 项而不是
- *   41 项时，用户/排查者立刻知道远端拉取失败了）；
- * - `DeepSeek-V4-Flash-Official` / `DeepSeek-V4-Pro-Official` 是报告里明确给出的
- *   两个**确切 id**（含 `-Official` 后缀），故原样保留；其余按报告的 id 形态
- *   （`glm-5.2` / `kimi-k3` 这类小写连字符风格）取同族代表。
+ * ## 来源
+ *
+ * 真机 `chat_v3` 模型目录（2026-09-18），由 Trae 客户端 **vscdb 缓存**与
+ * **160 处日志事件**互证得到；id / 展示名 / 多模态标记 / max_tokens /
+ * 上下文窗口**逐字符**照抄。id 的形态极不规则（`qwen3.8-flash` 无连字符、
+ * `qwen-3.7-plus` 有、`deepseek-v4.1-flash` 是点号、`minimax-m3` 全小写），
+ * 任何「规整化」都会让请求打到不存在的模型上 —— 故原样保留，不要改写。
+ *
+ * ## 为什么这不是「兜底表」而是权威表
+ *
+ * 远端拉取**不可接**（实测结论，见 `TRAE_CN_MODELS_PATH` 的注释）：
+ * `model_list` 只回 6 项旧池（Doubao-1.5 代）、`batch_get_detail_param` 只回
+ * 4 个 seed 配置，18 项新池在任何 HTTP 端点都不出现（~200 种形状全排除）——
+ * 官方客户端靠 `harness.dll` 内嵌静态映射 + 本地缓存，没有可调用的接口。
+ * 故 `fetchRemoteModels` **刻意不接线**，本表就是模型目录本身。
+ *
+ * ## 4 个旧死 id 的下落（原 8 项静态表里的）
+ *
+ * | 旧 id | 现状 |
+ * |---|---|
+ * | `qwen3.7-max` | **已下线**（真机目录里没有它） |
+ * | `deepseek-v4-flash` | 拼写错误的近似形态（真机是 `deepseek-v4.1-flash`） |
+ * | `doubao-seed-2-1-pro` | 同上（真机是 `Doubao-Seed-2.1-Pro`） |
+ * | `MiniMax-M3` | 大小写错误的近似形态（真机是 `minimax-m3`） |
+ *
+ * 真机目录里**没有** `deepseek//deepseek-chat` 与 `deepseek//deepseek-reasoner`：
+ * 那两个是账号自定义的 BYOK 条目，不属于云端目录，故**排除**。
  */
 export const TRAE_CN_FALLBACK_MODELS: readonly TraeCnFallbackModel[] = [
-  { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek V4 Flash (官方)', contextWindow: 131_072 },
-  { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek V4 Pro (官方)', contextWindow: 131_072 },
-  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', contextWindow: 131_072 },
-  { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 131_072 },
-  { id: 'kimi-k3', name: 'Kimi K3', contextWindow: 131_072 },
-  { id: 'doubao-seed-2-1-pro', name: 'Doubao Seed 2.1 Pro', contextWindow: 131_072 },
-  { id: 'MiniMax-M3', name: 'MiniMax M3', contextWindow: 131_072 },
-  { id: 'qwen3.7-max', name: 'Qwen3.7 Max', contextWindow: 131_072 },
+  { id: 'Doubao-Seed-Evolving', name: 'Seed-Evolving', supportsImages: true, contextWindow: 262_144, maxTokens: 64_000 },
+  { id: 'Doubao-Seed-2.1-Pro', name: 'Seed-2.1-Pro-0915', supportsImages: true, contextWindow: 262_144, maxTokens: 64_000 },
+  { id: 'Doubao-Seed-2.1-Turbo', name: 'Seed-2.1-Turbo', supportsImages: true, contextWindow: 262_144, maxTokens: 32_000 },
+  { id: 'Doubao-Seed-Code', name: 'Seed-Code', supportsImages: true, contextWindow: 262_144, maxTokens: 32_000 },
+  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000 },
+  { id: 'glm-5.3', name: 'GLM-5.3', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000 },
+  { id: 'glm-5.2', name: 'GLM-5.2', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000 },
+  { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000 },
+  { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000 },
+  { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000 },
+  { id: 'kimi-k3', name: 'Kimi-K3', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
+  { id: 'kimi-k2.8-preview', name: 'Kimi-K2.8-Preview', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
+  { id: 'minimax-m3', name: 'MiniMax-M3', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000 },
+  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
+  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
+  { id: 'qwen-3.7-plus', name: 'Qwen3.7-Plus', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
 ]
 
 /**
- * Trae CN 远端模型条目。
+ * Trae CN 远端模型条目（**当前没有生产调用方**，见 {@link parseTraeCnModels}）。
  *
- * 远端 `POST /api/ide/v1/get_detail_param` 返回 41 项，除 id/展示名外还带
- * `display_contact_config.consumption_rate.data.rate`（消耗倍率）。
+ * 曾据调研认为远端 `POST /api/ide/v1/get_detail_param` 会返回 41 项、除 id/展示名
+ * 外还带 `display_contact_config.consumption_rate.data.rate`（消耗倍率）。
+ * 后续真机实测推翻了这条（该端点只回 seed 配置，见 `TRAE_CN_MODELS_PATH`），
+ * 本类型与解析器因此成为**未接线的备用路径**。
  *
  * **倍率刻意不塞进 `LlmModelInfo`**：DSH 的该接口只有
  * `provider` / `id` / `name` / `description` / `inputModalities` 五个字段
@@ -123,11 +185,13 @@ export interface TraeCnRemoteModel {
 /**
  * 解析 `get_detail_param` 的响应。
  *
- * ⚠️ **T6 待校准**：调研报告给出了端点与「41 项」这个数量，但**未给出每个条目的
- * 确切字段名与信封层级**。这里按客户端里出现过的形态做**容忍式读取**：从若干
- * 候选键里取第一个可用的 id 与展示名，信封层级也做多形态尝试。全部落空时返回
- * 空数组 —— 调用方据此回退静态表，而不是拿到一堆 id 为空串的条目。
- * 真机一次请求即可把候选收敛成唯一形态。
+ * ⚠️ **当前无调用方**（远端目录刻意不接线，见 `TRAE_CN_MODELS_PATH` 的说明）——
+ * 保留它是为了真接线时仍有入口。字段名候选表是从客户端响应形态推出来的，
+ * **尚未用真机响应校准过**（真机拿不到新池，见 README 的「模型目录」小节）。
+ *
+ * 读取策略是**容忍式**：从若干候选键里取第一个可用的 id 与展示名，信封层级也做
+ * 多形态尝试。全部落空时返回空数组 —— 调用方据此回退静态表，而不是拿到一堆
+ * id 为空串的条目。
  */
 export function parseTraeCnModels(body: unknown): TraeCnRemoteModel[] {
   const list = locateModelArray(body)
@@ -351,18 +415,36 @@ export class TraeCnAdapter extends LlmAdapter {
   }
 
   /**
-   * 静态兜底模型目录。
+   * 静态模型目录。
    *
-   * **不做 buddy 那样的「以兜底表为准」裁剪**（`reconcileWithFallback`）：远端接口是
-   * **权威的**，远端可用时应完全采信，兜底只在远端整体失败时顶替。
+   * **不做 buddy 那样的「以兜底表为准」裁剪**（`reconcileWithFallback`）：远端接口若
+   * 将来接通，远端是**权威的**，静态表只在远端整体失败时顶替。
+   *
+   * 返回值保留 `supportsImages`：模态要在 `listModels` / `resolveModel` 里如实输出，
+   * 不能在这一步就抹成 `{id,name}`。类型与 {@link TraeCnRemoteModel} 的
+   * `supportsImages?` 对齐（可选），两来源才能在同一处按同一判据读模态。
    */
-  private staticFallbackModels(): readonly { id: string; name: string }[] {
-    return TRAE_CN_FALLBACK_MODELS.map((model) => ({ id: model.id, name: model.name }))
+  private staticFallbackModels(): readonly { id: string; name: string; supportsImages?: boolean }[] {
+    return TRAE_CN_FALLBACK_MODELS.map((model) => ({
+      id: model.id, name: model.name, supportsImages: model.supportsImages,
+    }))
+  }
+
+  /**
+   * 模型接受的输入模态。
+   *
+   * 真机目录（2026-09-18）逐项标了多模态：**12/16 项支持图片**。远端若接通且
+   * 未带该能力字段，则**保守判为纯文本** —— 目录里没有的能力不该被假定存在
+   * （与 `stream()` 的图片拦截同向：宁可报 UNSUPPORTED_CONTENT，也不静默丢图）。
+   */
+  private inputModalitiesFor(supportsImages: boolean | undefined): readonly ['text'] | readonly ['text', 'image'] {
+    return supportsImages === true ? ['text', 'image'] : ['text']
   }
 
   async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
     await this.ensureRemoteModels()
-    const source = this.remoteModels ?? this.staticFallbackModels()
+    const source: readonly { id: string; name: string; supportsImages?: boolean }[]
+      = this.remoteModels ?? this.staticFallbackModels()
     // 用户在 Account Hub 关闭的模型（黑名单制：不在表里即默认打开）。
     const disabled = this.options.accountPool?.disabledModelsFor(this.product.id)
     const listed = disabled === undefined || disabled.size === 0
@@ -372,23 +454,25 @@ export class TraeCnAdapter extends LlmAdapter {
       provider: this.product.id,
       id: model.id,
       name: model.name,
-      // 图片输入未实测支持，一律只报文本。
-      inputModalities: ['text'] as const,
+      // 模态按目录条目给（真机 12/16 项多模态）；远端条目无该字段时判纯文本。
+      inputModalities: this.inputModalitiesFor(model.supportsImages),
     }))
   }
 
   async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     await this.ensureRemoteModels()
     const remoteName = this.remoteModels?.find((entry) => entry.id === model)?.name
+    const entry = this.fallbackIndex.get(model)
     const resolved: LlmResolvedModelInfo = {
       provider,
       id: model,
-      name: remoteName ?? this.fallbackIndex.get(model)?.name ?? model,
-      inputModalities: ['text'],
+      name: remoteName ?? entry?.name ?? model,
+      // 模态与 `listModels` **同源同口径**：两处都读静态表条目的 supportsImages，
+      // 否则选择器显示「支持图片」而请求路径按纯文本处理（或反之），是自相矛盾。
+      inputModalities: this.inputModalitiesFor(entry?.supportsImages),
     }
-    // 上下文窗口：只用兜底表的值（远端目录不含该字段，见 TraeCnFallbackModel 的 T8 说明）。
-    const contextWindow = this.fallbackIndex.get(model)?.contextWindow
-    if (contextWindow !== undefined) resolved.context = { contextWindow }
+    // 上下文窗口：静态表的值来自真机目录的 dev 档（见 TraeCnFallbackModel）。
+    if (entry !== undefined) resolved.context = { contextWindow: entry.contextWindow }
     // 思考等级：**刻意不声明**。Trae 是否支持 `reasoning_effort` 未实测；不声明时
     // 模型选择器会显示「当前模型未提供推理等级」，这是诚实的；声明了却无效会让
     // 用户以为档位生效了。
@@ -414,8 +498,16 @@ export class TraeCnAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    // 图片：未实测支持，明确报错而不是静默丢弃（静默丢弃会让用户以为模型看到了
-    // 图片）。检查在取凭据之前，省掉一次无谓的凭据读取。
+    // 图片：目录里 12/16 项标了多模态，但**本适配器的图片通路未实测**
+    // （`serializeTraeCnMessages` 只展平文本块，没有把 image 块编码成上游要的
+    // 形态）。故这里明确报错而不是静默丢弃 —— 静默丢弃会让用户以为模型看到了
+    // 图片，那比报错更糟。
+    //
+    // ⚠️ 与 `inputModalities` 的关系（**有意的不一致**，不要「顺手」改掉）：
+    // 目录照实报 `['text','image']`（那是模型的能力），而请求路径仍拒绝图片
+    // （那是本适配器的能力）。DSH 会在路由层按 `inputModalities` 把图片投影成
+    // 文本占位（`projectImagesForTextModel`），所以正常调用到不了这里；
+    // 这条抛错是**最后一道防线**，防的是绕过路由层直接调 `stream()` 的路径。
     for (const message of options.messages) {
       if (!Array.isArray(message.content)) continue
       const hasImage = message.content.some((block) =>
@@ -680,18 +772,60 @@ export class TraeCnAdapter extends LlmAdapter {
     return JSON.stringify(body)
   }
 
+  /**
+   * 构造 chat 请求头（鉴权三头 + **IDE 网关全套**）。
+   *
+   * ## 网关头不是可选项（T6 真机校准，2026-09-18）
+   *
+   * 实测该网关按这几个头判定客户端形态：**缺了直接 500 / 401，带齐才 200**。
+   * 故它们与 `Authorization` 同级，而不是「遥测/统计字段」。
+   *
+   * | 头 | 值 | 备注 |
+   * |---|---|---|
+   * | `x-app-id` | {@link TRAE_CN_IDE_APP_ID} | 官方 product.json |
+   * | `x-ide-version-code` / `x-app-version-code` | `107` | **必须纯数字**，`3.3.100` 会 400 |
+   * | `x-ide-version` | `1.107.1` | 与登录用的 `3.3.100` **不是一个号** |
+   * | `x-ide-version-type` | `stable` | |
+   * | `request-traffic-type` | `normal` | |
+   * | `x-device-id` | 凭据的 `device_id` | 与签到头**同源**（同一账号同一设备） |
+   * | `x-device-type` / `x-os-version` | 与 credits 模块**同常量** | 见文件头的 import 说明 |
+   * | `User-Agent` | `TraeClient/TTNet` | 官方客户端 UA，不是浏览器 UA |
+   *
+   * `Accept: text/event-stream` 由 `traeCnAccessHeaders` 的 accept 参数给出。
+   */
+  private chatHeaders(credential: TraeCnCredential): Record<string, string> {
+    return {
+      // 三个等值 token 头（Authorization: Cloud-IDE-JWT + X-Ide-Token + X-Cloudide-Token）
+      // 由 oauth 模块统一构造：chat 与签到/续费走同一份鉴权形态。
+      ...traeCnAccessHeaders(credential, 'text/event-stream'),
+      'x-app-id': TRAE_CN_IDE_APP_ID,
+      'x-ide-version-code': TRAE_CN_IDE_VERSION_CODE,
+      'x-app-version-code': TRAE_CN_IDE_VERSION_CODE,
+      'x-ide-version': TRAE_CN_IDE_GATEWAY_VERSION,
+      'x-ide-version-type': TRAE_CN_IDE_VERSION_TYPE,
+      'request-traffic-type': TRAE_CN_REQUEST_TRAFFIC_TYPE,
+      // 设备号**取自凭据**（与签到端点同一个字段），不是登录 URL 里那个随机 16 位号
+      // —— 后者只参与登录握手，不是设备身份（见 TraeCnCredential.device_id）。
+      'x-device-id': credential.device_id,
+      'x-device-type': TRAE_CN_DEVICE_TYPE,
+      'x-os-version': TRAE_CN_OS_VERSION,
+      'User-Agent': TRAE_CN_GATEWAY_USER_AGENT,
+    }
+  }
+
   /** 发起一次 chat 请求；网络失败映射为可重试的 TRANSPORT 错误。 */
   private async send(
     credential: TraeCnCredential,
     body: string,
     options: GenerateOptions,
   ): Promise<Response> {
-    // `Accept: text/event-stream` 由 traeCnAccessHeaders 的 accept 参数给出。
     // 注意：这里不用 `new Headers(...)` —— Headers 构造器会丢弃/规范化部分头，
     // 普通对象逐字传递（与 credits 模块一致），避免两处请求头形态不一致。
-    const headers = traeCnAccessHeaders(credential, 'text/event-stream')
+    const headers = this.chatHeaders(credential)
     try {
-      return await this.fetchImpl(`${this.product.apiBase}${TRAE_CN_CHAT_PATH}`, {
+      // **IDE 网关**而非 `product.apiBase`：`/api/ide/*` 在 api.trae.cn 上 404
+      // （T6 的真实病因，见 TRAE_CN_IDE_API_BASE 的注释）。
+      return await this.fetchImpl(`${TRAE_CN_IDE_API_BASE}${TRAE_CN_CHAT_PATH}`, {
         method: 'POST',
         headers,
         body,

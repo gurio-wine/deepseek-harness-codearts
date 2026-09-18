@@ -212,7 +212,8 @@ describe('CreditBalanceRow 的双池形态（Trae CN）', () => {
   })
 
   it('Work 项用独立 class，不套用通用主数字的高亮样式', () => {
-    // chat 只扣通用池；Work 若也渲染成高亮蓝，用户会以为它同样可用于对话。
+    // Work 专属积分只在 TraeWork 能花（IDE 对话只消耗通用池）；
+    // Work 若也渲染成高亮蓝，用户会以为它同样可用于对话。
     const node = CreditBalanceRow({
       balance: legacyBalance({ total: 1, workTotal: 2 }),
     }) as RowNode

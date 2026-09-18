@@ -37,6 +37,13 @@ import {
 import {
   TRAE_CN_CHAT_PATH,
   TRAE_CN_CHAT_PATH_CANDIDATES,
+  TRAE_CN_GATEWAY_USER_AGENT,
+  TRAE_CN_IDE_API_BASE,
+  TRAE_CN_IDE_APP_ID,
+  TRAE_CN_IDE_GATEWAY_VERSION,
+  TRAE_CN_IDE_VERSION_CODE,
+  TRAE_CN_IDE_VERSION_TYPE,
+  TRAE_CN_REQUEST_TRAFFIC_TYPE,
   TRAE_CN,
 } from '../../src/trae-cn-product.js'
 import {
@@ -523,19 +530,76 @@ describe('TraeCnAdapter providerInfo', () => {
 })
 
 describe('TraeCnAdapter 模型目录', () => {
-  it('无远端时用静态兜底表', async () => {
+  it('静态表为真机 16 项（不是 8 项），且 id 逐字符等于真机目录', async () => {
     const { adapter } = makeAdapter(() => sseResponse(''))
     const models = await adapter.listModels('trae-cn')
-    expect(models).toHaveLength(TRAE_CN_FALLBACK_MODELS.length)
-    expect(models.map((m) => m.id)).toContain('DeepSeek-V4-Flash-Official')
+    expect(models).toHaveLength(16)
+    // 真机 id 形态极不规则（大小写/点号/连字符混用），逐项锁死防「顺手规整化」。
+    expect(models.map((m) => m.id)).toEqual([
+      'Doubao-Seed-Evolving',
+      'Doubao-Seed-2.1-Pro',
+      'Doubao-Seed-2.1-Turbo',
+      'Doubao-Seed-Code',
+      'glm-5.3-flash',
+      'glm-5.3',
+      'glm-5.2',
+      'deepseek-v4.1-flash',
+      'DeepSeek-V4-Flash-Official',
+      'DeepSeek-V4-Pro-Official',
+      'kimi-k3',
+      'kimi-k2.8-preview',
+      'minimax-m3',
+      'qwen3.8-flash',
+      'qwen3.8-max',
+      'qwen-3.7-plus',
+    ])
   })
 
-  it('inputModalities 恒为 text（图片未实测支持）', async () => {
+  it('**4 个旧死 id 已不在表中**（换真机表的核心目的）', async () => {
     const { adapter } = makeAdapter(() => sseResponse(''))
-    for (const model of await adapter.listModels('trae-cn')) {
-      expect(model.inputModalities).toEqual(['text'])
-      expect(model.provider).toBe('trae-cn')
+    const ids = (await adapter.listModels('trae-cn')).map((m) => m.id)
+    // qwen3.7-max 已下线；其余三个是拼写/大小写错误的近似形态 ——
+    // 它们曾经让用户选中一个必然 404 的模型。
+    for (const dead of ['qwen3.7-max', 'deepseek-v4-flash', 'doubao-seed-2-1-pro', 'MiniMax-M3']) {
+      expect(ids, dead).not.toContain(dead)
     }
+    // 反证：真机形态的「近似但不同」的 id 必须在表里，否则上面那条反断言
+    // 可能因为整表为空而假通过。
+    for (const live of ['deepseek-v4.1-flash', 'Doubao-Seed-2.1-Pro', 'minimax-m3']) {
+      expect(ids, live).toContain(live)
+    }
+  })
+
+  it('**排除 BYOK 自定义条目**（deepseek//deepseek-chat / -reasoner 不属云端目录）', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''))
+    const ids = (await adapter.listModels('trae-cn')).map((m) => m.id)
+    for (const byok of ['deepseek//deepseek-chat', 'deepseek//deepseek-reasoner']) {
+      expect(ids).not.toContain(byok)
+    }
+  })
+
+  it('静态表逐项带 supportsImages 与 maxTokens（目录与真机逐列对齐）', () => {
+    for (const model of TRAE_CN_FALLBACK_MODELS) {
+      expect(typeof model.supportsImages, model.id).toBe('boolean')
+      expect([32_000, 64_000], model.id).toContain(model.maxTokens)
+      expect(model.contextWindow, model.id).toBeGreaterThan(0)
+    }
+    // 真机 12/16 项多模态 —— 数一下，避免整表被改成全 true / 全 false 还绿。
+    expect(TRAE_CN_FALLBACK_MODELS.filter((m) => m.supportsImages)).toHaveLength(12)
+  })
+
+  it('inputModalities 按模型给：多模态项 image，非多模态项只有 text', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''))
+    const byId = new Map((await adapter.listModels('trae-cn')).map((m) => [m.id, m]))
+    for (const model of TRAE_CN_FALLBACK_MODELS) {
+      expect(byId.get(model.id)!.inputModalities, model.id).toEqual(
+        model.supportsImages ? ['text', 'image'] : ['text'],
+      )
+      expect(byId.get(model.id)!.provider).toBe('trae-cn')
+    }
+    // 两边的代表各点一次（防止上面的循环整体失效还绿）。
+    expect(byId.get('kimi-k3')!.inputModalities).toEqual(['text', 'image'])
+    expect(byId.get('glm-5.3')!.inputModalities).toEqual(['text'])
   })
 
   it('远端可用时以远端为准（不做「以兜底表为准」的裁剪）', async () => {
@@ -546,7 +610,7 @@ describe('TraeCnAdapter 模型目录', () => {
     expect(models).toEqual([{ provider: 'trae-cn', id: 'remote-only', name: 'Remote Only', inputModalities: ['text'] }])
   })
 
-  it('远端返回空数组 / 抛错时回退兜底表', async () => {
+  it('远端返回空数组 / 抛错时回退静态表', async () => {
     const empty = makeAdapter(() => sseResponse(''), { fetchRemoteModels: async () => [] })
     expect(await empty.adapter.listModels('trae-cn')).toHaveLength(TRAE_CN_FALLBACK_MODELS.length)
     const failing = makeAdapter(() => sseResponse(''), {
@@ -578,11 +642,23 @@ describe('TraeCnAdapter 模型目录', () => {
 })
 
 describe('TraeCnAdapter resolveModel', () => {
-  it('用兜底表给出上下文窗口', async () => {
+  it('用静态表给出真机目录的上下文窗口（dev 档）', async () => {
     const { adapter } = makeAdapter(() => sseResponse(''))
     expect(await adapter.resolveModel('trae-cn', 'glm-5.2')).toMatchObject({
-      provider: 'trae-cn', id: 'glm-5.2', name: 'GLM-5.2', context: { contextWindow: 131_072 },
+      provider: 'trae-cn', id: 'glm-5.2', name: 'GLM-5.2', context: { contextWindow: 119_040 },
     })
+    // 另一档（262144 / 204800）各点一次，防止整表被改成同一个数还绿。
+    expect((await adapter.resolveModel('trae-cn', 'Doubao-Seed-Evolving')).context)
+      .toEqual({ contextWindow: 262_144 })
+    expect((await adapter.resolveModel('trae-cn', 'qwen3.8-max')).context)
+      .toEqual({ contextWindow: 204_800 })
+  })
+
+  it('resolveModel 的 inputModalities 与 listModels **同源同口径**', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''))
+    // 两处不一致会让选择器显示「支持图片」而请求路径按纯文本处理（或反之）。
+    expect((await adapter.resolveModel('trae-cn', 'kimi-k3')).inputModalities).toEqual(['text', 'image'])
+    expect((await adapter.resolveModel('trae-cn', 'DeepSeek-V4-Pro-Official')).inputModalities).toEqual(['text'])
   })
 
   it('**不声明** reasoning（是否支持思考等级未实测）', async () => {
@@ -590,9 +666,11 @@ describe('TraeCnAdapter resolveModel', () => {
     expect((await adapter.resolveModel('trae-cn', 'glm-5.2')).reasoning).toBeUndefined()
   })
 
-  it('未知模型回退为 id 作展示名且不报错', async () => {
+  it('未知模型回退为 id 作展示名且不报错（模态保守判纯文本）', async () => {
     const { adapter } = makeAdapter(() => sseResponse(''))
-    expect(await adapter.resolveModel('trae-cn', 'brand-new')).toMatchObject({ id: 'brand-new', name: 'brand-new' })
+    expect(await adapter.resolveModel('trae-cn', 'brand-new')).toMatchObject({
+      id: 'brand-new', name: 'brand-new', inputModalities: ['text'],
+    })
   })
 
   it('远端给了展示名时优先用远端', async () => {
@@ -604,17 +682,18 @@ describe('TraeCnAdapter resolveModel', () => {
 })
 
 describe('TraeCnAdapter 请求构造', () => {
-  it('POST 到 {apiBase}{TRAE_CN_CHAT_PATH}', async () => {
+  it('POST 到 **IDE 网关**（不是 api.trae.cn）', async () => {
     const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
     await collect(adapter, generateOptions())
     expect(calls).toHaveLength(1)
-    expect(calls[0]!.url).toBe(`https://api.trae.cn${TRAE_CN_CHAT_PATH}`)
+    expect(calls[0]!.url).toBe(`${TRAE_CN_IDE_API_BASE}${TRAE_CN_CHAT_PATH}`)
+    // T6 的真实病因是 host 而非路径：`/api/ide/*` 在 api.trae.cn 上 404。
+    expect(new URL(calls[0]!.url).host).toBe('trae-api-cn.mchost.guru')
+    expect(new URL(calls[0]!.url).origin).not.toBe(TRAE_CN.apiBase)
     expect(calls[0]!.init?.method).toBe('POST')
   })
 
-  it('端点常量与候选表一致（待校准项：改动时必须同步候选表）', () => {
-    // 这条断言的意义：`TRAE_CN_CHAT_PATH` 是 T6 待校准值，真机证伪后要改；
-    // 若只改常量忘了候选表，排查者会照着一份过期清单试错。
+  it('端点常量与候选表一致（历史留痕：改动时必须同步候选表）', () => {
     expect(TRAE_CN_CHAT_PATH_CANDIDATES).toContain(TRAE_CN_CHAT_PATH)
     expect(TRAE_CN_CHAT_PATH_CANDIDATES[0]).toBe(TRAE_CN_CHAT_PATH)
   })
@@ -633,6 +712,26 @@ describe('TraeCnAdapter 请求构造', () => {
     for (const name of ['X-Domain', 'X-Product-Code', 'X-Product', 'X-LobsterAI-Client-Version']) {
       expect(headers[name]).toBeUndefined()
     }
+  })
+
+  it('**带齐 IDE 网关全套头**（缺了实测 500/401）', async () => {
+    const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
+    await collect(adapter, generateOptions())
+    const headers = calls[0]!.init?.headers as Record<string, string>
+    expect(headers['x-app-id']).toBe(TRAE_CN_IDE_APP_ID)
+    expect(headers['x-app-id']).toBe('6eefa01c-1036-4c7e-9ca5-d891f63bfcd8')
+    // 版本号**必须纯数字**：真机发 "3.3.100" 会 400。
+    expect(headers['x-ide-version-code']).toBe('107')
+    expect(headers['x-app-version-code']).toBe('107')
+    expect(headers['x-ide-version-code']).toMatch(/^\d+$/)
+    expect(headers['x-ide-version']).toBe('1.107.1')
+    expect(headers['x-ide-version-type']).toBe('stable')
+    expect(headers['request-traffic-type']).toBe('normal')
+    expect(headers['User-Agent']).toBe('TraeClient/TTNet')
+    // 设备头取自凭据的 device_id（与签到端点同一个字段，不是登录 URL 的随机号）。
+    expect(headers['x-device-id']).toBe('1234567890123456')
+    expect(headers['x-device-type']).toBe('windows')
+    expect(headers['x-os-version']).toMatch(/^Windows 10\.0\.\d+$/)
   })
 
   it('body：model / messages / stream 恒为 true', async () => {

@@ -40,12 +40,12 @@
  *
  * 本模块只做**登录 + 凭据 + 续期请求**，不含：LLM 适配器、签到、积分余额。
  *
- * ## 待校准点（T9）
+ * ## ✅ T9 已校准（2026-09-18）
  *
- * 签到请求的 `x-device-id` 该用哪个号仍未定论：真机**第一轮实测成功**用的是
- * 16 位十进制的设备号，而 exchange 返回的 `BoundDeviceID` 形态完全不同
- * （`wl2k1e2endpp32`）。本模块按证据把 `BoundDeviceID` 存进凭据的 `device_id`，
- * 签到侧若拿到 `9004` 再按日志校准。见 {@link TraeCnCredential.device_id}。
+ * 签到请求的 `x-device-id` 用**凭据里的 `device_id`**（即 exchange 返回的
+ * `BoundDeviceID`，如 `wl2k1e2endpp32`）。真机实测 status / claim
+ * **都不校验设备号形态**（16 位十进制号 / `BoundDeviceID` / 空串返回逐字节相同），
+ * 故「该用哪个号」这个悬念已消解。见 {@link TraeCnCredential.device_id}。
  */
 
 import { createServer, type Server } from 'node:http'
@@ -233,17 +233,21 @@ export interface TraeCnCredential {
    * `Result.DeviceBindStatus: "BOUND"`；它**不是**客户端上报的 `DeviceID`
    * （16 位十进制）或 `MachineID`（64 hex）的回显。
    *
-   * ## ⚠️ T9 待校准：签到该用哪个号
+   * ## ✅ T9 已校准（2026-09-18）：签到不校验设备号形态
    *
    * 签到端点的 `x-device-id` 读的就是本字段（`src/trae-cn-credits.ts`）。
-   * 而真机**第一轮签到实测成功**时用的是 16 位十进制的设备号，与
-   * `BoundDeviceID` 形态不同 —— 即「签到认哪个号」尚无定论。
-   * 若签到返回 `code:9004`（设备校验失败），按本字段与日志校准；
-   * 届时的候选是「exchange 响应里的其它设备字段」或「客户端设备注册服务
-   * 的 16 位号」，**不是** `MachineID`（形态不符，且它是遥测机器号）。
+   * 真机实测 status / claim **都不校验设备号形态**：16 位十进制号、本字段、
+   * 空串三者返回**逐字节相同**；只有**完全不带设备头**时才出现
+   * `did_checked_in:false`（这恰好印证它是设备级语义）。
+   *
+   * 故「签到该用哪个号」这个悬念已消解 —— 用本字段即可。
+   * 若仍拿到 `code:9004`，那意味着服务端不认可我们构造的设备**身份**
+   * （此时按 `x-os-version` / `x-app-version` 的实测值校准），
+   * **不是** `MachineID` 的问题（形态不符，且它是遥测机器号），
+   * 也**不要**拿 `machine_id` 折算一个假的 16 位号顶上。
    *
    * 走到兼容分支（回调给 refreshToken、无 exchange 响应）时本字段为**空串** ——
-   * 如实留空，绝不拿 `machine_id` 折算一个假的 16 位号顶上。
+   * 如实留空；按上面的实测结论，空串同样能签到成功。
    */
   device_id: string
   /** 机器号（五件套之一，64 位小写十六进制）；登录 URL 的 `machine_id` 用之。 */
