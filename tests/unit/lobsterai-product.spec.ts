@@ -73,17 +73,16 @@ describe('LobsterAI 产品配置', () => {
 })
 
 describe('LobsterAI 兜底模型目录', () => {
-  it('含 19 个模型（对齐 handler.go 的 staticModels 数量）', () => {
-    expect(LOBSTERAI.fallbackModels).toHaveLength(19)
+  it('含 27 个模型（对齐 2026-09-19 真机 /api/models/available）', () => {
+    expect(LOBSTERAI.fallbackModels).toHaveLength(27)
   })
 
-  it('每个条目的 id / name / contextWindow 均完整有效', () => {
+  it('每个条目的 id / name 均完整有效', () => {
     for (const model of LOBSTERAI.fallbackModels) {
       expect(typeof model.id).toBe('string')
       expect(model.id.length).toBeGreaterThan(0)
       expect(typeof model.name).toBe('string')
       expect(model.name.length).toBeGreaterThan(0)
-      expect(model.contextWindow).toBeGreaterThan(0)
     }
   })
 
@@ -92,26 +91,63 @@ describe('LobsterAI 兜底模型目录', () => {
     expect(new Set(ids).size).toBe(ids.length)
   })
 
-  it('覆盖四家厂商的实测模型', () => {
+  it('展示名取自真机 modelName（不是裸 id）', () => {
+    // 旧表把 name 也填成 id，选择器里全是 `qwen3.7-max` 这种裸 id。
+    const byId = new Map(LOBSTERAI.fallbackModels.map((m) => [m.id, m.name]))
+    expect(byId.get('deepseek-flash')).toBe('DeepSeek-V4.1-Flash')
+    expect(byId.get('qwen3.7-max')).toBe('Qwen3.7-Max')
+    expect(byId.get('kimi-k2.6')).toBe('Kimi-K2.6')
+  })
+
+  it('覆盖真机新增的 9 项', () => {
     const ids = new Set(LOBSTERAI.fallbackModels.map((m) => m.id))
-    for (const id of ['deepseek-v4-flash', 'deepseek-v4-pro', 'MiniMax-M3', 'qwen3.7-max',
-      'kimi-k2.6', 'glm-5.2', 'doubao-seed-2-1-pro-260628']) {
+    for (const id of ['deepseek-flash', 'glm-5.3-flashx', 'glm-5.3-flash', 'glm-5.3',
+      'qwen3.8-max', 'qwen3.8-flash', 'qwen3.8-omni-flash',
+      'doubao-seed-2-1-pro-260915', 'deepseek-v4-flash-vision-exp']) {
       expect(ids.has(id), id).toBe(true)
     }
   })
 
-  it('顺序照抄 Go 原表（保持与上游对比时的可比性）', () => {
-    expect(LOBSTERAI.fallbackModels[0]!.id).toBe('deepseek-v4-flash')
-    expect(LOBSTERAI.fallbackModels[1]!.id).toBe('deepseek-v4-pro')
-    expect(LOBSTERAI.fallbackModels[18]!.id).toBe('glm-5')
+  it('不含真机已下架的 doubao-seed-2-1-pro-260628', () => {
+    // 真机改名成 …-260915；留着它会让用户选到一个路由不到的条目。
+    const ids = new Set(LOBSTERAI.fallbackModels.map((m) => m.id))
+    expect(ids.has('doubao-seed-2-1-pro-260628')).toBe(false)
   })
 
-  it('contextWindow 全部为桥接层的估计值 131072（非远端权威值）', () => {
-    // 远端 /api/models/available 只返回 modelId/modelName/provider/apiFormat，
-    // 不含窗口大小；131072 是 handler.go 统一填的，待逐个实测校正。
-    for (const model of LOBSTERAI.fallbackModels) {
-      expect(model.contextWindow, model.id).toBe(131_072)
+  it('顺序照抄真机返回顺序（保持与上游对比时的可比性）', () => {
+    expect(LOBSTERAI.fallbackModels[0]!.id).toBe('deepseek-flash')
+    expect(LOBSTERAI.fallbackModels[1]!.id).toBe('deepseek-v4-pro')
+    expect(LOBSTERAI.fallbackModels[26]!.id).toBe('doubao-seed-2-0-code-preview-260215')
+  })
+
+  it('contextWindow 用真机权威值，缺失的条目不编造', () => {
+    // 真机 14 项 1000000、2 项 262144、2 项 256000，其余 9 项为 null（不声明）。
+    const declared = LOBSTERAI.fallbackModels.filter((m) => m.contextWindow !== undefined)
+    expect(declared).toHaveLength(18)
+    for (const model of declared) {
+      expect(model.contextWindow, model.id).toBeGreaterThan(0)
     }
+    expect(LOBSTERAI.fallbackModels.find((m) => m.id === 'glm-5.2')?.contextWindow).toBe(1_000_000)
+    expect(LOBSTERAI.fallbackModels.find((m) => m.id === 'kimi-k2.6')?.contextWindow).toBeUndefined()
+  })
+
+  it('8 项声明思考档位，档位逐字符照抄真机且**剔除 off**', () => {
+    const withEfforts = LOBSTERAI.fallbackModels.filter((m) => m.reasoningEfforts !== undefined)
+    expect(withEfforts).toHaveLength(8)
+    for (const model of withEfforts) {
+      expect(model.reasoningEfforts, model.id).toEqual(['high', 'max'])
+      // off 在 3 个模型上实测返回 HTTP 500，绝不能暴露给用户。
+      expect(model.reasoningEfforts, model.id).not.toContain('off')
+      // 默认档必须在可用档位内（否则 DSH 会 materialize 一个非法档位）。
+      expect(model.reasoningEfforts, model.id).toContain(model.defaultReasoningEffort)
+    }
+  })
+
+  it('其余 19 项不声明思考档位（真机无 thinkingConfig）', () => {
+    const ids = LOBSTERAI.fallbackModels.filter((m) => m.reasoningEfforts === undefined).map((m) => m.id)
+    expect(ids).toHaveLength(19)
+    expect(ids).toContain('qwen3.8-max')
+    expect(ids).toContain('kimi-k2.6')
   })
 })
 

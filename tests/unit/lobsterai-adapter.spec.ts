@@ -83,22 +83,92 @@ async function collect(options: GenerateOptions, adapter: LobsteraiAdapter) {
 }
 
 describe('LobsterAI 模型列表解析', () => {
-  it('解析 data.data 数组（外层信封 + 内层 data 数组）', () => {
-    // 注意双层：外层是统一信封 {code,msg,data}，内层 data 才是模型数组。
+  it('解析 data **直接为数组**（真机实测形状，统一信封 + data 数组）', () => {
+    // ⚠️ 这是「选择器模型比产品少」的根因回归测试。
+    // 真机 `GET /api/models/available` 回的是 `{code:0, msg, data:[…]}`，
+    // data 本身就是模型数组；早期实现按 `data.data` 取值 → 恒返回空数组
+    // → 适配器永远回退静态兜底表（19 项，缺 9 项）。
     expect(parseLobsteraiModels({
       code: 0, msg: 'OK',
-      data: { data: [{ modelId: 'glm-5.2', modelName: 'GLM-5.2', provider: 'p', apiFormat: 'openai' }] },
+      data: [{ modelId: 'glm-5.2', modelName: 'GLM-5.2', provider: 'p', apiFormat: 'openai' }],
     })).toEqual([{ id: 'glm-5.2', name: 'GLM-5.2' }])
   })
 
+  it('兼容 data.data 嵌套形态（代理层包一层时不至于全丢）', () => {
+    expect(parseLobsteraiModels({
+      code: 0, msg: 'OK',
+      data: { data: [{ modelId: 'glm-5.2', modelName: 'GLM-5.2' }] },
+    })).toEqual([{ id: 'glm-5.2', name: 'GLM-5.2' }])
+  })
+
+  it('解析 contextWindow 与 thinkingConfig（思考档的权威来源）', () => {
+    expect(parseLobsteraiModels({
+      code: 0,
+      data: [{
+        modelId: 'deepseek-flash',
+        modelName: 'DeepSeek-V4.1-Flash',
+        contextWindow: 1_000_000,
+        supportsThinking: true,
+        thinkingConfig: {
+          options: [
+            { level: 'off', openclawLevel: 'off' },
+            { level: 'high', openclawLevel: 'high' },
+            { level: 'max', openclawLevel: 'xhigh' },
+          ],
+          defaultLevel: 'high',
+        },
+      }],
+    })).toEqual([{
+      id: 'deepseek-flash',
+      name: 'DeepSeek-V4.1-Flash',
+      contextWindow: 1_000_000,
+      // `off` 被剔除：真机实测它在 3 个模型上返回 HTTP 500（见常量说明）。
+      reasoningEfforts: ['high', 'max'],
+      defaultReasoningEffort: 'high',
+    }])
+  })
+
+  it('contextWindow 为 null 时不声明（不编造窗口）', () => {
+    const [model] = parseLobsteraiModels({
+      code: 0, data: [{ modelId: 'kimi-k2.6', modelName: 'Kimi-K2.6', contextWindow: null }],
+    })
+    expect(model).toEqual({ id: 'kimi-k2.6', name: 'Kimi-K2.6' })
+    expect(model).not.toHaveProperty('contextWindow')
+  })
+
+  it('无 thinkingConfig / supportsThinking=false 的模型不声明档位', () => {
+    const models = parseLobsteraiModels({
+      code: 0,
+      data: [
+        { modelId: 'qwen3.8-max', modelName: 'Qwen3.8-Max' },
+        { modelId: 'x', modelName: 'X', supportsThinking: false, thinkingConfig: { options: [{ level: 'high' }], defaultLevel: 'high' } },
+      ],
+    })
+    expect(models[0]).not.toHaveProperty('reasoningEfforts')
+    expect(models[1]).not.toHaveProperty('reasoningEfforts')
+  })
+
+  it('默认档不在可用档位内时**不下发**默认档（避免 materialize 一个必然失败的档）', () => {
+    // 真机 glm 系 defaultLevel 若为被剔除的 off，必须整体丢掉默认档。
+    const [model] = parseLobsteraiModels({
+      code: 0,
+      data: [{
+        modelId: 'm', modelName: 'M',
+        thinkingConfig: { options: [{ level: 'off' }, { level: 'high' }], defaultLevel: 'off' },
+      }],
+    })
+    expect(model!.reasoningEfforts).toEqual(['high'])
+    expect(model).not.toHaveProperty('defaultReasoningEffort')
+  })
+
   it('缺 modelName 时以 id 兜底', () => {
-    expect(parseLobsteraiModels({ code: 0, data: { data: [{ modelId: 'm1' }] } }))
+    expect(parseLobsteraiModels({ code: 0, data: [{ modelId: 'm1' }] }))
       .toEqual([{ id: 'm1', name: 'm1' }])
   })
 
   it('跳过缺 modelId 的条目', () => {
     expect(parseLobsteraiModels({
-      code: 0, data: { data: [{ modelName: 'x' }, { modelId: 'm1' }] },
+      code: 0, data: [{ modelName: 'x' }, { modelId: 'm1' }],
     })).toEqual([{ id: 'm1', name: 'm1' }])
   })
 
@@ -154,11 +224,11 @@ describe('LobsteraiAdapter providerInfo', () => {
 })
 
 describe('LobsteraiAdapter 模型目录', () => {
-  it('无远端时用产品兜底目录（19 个）', async () => {
+  it('无远端时用产品兜底目录（27 个，对齐 2026-09-19 真机目录）', async () => {
     const { adapter } = makeAdapter(() => textSse('x'))
     const models = await adapter.listModels('lobsterai')
-    expect(models).toHaveLength(19)
-    expect(models[0]).toMatchObject({ provider: 'lobsterai', id: 'deepseek-v4-flash' })
+    expect(models).toHaveLength(27)
+    expect(models[0]).toMatchObject({ provider: 'lobsterai', id: 'deepseek-flash' })
   })
 
   it('inputModalities 恒为 text（图片未实测支持）', async () => {
@@ -169,8 +239,7 @@ describe('LobsteraiAdapter 模型目录', () => {
   })
 
   it('远端可用时以远端为准（不做「以兜底表为准」的裁剪）', async () => {
-    // LobsterAI 的远端接口是权威的（兜底表本身就抄自它），
-    // 与 buddy 的 reconcileWithFallback 语义相反。
+    // LobsterAI 的远端接口是权威的，与 buddy 的 reconcileWithFallback 语义相反。
     const { adapter } = makeAdapter(() => textSse('x'), {
       fetchRemoteModels: async () => [{ id: 'remote-only', name: 'Remote Only' }],
     })
@@ -180,14 +249,14 @@ describe('LobsteraiAdapter 模型目录', () => {
 
   it('远端返回空数组时回退兜底目录', async () => {
     const { adapter } = makeAdapter(() => textSse('x'), { fetchRemoteModels: async () => [] })
-    expect(await adapter.listModels('lobsterai')).toHaveLength(19)
+    expect(await adapter.listModels('lobsterai')).toHaveLength(27)
   })
 
   it('远端抛错时回退兜底目录', async () => {
     const { adapter } = makeAdapter(() => textSse('x'), {
       fetchRemoteModels: async () => { throw new Error('boom') },
     })
-    expect(await adapter.listModels('lobsterai')).toHaveLength(19)
+    expect(await adapter.listModels('lobsterai')).toHaveLength(27)
   })
 
   it('应用账号池的模型黑名单', async () => {
@@ -202,18 +271,54 @@ describe('LobsteraiAdapter 模型目录', () => {
 })
 
 describe('LobsteraiAdapter resolveModel', () => {
-  it('用兜底表给出上下文窗口', async () => {
+  it('用兜底表给出上下文窗口（真机权威值，非早期写死的 131072）', async () => {
     const { adapter } = makeAdapter(() => textSse('x'))
     const resolved = await adapter.resolveModel('lobsterai', 'glm-5.2')
-    expect(resolved.context).toEqual({ contextWindow: 131_072 })
+    expect(resolved.context).toEqual({ contextWindow: 1_000_000 })
   })
 
-  it('**不声明** reasoning（是否支持思考等级未实测）', async () => {
-    // 声明了却无效会让用户以为档位生效；不声明时 UI 显示
-    //「当前模型未提供推理等级」，这是诚实的。
+  it('真机 contextWindow 为 null 的条目**不声明**窗口', async () => {
+    const { adapter } = makeAdapter(() => textSse('x'))
+    const resolved = await adapter.resolveModel('lobsterai', 'kimi-k2.6')
+    expect(resolved.context).toBeUndefined()
+  })
+
+  it('**声明** reasoning（档位逐字符照抄真机 thinkingConfig.level）', async () => {
+    // 2026-09-19 真机取证推翻了早期「刻意不声明」的结论：
+    // 远端 thinkingConfig 就是权威档位表，且 reasoning_effort 被服务端真实消费。
     const { adapter } = makeAdapter(() => textSse('x'))
     const resolved = await adapter.resolveModel('lobsterai', 'glm-5.2')
+    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(['high', 'max'])
+    expect(resolved.reasoning?.defaultEffort).toBe('max')
+  })
+
+  it('无档位模型不声明 reasoning（真机 19/27 项如此）', async () => {
+    const { adapter } = makeAdapter(() => textSse('x'))
+    const resolved = await adapter.resolveModel('lobsterai', 'qwen3.8-max')
     expect(resolved.reasoning).toBeUndefined()
+  })
+
+  it('远端档位优先于兜底表（远端是权威来源）', async () => {
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      fetchRemoteModels: async () => [{
+        id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 500_000,
+        reasoningEfforts: ['high'], defaultReasoningEffort: 'high',
+      }],
+    })
+    const resolved = await adapter.resolveModel('lobsterai', 'glm-5.2')
+    expect(resolved.context).toEqual({ contextWindow: 500_000 })
+    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(['high'])
+  })
+
+  it('远端缺字段时逐字段回退到兜底表', async () => {
+    // 远端给了名字但没给窗口/档位时，仍应能从兜底表补上。
+    const { adapter } = makeAdapter(() => textSse('x'), {
+      fetchRemoteModels: async () => [{ id: 'glm-5.2', name: '远端名' }],
+    })
+    const resolved = await adapter.resolveModel('lobsterai', 'glm-5.2')
+    expect(resolved.name).toBe('远端名')
+    expect(resolved.context).toEqual({ contextWindow: 1_000_000 })
+    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(['high', 'max'])
   })
 
   it('未知模型回退为 id 作展示名且不报错', async () => {
@@ -221,6 +326,7 @@ describe('LobsteraiAdapter resolveModel', () => {
     const resolved = await adapter.resolveModel('lobsterai', 'unknown-model')
     expect(resolved.name).toBe('unknown-model')
     expect(resolved.context).toBeUndefined()
+    expect(resolved.reasoning).toBeUndefined()
   })
 })
 
@@ -259,19 +365,32 @@ describe('LobsteraiAdapter 请求构造', () => {
     expect(body).not.toHaveProperty('prompt_cache_key')
   })
 
-  it('**不发** thinking（未实测支持，照搬 buddy 会造成非法参数 400）', async () => {
+  it('调用方未指定档位时**不发** reasoning_effort（不替上游补档）', async () => {
+    // 实测不带该字段时服务端照样返回 reasoning_content（默认档由服务端决定），
+    // 故**不**照搬 buddy 的「deepseek 系必须补档」逻辑。
     const { adapter, calls } = makeAdapter(() => textSse('hi'))
-    await collect(generateOptions({ model: 'deepseek-v4-flash' }), adapter)
+    await collect(generateOptions({ model: 'deepseek-flash' }), adapter)
     const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>
     expect(body).not.toHaveProperty('thinking')
     expect(body).not.toHaveProperty('reasoning_effort')
   })
 
-  it('调用方显式传 reasoningEffort 时透传', async () => {
+  it('调用方指定档位时下发到 `reasoning_effort`（真机定案字段名）', async () => {
+    // 证据：服务端对未知取值返回 500（bogus-xyz / off），证明它真实解析该字段；
+    // 且产品自身 app.asar 的 openai-completions 传输层写的就是 reasoning_effort。
     const { adapter, calls } = makeAdapter(() => textSse('hi'))
     await collect(generateOptions({ reasoningEffort: 'high' as never }), adapter)
     const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>
     expect(body.reasoning_effort).toBe('high')
+  })
+
+  it('档位 id 原样下发（`max` 不被改写成 openclaw 的 xhigh）', async () => {
+    // 真机目录的 level 是 `max`；映射成 xhigh 是**服务端**的事，
+    // 插件照抄 level，规整化会让上游认不出档位。
+    const { adapter, calls } = makeAdapter(() => textSse('hi'))
+    await collect(generateOptions({ reasoningEffort: 'max' as never }), adapter)
+    const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>
+    expect(body.reasoning_effort).toBe('max')
   })
 
   it('透传 temperature / maxTokens / stop', async () => {

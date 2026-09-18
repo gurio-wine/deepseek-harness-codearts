@@ -31,24 +31,46 @@
 /**
  * 兜底模型目录中的一个条目。
  *
- * 与 `BuddyFallbackModel` 分开定义：LobsterAI 的远端模型接口
- * （`GET /api/models/available`）只返回 `modelId`/`modelName`/`provider`/
- * `apiFormat`，**不含**上下文窗口与推理等级，因此那两个字段在这里是**纯本地
- * 估计值**，语义与 Buddy 侧（远端可下发、本地仅兜底）不同。
+ * ⚠️ **2026-09-19 起字段语义已变**：早期版本据 `handler.go:94-114` 认为
+ * 远端只返回 `modelId`/`modelName`/`provider`/`apiFormat`，于是把窗口与推理等级
+ * 当作**纯本地估计值**。真机复测证明该认识是错的 —— 远端响应实际还带
+ * `contextWindow` / `supportsThinking` / `thinkingConfig` / `requestCapabilities`
+ * 等字段，本表因此改为**照抄真机值**，与 Buddy 侧语义一致（远端权威、本地兜底）。
  */
 export interface LobsteraiFallbackModel {
   /** 模型 ID（传给 `POST /api/proxy/v1/chat/completions` 的 `model`）。 */
   id: string
-  /** 展示名。 */
+  /** 展示名（真机 `modelName`）。 */
   name: string
   /**
-   * 上下文窗口（**桥接层的估计值，非远端权威值**）。
+   * 上下文窗口（真机 `contextWindow`，权威值）。
    *
-   * `handler.go:94-114` 里 19 个模型全部标 `131072`，那是对齐
-   * `deepseek-v4` 系的取值后**统一填的**，并非逐个实测。
-   * 落地后如实测到真实值应当逐个修正，并在修正处注明实测日期。
+   * **可选**：真机有 9 个条目该字段为 `null`（老一代模型），此时**不声明** ——
+   * 编一个数出来会让选择器显示错误的容量，而 DSH 在缺失时本就不显示。
    */
-  contextWindow: number
+  contextWindow?: number
+  /**
+   * 可选思考档位（真机 `thinkingConfig.options[].level`，逐字符照抄）。
+   *
+   * 空/缺省 = **不暴露选择器**：DSH 的模型选择器只读 `resolveModel().reasoning`，
+   * 不声明时该行不渲染（与 `src/trae-cn-adapter.ts` 同约定）。
+   *
+   * ⚠️ **刻意剔除 `off`**：真机 `options` 里确有 `off`，但实测在
+   * `deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`
+   * 三个模型上发 `reasoning_effort: "off"` 会返回 **HTTP 500**
+   * （`{"code":500,"message":"服务器内部错误"}`，3/3 复现），
+   * 而 `none` 才等价于「关闭思考」。给用户一个必然 500 的档位是纯粹的陷阱，
+   * 故只暴露真机实测可用的档位。关闭思考仍可通过选择不带档位的模型实现。
+   */
+  reasoningEfforts?: readonly string[]
+  /**
+   * 默认档位（真机 `thinkingConfig.defaultLevel`），**必须**在
+   * {@link reasoningEfforts} 内。
+   *
+   * DSH 的 `resolveCallInfo` 会在调用方省略 `reasoningEffort` 时把它
+   * materialize 进请求 —— 与真机网页版「默认档」语义一致。
+   */
+  defaultReasoningEffort?: string
 }
 
 /**
@@ -146,37 +168,54 @@ export interface LobsteraiProduct {
 }
 
 /**
- * 兜底模型目录（19 个）。
+ * 兜底模型目录（27 个）。
  *
- * 来源：`lobsterai2api/internal/server/handler.go:94-114` 的 `staticModels`，
- * 注释标明「2026-08-06 从 `GET /api/models/available` 实测拉取」。
+ * **来源：2026-09-19 真机 `GET /api/models/available` 实测拉取**（用账号池凭据
+ * 直连上游），逐字段照抄：`modelId` → `id`、`modelName` → `name`、
+ * `contextWindow` → `contextWindow`、`thinkingConfig` → `reasoningEfforts` /
+ * `defaultReasoningEffort`。
  *
- * 顺序**照抄原表**，不重排 —— 它是实测时的返回顺序，重排会让「与上游对比」
- * 这类排查工作失去可比性。
+ * 早期版本照抄的是 `lobsterai2api/internal/server/handler.go:94-114` 的
+ * `staticModels`（注释标明 2026-08-06 拉取），那份表**已过时**：19 项里
+ * 少 9 项、多 1 项，且把窗口统一填成 `131072`。两处差异：
  *
- * `contextWindow` 全部为 131072：这是桥接层统一填的值（见
- * {@link LobsteraiFallbackModel.contextWindow} 的说明），**不是**逐个实测结果。
+ * - **新增 9 项**：`deepseek-flash`（DeepSeek-V4.1-Flash，真机第 1 项）、
+ *   `glm-5.3` 系 3 项、`qwen3.8` 系 3 项、`doubao-seed-2-1-pro-260915`、
+ *   `deepseek-v4-flash-vision-exp`；
+ * - **移除 1 项**：`doubao-seed-2-1-pro-260628`（真机已下架，改名成
+ *   `…-260915`）。
+ *
+ * 顺序**照抄真机返回顺序**，不重排 —— 它是上游的权威顺序，重排会让
+ * 「与上游对比」这类排查工作失去可比性。
  */
 const LOBSTERAI_FALLBACK_MODELS: readonly LobsteraiFallbackModel[] = [
-  { id: 'deepseek-v4-flash', name: 'deepseek-v4-flash', contextWindow: 131_072 },
-  { id: 'deepseek-v4-pro', name: 'deepseek-v4-pro', contextWindow: 131_072 },
-  { id: 'MiniMax-M3', name: 'MiniMax-M3', contextWindow: 131_072 },
-  { id: 'MiniMax-M2.7', name: 'MiniMax-M2.7', contextWindow: 131_072 },
-  { id: 'qwen3.7-max', name: 'qwen3.7-max', contextWindow: 131_072 },
-  { id: 'qwen3.7-plus', name: 'qwen3.7-plus', contextWindow: 131_072 },
-  { id: 'qwen3.6-plus', name: 'qwen3.6-plus', contextWindow: 131_072 },
-  { id: 'qwen3.5-plus-2026-04-20', name: 'qwen3.5-plus-2026-04-20', contextWindow: 131_072 },
-  { id: 'kimi-k2.7-code', name: 'kimi-k2.7-code', contextWindow: 131_072 },
-  { id: 'kimi-k2.7-code-highspeed', name: 'kimi-k2.7-code-highspeed', contextWindow: 131_072 },
-  { id: 'kimi-k2.6', name: 'kimi-k2.6', contextWindow: 131_072 },
-  { id: 'kimi-k2.5', name: 'kimi-k2.5', contextWindow: 131_072 },
-  { id: 'doubao-seed-2-1-pro-260628', name: 'doubao-seed-2-1-pro-260628', contextWindow: 131_072 },
-  { id: 'doubao-seed-2-1-turbo-260628', name: 'doubao-seed-2-1-turbo-260628', contextWindow: 131_072 },
-  { id: 'doubao-seed-2-0-code-preview-260215', name: 'doubao-seed-2-0-code-preview-260215', contextWindow: 131_072 },
-  { id: 'glm-5.2', name: 'glm-5.2', contextWindow: 131_072 },
-  { id: 'glm-5.1', name: 'glm-5.1', contextWindow: 131_072 },
-  { id: 'glm-5v-turbo', name: 'glm-5v-turbo', contextWindow: 131_072 },
-  { id: 'glm-5', name: 'glm-5', contextWindow: 131_072 },
+  { id: 'deepseek-flash', name: 'DeepSeek-V4.1-Flash', contextWindow: 1_000_000, reasoningEfforts: ['high', 'max'], defaultReasoningEffort: 'high' },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', contextWindow: 1_000_000, reasoningEfforts: ['high', 'max'], defaultReasoningEffort: 'high' },
+  { id: 'glm-5.3-flashx', name: 'GLM-5.3-FlashX', contextWindow: 1_000_000, reasoningEfforts: ['high', 'max'], defaultReasoningEffort: 'max' },
+  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', contextWindow: 1_000_000, reasoningEfforts: ['high', 'max'], defaultReasoningEffort: 'max' },
+  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, reasoningEfforts: ['high', 'max'], defaultReasoningEffort: 'max' },
+  { id: 'MiniMax-M3', name: 'MiniMax-M3', contextWindow: 1_000_000 },
+  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', contextWindow: 1_000_000 },
+  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', contextWindow: 1_000_000 },
+  { id: 'qwen3.8-omni-flash', name: 'Qwen3.8-Omni-Flash', contextWindow: 1_000_000 },
+  { id: 'kimi-k2.7-code', name: 'Kimi-K2.7-Code', contextWindow: 262_144 },
+  { id: 'doubao-seed-2-1-pro-260915', name: 'Doubao-Seed-2.1-Pro', contextWindow: 256_000 },
+  { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision-Exp', contextWindow: 1_000_000, reasoningEfforts: ['high', 'max'], defaultReasoningEffort: 'high' },
+  { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', contextWindow: 1_000_000, reasoningEfforts: ['high', 'max'], defaultReasoningEffort: 'high' },
+  { id: 'MiniMax-M2.7', name: 'MiniMax-M2.7' },
+  { id: 'qwen3.7-max', name: 'Qwen3.7-Max', contextWindow: 1_000_000 },
+  { id: 'qwen3.7-plus', name: 'Qwen3.7-Plus', contextWindow: 1_000_000 },
+  { id: 'qwen3.6-plus', name: 'Qwen3.6-Plus' },
+  { id: 'qwen3.5-plus-2026-04-20', name: 'Qwen3.5-plus' },
+  { id: 'kimi-k2.7-code-highspeed', name: 'Kimi-K2.7-Code-Highspeed', contextWindow: 262_144 },
+  { id: 'kimi-k2.6', name: 'Kimi-K2.6' },
+  { id: 'kimi-k2.5', name: 'Kimi-K2.5' },
+  { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 1_000_000, reasoningEfforts: ['high', 'max'], defaultReasoningEffort: 'max' },
+  { id: 'glm-5.1', name: 'GLM-5.1' },
+  { id: 'glm-5v-turbo', name: 'GLM-5V-Turbo' },
+  { id: 'glm-5', name: 'GLM-5' },
+  { id: 'doubao-seed-2-1-turbo-260628', name: 'Doubao-Seed-2.1-Turbo', contextWindow: 256_000 },
+  { id: 'doubao-seed-2-0-code-preview-260215', name: 'Doubao-Seed-2.0-Code' },
 ]
 
 /**

@@ -644,7 +644,7 @@ Bearer `access_token` 鉴权。
 | `clientVersion` | 编译期常量 | **运行时从第三方接口动态拉取** |
 | 每日签到 | 两步（状态 + 领取） | **三步**（slot + context + check_in） |
 | 图片输入 | 支持 | **不支持**（`inputModalities` 仅 `text`） |
-| 思考等级 | 支持（按模型声明档位） | **不声明**（是否支持未实测） |
+| 思考等级 | 支持（按模型声明档位） | 支持（8/27 项声明档位，下发 `reasoning_effort`） |
 
 - **登录入口：Account Hub 设置页的 LobsterAI 面板**（支持多账号与账号池自动切换）。
   不注册斜杠命令。
@@ -663,15 +663,46 @@ Bearer `access_token` 鉴权。
   还持久化 `uuid` / `first_keyfrom` / `latest_keyfrom` 三个**身份字段** ——
   它们是续期请求体的必填项，丢失会导致静默续期失败、只能重新登录。
 - 模型列表：远端 `GET /api/models/available` 优先（它是权威来源），
-  失败时回退 `src/lobsterai-product.ts` 的 19 个内置模型。
+  失败时回退 `src/lobsterai-product.ts` 的 **27 个内置模型**（2026-09-19 真机照抄）。
+  ⚠️ **响应形状是「统一信封 + `data` 直接为数组」**（`{code:0,msg,data:[…]}`），
+  不是 `data.data` —— 早期实现按 `data.data` 取值，而信封校验又拒绝数组，
+  于是**恒返回空数组**、永远回退内置表，这正是「选择器模型比产品少」的根因。
 - 续期：启动后每 30 分钟对可续期账号静默刷新（与其他 provider 同一调度器）。
   **终态判定比参考实现更精确**：只有 HTTP 401/403 或业务码 40100/40101
   才判为 `refresh_token` 失效；网络抖动走可重试路径，不会误让用户重新登录。
 
+### 思考档位（reasoning effort）：**已接线**（2026-09-19 真机取证）
+
+- **档位来源**：远端模型目录的 `thinkingConfig.options[].level`（权威），
+  逐字符照抄为 `reasoningEfforts`。真机 27 项中 **8 项**带 `thinkingConfig`
+  （`deepseek-flash` / `deepseek-v4-pro` / `glm-5.3` 系 3 项 /
+  `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` / `glm-5.2`），
+  档位均为 `high` / `max`；其余 19 项**不声明**（DSH 选择器里该行不渲染）。
+- **下发字段名 `reasoning_effort`**，三条独立互证：
+  1. **服务端行为**：只改该字段取值 —— `bogus-xyz` 与 `off` 返回 HTTP 500、
+     `none` 返回 200 且无思考内容、`high`/`max` 返回 200 且带 `reasoning_content`。
+     若服务端不解析该字段，未知取值不可能 500。
+  2. **产品自身实现**：桌面端 `app.asar` 内 openclaw 的 `openai-completions`
+     传输层在 `supportsReasoningEffort` 时写 `params.reasoning_effort`。
+  3. `requestCapabilities: ['lobsterai-options-v1']` 对应的 `lobsterai_options`(v1)
+     是**另一套**能力协商，不承载档位。
+- ⚠️ **`off` 档被刻意剔除**：真机 `options` 里确有 `off`，但
+  `deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`
+  发 `reasoning_effort:"off"` 会 **HTTP 500**（3/3 复现），而 `glm-5.x` 返回 200
+  —— 同一档位跨模型行为不一致。等价关闭语义是 `none`（实测 200 且零思考），
+  但真机 `options` 里没有 `none`，故**不自行发明档位**。
+- **不替上游补档**：不带该字段时服务端照样返回 `reasoning_content`
+  （默认档由服务端决定），故**不**照搬 buddy 的「deepseek 系必须补档」逻辑。
+- **上下文窗口**用真机 `contextWindow`（14 项 1,000,000 / 2 项 262,144 /
+  2 项 256,000），真机为 `null` 的 9 项**不声明**（不编造）。
+
 > **已知待实测项**（见 `docs/lobsterai-integration-plan.md` §7.2）：
-> 是否支持 `reasoning_effort`、各模型真实上下文窗口（内置表统一填 131072，
-> 是桥接层的估计值）、图片输入、`prompt_cache_key`。这些在实现里都取了
-> **保守默认**（不声明 / 不发送），不会因未知而失败。
+> 图片输入与 `prompt_cache_key`。这些在实现里取了**保守默认**（不发送），
+> 不会因未知而失败。
+> ⚠️ 思考档的**「档位是否真的改变思考量」尚未做统计显著实验**：单次对比
+> （`high`/`max` 的 `reasoning_content` 字符数）被采样噪声淹没
+> （同档 3 次重复的离散度大于档位间差异），故只声明「字段被服务端真实消费」，
+> 不声明「档位单调提升思考量」。
 
 ## Trae CN provider（字节跳动 Trae 国内版）
 

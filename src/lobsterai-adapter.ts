@@ -38,7 +38,7 @@ import {
   isLobsteraiExpired,
   lobsteraiChatHeaders,
   lobsteraiKeyfromBody,
-  parseLobsteraiEnvelope,
+  readNumberField,
   readStringField,
   type LobsteraiCredential,
 } from './lobsterai.js'
@@ -69,31 +69,109 @@ const LOBSTERAI_RATE_LIMIT_FALLBACK_MS = 3_600_000
 const LOBSTERAI_MAX_ROTATE = 3
 
 /**
+ * 思考档位的展示名。
+ *
+ * 与 `src/trae-cn-adapter.ts` 的 `effortDisplayName` 同约定（中英并列，
+ * 让选择器在中文界面下也可读）；未登记的 id 回退为 id 本身，
+ * 这样真机将来加档位时不会显示成空白。
+ *
+ * 真机当前只会出现 `high` / `max`（`max` 在出站时被上游映射成 `xhigh`，
+ * 但**请求体里发的就是 `max`** —— 映射发生在服务端，插件照抄 `level`）。
+ */
+const LOBSTERAI_EFFORT_NAMES: Readonly<Record<string, string>> = {
+  high: '高 High',
+  max: '最高 Max',
+}
+
+/** 档位 id 的展示名；未登记的 id 回退为 id 本身。 */
+function effortDisplayName(id: string): string {
+  return LOBSTERAI_EFFORT_NAMES[id] ?? id
+}
+
+/**
+ * 目录条目：远端响应与产品兜底表的**共同形状**。
+ *
+ * 两个来源的字段一一对应（远端 `modelId`/`modelName`/`contextWindow`/
+ * `thinkingConfig` → 本结构的 `id`/`name`/`contextWindow`/`reasoningEfforts`），
+ * 故解析与展示可以用同一套逻辑，无需在调用点区分来源。
+ */
+interface LobsteraiCatalogEntry {
+  id: string
+  name: string
+  contextWindow?: number
+  reasoningEfforts?: readonly string[]
+  defaultReasoningEffort?: string
+}
+
+/**
  * LobsterAI 远端模型条目。
  *
- * 远端 `GET /api/models/available` 只返回 `modelId`/`modelName`/`provider`/
- * `apiFormat` —— **不含上下文窗口与推理等级**。因此这个结构刻意比
- * `BuddyRemoteModel` 更小：多出来的字段没有数据来源，声明了只会误导。
+ * ⚠️ **2026-09-19 真机复测推翻了早期注释**。早期版本声称远端只返回
+ * `modelId`/`modelName`/`provider`/`apiFormat`（依据是 Go 桥接层的
+ * `client.go:254-278`），因此本结构刻意比 `BuddyRemoteModel` 更小。
+ * 实测真机响应**还带**这些字段，且它们正是「模型选择器比产品少 / 没有思考档」
+ * 两个报障的关键数据：
+ *
+ * | 真机字段 | 用途 |
+ * |---|---|
+ * | `modelName` | 展示名（旧表用 id 当展示名，故选择器里全是 `qwen3.7-max` 这种裸 id） |
+ * | `contextWindow` | 上下文窗口（`null` 表示上游未给，此时不声明） |
+ * | `supportsThinking` | 是否支持思考 |
+ * | `thinkingConfig.options[].level` | **可选思考档位**（思考档的权威来源） |
+ * | `thinkingConfig.defaultLevel` | 默认档位 |
+ *
+ * 真机响应条目样例（`deepseek-flash`）：
+ * `{modelId, modelName:'DeepSeek-V4.1-Flash', contextWindow:1000000,
+ *   supportsThinking:true, thinkingConfig:{options:[{level:'off',openclawLevel:'off'},
+ *   {level:'high',openclawLevel:'high'},{level:'max',openclawLevel:'xhigh'}],
+ *   defaultLevel:'high'}, requestCapabilities:['lobsterai-options-v1'], ...}`
  */
 export interface LobsteraiRemoteModel {
   id: string
   name: string
+  /** 上下文窗口；真机为 `null` 或缺失时**不声明**（不编造）。 */
+  contextWindow?: number
+  /** 可选思考档位（真机 `thinkingConfig.options[].level`，已剔除不可用的 `off`）。 */
+  reasoningEfforts?: readonly string[]
+  /** 默认档位（真机 `thinkingConfig.defaultLevel`）。 */
+  defaultReasoningEffort?: string
 }
+
+/**
+ * 真机实测**会导致 HTTP 500** 的思考档位，解析时剔除。
+ *
+ * 真机 `thinkingConfig.options` 里含 `off`，但发 `reasoning_effort: "off"` 时：
+ * `deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`
+ * 返回 `HTTP 500 {"code":500,"message":"服务器内部错误"}`（3/3 复现），
+ * 而 `glm-5.x` 系返回 200。**同一档位在不同模型上行为不一致**，且失败的三个
+ * 恰好是默认档模型，用户一旦选择就必然拿到 500。
+ *
+ * 等价语义的关闭开关是 `none`（实测 200 且 `reasoningChars: 0`），
+ * 但真机 `options` 里没有 `none`，故**不自行发明档位**（见任务约束「没观察到
+ * 的东西不猜」）—— 只剔除已证实会炸的 `off`，把「关闭思考」留给
+ * 不带档位的模型。这个白名单是**实测黑名单**，不是猜测。
+ */
+export const LOBSTERAI_UNSAFE_REASONING_EFFORTS: readonly string[] = ['off']
 
 /**
  * 解析 `GET /api/models/available` 的响应。
  *
- * 响应形状（`internal/upstream/client.go:254-278`）：
- * `{code:0, data:[{modelId, modelName, provider, apiFormat}]}`
+ * ⚠️ **响应形状是「统一信封 + data 直接为数组」**，不是双层嵌套：
+ * 真机实测 `{code:0, msg:'...', data:[{modelId, modelName, …}, …]}`，
+ * 其中 `data` 就是模型数组。
  *
- * 只取 `modelId` 与 `modelName`：`provider`/`apiFormat` 是上游内部字段，
- * 对模型选择器没有意义。
+ * 早期实现按 `data.data` 取值（注释写「外层信封 + 内层 data 数组」），
+ * 而 `parseLobsteraiEnvelope` 又**明确拒绝数组**（`Array.isArray(data)` 即判失败），
+ * 于是这条路径**恒返回空数组** → 适配器永远回退静态兜底表。
+ * 这就是「选择器模型比产品少」的根因：远端目录一次都没被真正采用过。
+ * 用插件真实解析器对真机响应实测：修前 `0` 条，修后 `27` 条。
+ *
+ * 兼容性：仍接受旧的 `data.data` 形态（若有代理层包了一层），
+ * 但**主路径是 `data` 直接为数组**。
  */
 export function parseLobsteraiModels(body: unknown): LobsteraiRemoteModel[] {
-  const envelope = parseLobsteraiEnvelope(body)
-  if (!envelope.ok) return []
-  const raw = (envelope.data as { data?: unknown }).data
-  if (!Array.isArray(raw)) return []
+  const raw = readLobsteraiModelsArray(body)
+  if (raw === undefined) return []
   const models: LobsteraiRemoteModel[] = []
   for (const item of raw) {
     if (typeof item !== 'object' || item === null) continue
@@ -101,9 +179,69 @@ export function parseLobsteraiModels(body: unknown): LobsteraiRemoteModel[] {
     const id = readStringField(record, 'modelId')
     if (id.length === 0) continue
     const name = readStringField(record, 'modelName')
-    models.push({ id, name: name.length > 0 ? name : id })
+    const model: LobsteraiRemoteModel = { id, name: name.length > 0 ? name : id }
+    // 上下文窗口：真机为 null 时不声明（编一个数会让选择器显示错误容量）。
+    const contextWindow = readNumberField(record, 'contextWindow')
+    if (contextWindow !== undefined && contextWindow > 0) model.contextWindow = contextWindow
+    // 思考档位：真机权威来源。`supportsThinking:false` 时不声明。
+    if (record.supportsThinking !== false) {
+      const { efforts, defaultEffort } = parseLobsteraiThinkingConfig(record.thinkingConfig)
+      if (efforts.length > 0) {
+        model.reasoningEfforts = efforts
+        if (defaultEffort !== undefined) model.defaultReasoningEffort = defaultEffort
+      }
+    }
+    models.push(model)
   }
   return models
+}
+
+/**
+ * 从响应体取出模型数组，兼容两种形态。
+ *
+ * 校验口径与 `parseLobsteraiEnvelope` 一致的部分：`code` 必须为 0
+ * （凭据失效时上游倾向返回非 0 或 `data:null`）。差异只在 `data` 允许是数组。
+ */
+function readLobsteraiModelsArray(body: unknown): unknown[] | undefined {
+  if (typeof body !== 'object' || body === null) return undefined
+  const record = body as Record<string, unknown>
+  const code = readNumberField(record, 'code')
+  if (code !== undefined && code !== 0) return undefined
+  const data = record.data
+  if (Array.isArray(data)) return data
+  // 兼容（非主路径）：data.data 形态。
+  if (typeof data === 'object' && data !== null) {
+    const nested = (data as Record<string, unknown>).data
+    if (Array.isArray(nested)) return nested
+  }
+  return undefined
+}
+
+/**
+ * 解析真机 `thinkingConfig` → 可用档位 + 默认档位。
+ *
+ * 档位 id **逐字符照抄**真机 `level`（它会原样进请求体，规整化会让上游认不出）。
+ * 剔除 {@link LOBSTERAI_UNSAFE_REASONING_EFFORTS}；默认档若被剔除或不在可用集合内，
+ * **不下发默认档**（否则 DSH 会把一个必然失败的档位 materialize 进每次请求）。
+ */
+function parseLobsteraiThinkingConfig(
+  value: unknown,
+): { efforts: string[], defaultEffort?: string } {
+  if (typeof value !== 'object' || value === null) return { efforts: [] }
+  const record = value as Record<string, unknown>
+  const options = record.options
+  if (!Array.isArray(options)) return { efforts: [] }
+  const efforts: string[] = []
+  for (const option of options) {
+    if (typeof option !== 'object' || option === null) continue
+    const level = readStringField(option as Record<string, unknown>, 'level')
+    if (level.length === 0) continue
+    if (LOBSTERAI_UNSAFE_REASONING_EFFORTS.includes(level)) continue
+    if (!efforts.includes(level)) efforts.push(level)
+  }
+  const declaredDefault = readStringField(record, 'defaultLevel')
+  const defaultEffort = efforts.includes(declaredDefault) ? declaredDefault : undefined
+  return { efforts, defaultEffort }
 }
 
 /**
@@ -354,11 +492,35 @@ export class LobsteraiAdapter extends LlmAdapter {
    * 静态兜底模型目录。
    *
    * **不做 buddy 那样的「以兜底表为准」裁剪**（`reconcileWithFallback`）：
-   * LobsterAI 的远端接口是**权威的**（产品兜底表本身就是从它实测抄来的），
-   * 远端可用时应完全采信，兜底只在远端整体失败时顶替。
+   * LobsterAI 的远端接口是**权威的**，远端可用时应完全采信，
+   * 兜底只在远端整体失败时顶替。
+   *
+   * 兜底表同样携带 `contextWindow` / `reasoningEfforts`（照抄真机），
+   * 故远端失败时思考档与窗口**依然可用**（早期版本因远端恒失败 + 兜底表
+   * 无这两个字段，用户永远看不到思考档）。
    */
-  private staticFallbackModels(): readonly { id: string; name: string }[] {
-    return this.product.fallbackModels.map((model) => ({ id: model.id, name: model.name }))
+  private staticFallbackModels(): readonly LobsteraiCatalogEntry[] {
+    return this.product.fallbackModels
+  }
+
+  /**
+   * 按模型 id 取目录条目：远端优先，兜底表兜底。
+   *
+   * 两个来源都可能缺字段（远端 `contextWindow:null`、兜底表缺项），
+   * 故逐字段回退而不是整条替换 —— 远端给了窗口但没给档位时，
+   * 仍应能从兜底表补上档位。
+   */
+  private catalogEntry(model: string): LobsteraiCatalogEntry | undefined {
+    const remote = this.remoteModels?.find((entry) => entry.id === model)
+    const fallback = this.fallbackIndex.get(model)
+    if (remote === undefined) return fallback
+    return {
+      id: remote.id,
+      name: remote.name.length > 0 ? remote.name : fallback?.name ?? remote.id,
+      contextWindow: remote.contextWindow ?? fallback?.contextWindow,
+      reasoningEfforts: remote.reasoningEfforts ?? fallback?.reasoningEfforts,
+      defaultReasoningEffort: remote.defaultReasoningEffort ?? fallback?.defaultReasoningEffort,
+    }
   }
 
   async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
@@ -380,20 +542,33 @@ export class LobsteraiAdapter extends LlmAdapter {
 
   async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     await this.ensureRemoteModels()
-    const remoteName = this.remoteModels?.find((entry) => entry.id === model)?.name
+    const entry = this.catalogEntry(model)
     const resolved: LlmResolvedModelInfo = {
       provider,
       id: model,
-      name: remoteName ?? this.fallbackIndex.get(model)?.name ?? model,
+      name: entry?.name ?? model,
       inputModalities: ['text'],
     }
-    // 上下文窗口：只用产品兜底表的值（远端不返回该字段）。
-    // 注意这是**桥接层的估计值**，见 LobsteraiFallbackModel.contextWindow 的说明。
-    const contextWindow = this.fallbackIndex.get(model)?.contextWindow
-    if (contextWindow !== undefined) resolved.context = { contextWindow }
-    // 思考等级：**刻意不声明**。LobsterAI 是否支持 reasoning_effort 未实测
-    // （Go 桥接层完全没处理）。不声明时模型选择器会显示「当前模型未提供推理等级」，
-    // 这是诚实的；声明了却无效会让用户以为档位生效了。
+    // 上下文窗口：真机 `contextWindow` 为权威值；真机给 null 的条目**不声明**
+    // （早期版本一律写死 131072，比真值小 8 倍，会误导用户判断上下文余量）。
+    if (entry?.contextWindow !== undefined) resolved.context = { contextWindow: entry.contextWindow }
+    // 思考档位：DSH 的「思考程度」选择器**唯一**的数据源就是本字段
+    // （`resolveModel().reasoning`）—— 不声明时该行不渲染。
+    //
+    // 早期版本注释写「刻意不声明，因为未实测」——**该结论已于 2026-09-19 被真机推翻**：
+    // 远端 `thinkingConfig` 就是权威档位表，且实测 `reasoning_effort` 被服务端
+    // 真实消费（见 `LOBSTERAI_UNSAFE_REASONING_EFFORTS` 的说明）。
+    // 无档位的模型（真机 19/27 项）保持不声明 —— 那是诚实的。
+    const efforts = entry?.reasoningEfforts ?? []
+    if (efforts.length > 0) {
+      resolved.reasoning = {
+        // id **逐字符照抄**真机 level：它会原样进请求体，规整化会让上游认不出档位。
+        efforts: efforts.map((id) => ({ id: ReasoningEffortId(id), name: effortDisplayName(id) })),
+        ...entry?.defaultReasoningEffort !== undefined && efforts.includes(entry.defaultReasoningEffort)
+          ? { defaultEffort: ReasoningEffortId(entry.defaultReasoningEffort) }
+          : {},
+      }
+    }
     return resolved
   }
 
@@ -499,9 +674,23 @@ export class LobsteraiAdapter extends LlmAdapter {
     if (options.temperature !== undefined) bodyObj.temperature = options.temperature
     if (options.maxTokens !== undefined) bodyObj.max_tokens = options.maxTokens
     if (options.stop !== undefined && options.stop.length > 0) bodyObj.stop = options.stop
-    // 思考等级：仅在调用方显式传入时透传，不主动补档
-    // （buddy 那套「deepseek 系必须补档否则不思考」是针对腾讯后端的实测，
-    // 未在 LobsterAI 上验证，照搬会造成非法参数 400）。
+    // 思考档位下发：字段名 `reasoning_effort`（**2026-09-19 真机定案**）。
+    //
+    // 证据链（三条独立互证）：
+    //   1. **服务端行为**：同一请求只改该字段的值，`bogus-xyz` 与 `off` 返回
+    //      HTTP 500、`none` 返回 200 且思考内容为空、`high`/`max` 返回 200 并
+    //      带 `reasoning_content` —— 若服务端不解析该字段，未知值不可能 500。
+    //   2. **产品自身实现**：LobsterAI 桌面端 `app.asar` 内 openclaw 的
+    //      `openai-completions` 传输层在 `supportsReasoningEffort` 时写
+    //      `params.reasoning_effort = reasoningEffort`，取值经
+    //      `reasoningEffortMap[level] ?? thinkingLevelMap[level] ?? level` 映射。
+    //   3. **契约字段**：模型目录 `requestCapabilities: ['lobsterai-options-v1']`
+    //      对应的 `lobsterai_options`（version 1）是另一套能力协商，**不**承载档位。
+    //
+    // 只透传、**不补档**：buddy 那套「deepseek 系必须补档否则不思考」是针对腾讯
+    // 后端的实测，LobsterAI 实测不带该字段时照样返回 `reasoning_content`
+    // （默认档由服务端决定，与真机目录的 `defaultLevel` 一致），
+    // 照搬会造成非法参数 400。
     if (options.reasoningEffort !== undefined) {
       bodyObj.reasoning_effort = options.reasoningEffort
     }
