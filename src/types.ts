@@ -42,7 +42,7 @@ export interface RateLimitInfo {
 export interface ProviderAccountEntry {
   /** 账号唯一标识：{provider}-{shortid}（如 'codearts-a1b2c3d4'） */
   id: string
-  /** provider 名称：'codearts' | 'buddy' */
+  /** provider 名称：'codearts' | 'buddy-cn' | 'buddy' | 'lobsterai' | 'trae-cn' */
   provider: string
   /** 用户可读昵称 */
   nickname: string
@@ -345,7 +345,7 @@ export interface LoginFlowOptions {
 }
 
 /**
- * buddy (腾讯 CodeBuddy) 凭据，存储在 BUDDY_ACCESS_TOKEN 下。
- * 定义与解析工具放在 buddy.ts（与 CodeBuddy 协议常量同处一处）。
+ * Buddy CN 凭据，存储在 BUDDY_CN_ACCESS_TOKEN 下。
+ * 定义与解析工具放在 buddy.ts（与 Buddy 协议常量同处一处）。
  */
 export type { BuddyCredential } from './buddy.js'

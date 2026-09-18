@@ -78,10 +78,10 @@ describe('AccountPool', () => {
   function makeMockAccount(overrides: Partial<ProviderAccountEntry> = {}): ProviderAccountEntry {
     return {
       id: 'buddy-001',
-      provider: 'buddy',
+      provider: 'buddy-cn',
       nickname: 'test-user',
       enabled: true,
-      credentialRef: 'BUDDY_ACCOUNT_T1',
+      credentialRef: 'BUDDY_CN_ACCOUNT_T1',
       createdAt: Date.now(),
       expiresAt: Date.now() + 3600000,
       refreshable: true,
@@ -96,7 +96,7 @@ describe('AccountPool', () => {
 
   it('should add and list accounts', async () => {
     await pool.addAccount(makeMockAccount())
-    const list = await pool.listAccounts('buddy')
+    const list = await pool.listAccounts('buddy-cn')
     expect(list).toHaveLength(1)
     expect(list[0].id).toBe('buddy-001')
   })
@@ -104,7 +104,7 @@ describe('AccountPool', () => {
   it('should filter by provider', async () => {
     await pool.addAccount(makeMockAccount())
     await pool.addAccount(makeMockAccount({ id: 'codearts-001', provider: 'codearts', credentialRef: 'CODEARTS_ACCOUNT_C1' }))
-    const buddyAccounts = await pool.listAccounts('buddy')
+    const buddyAccounts = await pool.listAccounts('buddy-cn')
     const codeartsAccounts = await pool.listAccounts('codearts')
     expect(buddyAccounts).toHaveLength(1)
     expect(codeartsAccounts).toHaveLength(1)
@@ -113,7 +113,7 @@ describe('AccountPool', () => {
   it('should update account', async () => {
     await pool.addAccount(makeMockAccount())
     await pool.updateAccount('buddy-001', { enabled: false })
-    const list = await pool.listAccounts('buddy')
+    const list = await pool.listAccounts('buddy-cn')
     expect(list[0].enabled).toBe(false)
   })
 
@@ -124,54 +124,54 @@ describe('AccountPool', () => {
   it('should remove account and credential', async () => {
     await pool.addAccount(makeMockAccount())
     // 先设一个凭据，确认删除时清理
-    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_T1'), JSON.stringify({ access_token: 'test' }))
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCOUNT_T1'), JSON.stringify({ access_token: 'test' }))
     await pool.removeAccount('buddy-001')
-    const list = await pool.listAccounts('buddy')
+    const list = await pool.listAccounts('buddy-cn')
     expect(list).toHaveLength(0)
-    const resolved = await ctx.credentials.resolve(credentialRef('BUDDY_ACCOUNT_T1'))
+    const resolved = await ctx.credentials.resolve(credentialRef('BUDDY_CN_ACCOUNT_T1'))
     expect(resolved).toBeUndefined()
   })
 
   it('should return available account for model', async () => {
     // 为两个账号都设置凭据
-    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_T1'), JSON.stringify({ access_token: 'test1' }))
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCOUNT_T1'), JSON.stringify({ access_token: 'test1' }))
     await pool.addAccount(makeMockAccount())
     // 为第二个账号设置模型限流
-    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_T2'), JSON.stringify({ access_token: 'test2' }))
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCOUNT_T2'), JSON.stringify({ access_token: 'test2' }))
     await pool.addAccount(makeMockAccount({
       id: 'buddy-002',
-      credentialRef: 'BUDDY_ACCOUNT_T2',
+      credentialRef: 'BUDDY_CN_ACCOUNT_T2',
       modelRateLimits: { 'deepseek-v4-flash': Date.now() + 3600000 },
     }))
-    const result = await pool.getAvailableAccount('buddy', 'deepseek-v4-flash')
+    const result = await pool.getAvailableAccount('buddy-cn', 'deepseek-v4-flash')
     expect(result).not.toBeNull()
     expect(result!.entry.id).toBe('buddy-001')
   })
 
   it('should return null when all accounts rate-limited', async () => {
-    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_T1'), JSON.stringify({ access_token: 'test' }))
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCOUNT_T1'), JSON.stringify({ access_token: 'test' }))
     await pool.addAccount(makeMockAccount({
       modelRateLimits: { 'deepseek-v4-flash': Date.now() + 3600000 },
     }))
-    const result = await pool.getAvailableAccount('buddy', 'deepseek-v4-flash')
+    const result = await pool.getAvailableAccount('buddy-cn', 'deepseek-v4-flash')
     expect(result).toBeNull()
   })
 
   it('should return null when no accounts at all', async () => {
-    const result = await pool.getAvailableAccount('buddy', 'deepseek-v4-flash')
+    const result = await pool.getAvailableAccount('buddy-cn', 'deepseek-v4-flash')
     expect(result).toBeNull()
   })
 
   it('should return null when credential resolve fails', async () => {
     await pool.addAccount(makeMockAccount())
-    const result = await pool.getAvailableAccount('buddy', 'deepseek-v4-flash')
+    const result = await pool.getAvailableAccount('buddy-cn', 'deepseek-v4-flash')
     expect(result).toBeNull()
   })
 
   it('should return null when credential JSON parse fails', async () => {
-    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_T1'), 'not-json')
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCOUNT_T1'), 'not-json')
     await pool.addAccount(makeMockAccount())
-    const result = await pool.getAvailableAccount('buddy', 'deepseek-v4-flash')
+    const result = await pool.getAvailableAccount('buddy-cn', 'deepseek-v4-flash')
     expect(result).toBeNull()
   })
 
@@ -179,7 +179,7 @@ describe('AccountPool', () => {
     await pool.addAccount(makeMockAccount())
     const resetAt = Date.now() + 7200000
     await pool.updateModelRateLimit('buddy-001', 'deepseek-v4-flash', resetAt)
-    const list = await pool.listAccounts('buddy')
+    const list = await pool.listAccounts('buddy-cn')
     expect(list[0].modelRateLimits?.['deepseek-v4-flash']).toBe(resetAt)
   })
 
@@ -188,7 +188,7 @@ describe('AccountPool', () => {
       modelRateLimits: { 'deepseek-v4-flash': Date.now() - 1000, 'deepseek-v4-pro': Date.now() + 3600000 },
     }))
     await pool.sweepExpiredRateLimits()
-    const list = await pool.listAccounts('buddy')
+    const list = await pool.listAccounts('buddy-cn')
     expect(list[0].modelRateLimits?.['deepseek-v4-flash']).toBeUndefined()
     expect(list[0].modelRateLimits?.['deepseek-v4-pro']).toBeDefined()
   })
@@ -255,7 +255,7 @@ describe('AccountPool', () => {
       }))
       const removed = await pool.clearModelRateLimits('buddy-001')
       expect(removed).toBe(1)
-      expect((await pool.listAccounts('buddy'))[0].modelRateLimits).toBeUndefined()
+      expect((await pool.listAccounts('buddy-cn'))[0].modelRateLimits).toBeUndefined()
     })
 
     it('只清除指定的模型，其余保留', async () => {
@@ -265,7 +265,7 @@ describe('AccountPool', () => {
       }))
       const removed = await pool.clearModelRateLimits('buddy-001', ['model-a'])
       expect(removed).toBe(1)
-      expect((await pool.listAccounts('buddy'))[0].modelRateLimits).toEqual({ 'model-b': keep })
+      expect((await pool.listAccounts('buddy-cn'))[0].modelRateLimits).toEqual({ 'model-b': keep })
     })
 
     it('对无标记的账号返回 0 且不写盘', async () => {
@@ -300,10 +300,10 @@ describe('AccountPool', () => {
 
   it('listAccountsByProvider 含停用账号', async () => {
     await pool.addAccount(makeMockAccount({ id: 'on', enabled: true }))
-    await pool.addAccount(makeMockAccount({ id: 'off', enabled: false, credentialRef: 'BUDDY_ACCOUNT_T2' }))
+    await pool.addAccount(makeMockAccount({ id: 'off', enabled: false, credentialRef: 'BUDDY_CN_ACCOUNT_T2' }))
     await pool.addAccount(makeMockAccount({ id: 'ca', provider: 'codearts', credentialRef: 'CODEARTS_ACCOUNT_C1' }))
 
-    expect(pool.listAccountsByProvider('buddy').map(a => a.id).sort()).toEqual(['off', 'on'])
+    expect(pool.listAccountsByProvider('buddy-cn').map(a => a.id).sort()).toEqual(['off', 'on'])
     expect(pool.findAccount('off')?.enabled).toBe(false)
   })
 
@@ -330,9 +330,9 @@ describe('AccountPool', () => {
     const staleCtx = createMockContext([], { staleReads: true })
     const stalePool = new AccountPool(staleCtx as never)
 
-    await stalePool.addAccount(makeMockAccount({ id: 'acct-1', credentialRef: 'BUDDY_ACCOUNT_T1' }))
-    await stalePool.addAccount(makeMockAccount({ id: 'acct-2', credentialRef: 'BUDDY_ACCOUNT_T2' }))
-    await stalePool.addAccount(makeMockAccount({ id: 'acct-3', credentialRef: 'BUDDY_ACCOUNT_T3' }))
+    await stalePool.addAccount(makeMockAccount({ id: 'acct-1', credentialRef: 'BUDDY_CN_ACCOUNT_T1' }))
+    await stalePool.addAccount(makeMockAccount({ id: 'acct-2', credentialRef: 'BUDDY_CN_ACCOUNT_T2' }))
+    await stalePool.addAccount(makeMockAccount({ id: 'acct-3', credentialRef: 'BUDDY_CN_ACCOUNT_T3' }))
 
     const t1 = Date.now() + 3_600_000
     const t2 = Date.now() + 7_200_000
@@ -352,31 +352,31 @@ describe('findAccountIdByCredential 的 provider 字段选择', () => {
   it('workbuddy 按 access_token 匹配', async () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCOUNT_T1'), JSON.stringify({
+    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_T1'), JSON.stringify({
       access_token: 'WB-TOKEN', refresh_token: 'RT', expires_at: String(Date.now() + 3_600_000),
     }))
     await pool.addAccount({
-      id: 'workbuddy-1', provider: 'workbuddy', nickname: 'WB', enabled: true,
-      credentialRef: 'WORKBUDDY_ACCOUNT_T1', createdAt: Date.now(), refreshable: true,
+      id: 'workbuddy-1', provider: 'buddy', nickname: 'WB', enabled: true,
+      credentialRef: 'BUDDY_ACCOUNT_T1', createdAt: Date.now(), refreshable: true,
     })
-    expect(await pool.findAccountIdByCredential('workbuddy', 'WB-TOKEN')).toBe('workbuddy-1')
+    expect(await pool.findAccountIdByCredential('buddy', 'WB-TOKEN')).toBe('workbuddy-1')
   })
 
   it('workbuddy 不会误用 access_key_id 匹配', async () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCOUNT_T2'), JSON.stringify({
+    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_T2'), JSON.stringify({
       access_token: 'WB-TOKEN', access_key_id: 'SOMETHING-ELSE', refresh_token: 'RT',
       expires_at: String(Date.now() + 3_600_000),
     }))
     await pool.addAccount({
-      id: 'workbuddy-2', provider: 'workbuddy', nickname: 'WB', enabled: true,
-      credentialRef: 'WORKBUDDY_ACCOUNT_T2', createdAt: Date.now(), refreshable: true,
+      id: 'workbuddy-2', provider: 'buddy', nickname: 'WB', enabled: true,
+      credentialRef: 'BUDDY_ACCOUNT_T2', createdAt: Date.now(), refreshable: true,
     })
     // 传入 access_token 值应命中
-    expect(await pool.findAccountIdByCredential('workbuddy', 'WB-TOKEN')).toBe('workbuddy-2')
+    expect(await pool.findAccountIdByCredential('buddy', 'WB-TOKEN')).toBe('workbuddy-2')
     // 传入 access_key_id 值不应命中（说明用的确实是 access_token 字段）
-    expect(await pool.findAccountIdByCredential('workbuddy', 'SOMETHING-ELSE')).toBe('')
+    expect(await pool.findAccountIdByCredential('buddy', 'SOMETHING-ELSE')).toBe('')
   })
 
   it('codearts 仍按 access_key_id 匹配（既有行为不回归）', async () => {
@@ -396,32 +396,32 @@ describe('findAccountIdByCredential 的 provider 字段选择', () => {
   it('buddy 仍按 access_token 匹配（既有行为不回归）', async () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
-    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_T4'), JSON.stringify({
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCOUNT_T4'), JSON.stringify({
       access_token: 'BD-TOKEN', refresh_token: 'RT', expires_at: String(Date.now() + 3_600_000),
     }))
     await pool.addAccount({
-      id: 'buddy-4', provider: 'buddy', nickname: 'BD', enabled: true,
-      credentialRef: 'BUDDY_ACCOUNT_T4', createdAt: Date.now(), refreshable: true,
+      id: 'buddy-4', provider: 'buddy-cn', nickname: 'BD', enabled: true,
+      credentialRef: 'BUDDY_CN_ACCOUNT_T4', createdAt: Date.now(), refreshable: true,
     })
-    expect(await pool.findAccountIdByCredential('buddy', 'BD-TOKEN')).toBe('buddy-4')
+    expect(await pool.findAccountIdByCredential('buddy-cn', 'BD-TOKEN')).toBe('buddy-4')
   })
 })
 
 describe('pruneAccountsWithForeignDomain', () => {
   /** WorkBuddy 国际版的判定目标：域名是 www.workbuddy.ai */
-  const product = { id: 'workbuddy', apiDomain: 'www.workbuddy.ai' } as never
+  const product = { id: 'buddy', apiDomain: 'www.workbuddy.ai' } as never
 
   it('删除 domain 指向旧端点（中国版）的 WorkBuddy 账号', async () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCOUNT_OLD'), JSON.stringify({
+    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_OLD'), JSON.stringify({
       access_token: 'AT', refresh_token: 'RT',
       expires_at: String(Date.now() + 3_600_000),
       domain: 'copilot.tencent.com',
     }))
     await pool.addAccount({
-      id: 'workbuddy-old', provider: 'workbuddy', nickname: '旧', enabled: true,
-      credentialRef: 'WORKBUDDY_ACCOUNT_OLD', createdAt: Date.now(), refreshable: true,
+      id: 'workbuddy-old', provider: 'buddy', nickname: '旧', enabled: true,
+      credentialRef: 'BUDDY_ACCOUNT_OLD', createdAt: Date.now(), refreshable: true,
     })
 
     const removed = await pool.pruneAccountsWithForeignDomain(product)
@@ -433,14 +433,14 @@ describe('pruneAccountsWithForeignDomain', () => {
   it('保留 domain 与新端点一致的 WorkBuddy 账号', async () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCOUNT_NEW'), JSON.stringify({
+    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_NEW'), JSON.stringify({
       access_token: 'AT', refresh_token: 'RT',
       expires_at: String(Date.now() + 3_600_000),
       domain: 'www.workbuddy.ai',
     }))
     await pool.addAccount({
-      id: 'workbuddy-new', provider: 'workbuddy', nickname: '新', enabled: true,
-      credentialRef: 'WORKBUDDY_ACCOUNT_NEW', createdAt: Date.now(), refreshable: true,
+      id: 'workbuddy-new', provider: 'buddy', nickname: '新', enabled: true,
+      credentialRef: 'BUDDY_ACCOUNT_NEW', createdAt: Date.now(), refreshable: true,
     })
 
     const removed = await pool.pruneAccountsWithForeignDomain(product)
@@ -453,14 +453,14 @@ describe('pruneAccountsWithForeignDomain', () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
     // CodeBuddy 账号的 domain 也是 copilot.tencent.com，但不该被 WorkBuddy 的清理波及
-    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_KEEP'), JSON.stringify({
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCOUNT_KEEP'), JSON.stringify({
       access_token: 'AT', refresh_token: 'RT',
       expires_at: String(Date.now() + 3_600_000),
       domain: 'copilot.tencent.com',
     }))
     await pool.addAccount({
-      id: 'buddy-keep', provider: 'buddy', nickname: 'CB', enabled: true,
-      credentialRef: 'BUDDY_ACCOUNT_KEEP', createdAt: Date.now(), refreshable: true,
+      id: 'buddy-keep', provider: 'buddy-cn', nickname: 'CB', enabled: true,
+      credentialRef: 'BUDDY_CN_ACCOUNT_KEEP', createdAt: Date.now(), refreshable: true,
     })
 
     const removed = await pool.pruneAccountsWithForeignDomain(product)
@@ -472,14 +472,14 @@ describe('pruneAccountsWithForeignDomain', () => {
   it('domain 为空的历史凭据保守保留（无法判定）', async () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCOUNT_NODOMAIN'), JSON.stringify({
+    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_NODOMAIN'), JSON.stringify({
       access_token: 'AT', refresh_token: 'RT',
       expires_at: String(Date.now() + 3_600_000),
       domain: '',
     }))
     await pool.addAccount({
-      id: 'workbuddy-nodomain', provider: 'workbuddy', nickname: '?', enabled: true,
-      credentialRef: 'WORKBUDDY_ACCOUNT_NODOMAIN', createdAt: Date.now(), refreshable: true,
+      id: 'workbuddy-nodomain', provider: 'buddy', nickname: '?', enabled: true,
+      credentialRef: 'BUDDY_ACCOUNT_NODOMAIN', createdAt: Date.now(), refreshable: true,
     })
 
     const removed = await pool.pruneAccountsWithForeignDomain(product)
@@ -492,8 +492,8 @@ describe('pruneAccountsWithForeignDomain', () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
     await pool.addAccount({
-      id: 'workbuddy-nocred', provider: 'workbuddy', nickname: '无', enabled: true,
-      credentialRef: 'WORKBUDDY_ACCOUNT_MISSING', createdAt: Date.now(), refreshable: true,
+      id: 'workbuddy-nocred', provider: 'buddy', nickname: '无', enabled: true,
+      credentialRef: 'BUDDY_ACCOUNT_MISSING', createdAt: Date.now(), refreshable: true,
     })
 
     const removed = await pool.pruneAccountsWithForeignDomain(product)
@@ -505,10 +505,10 @@ describe('pruneAccountsWithForeignDomain', () => {
   it('凭据 JSON 损坏时不删除且不抛异常', async () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCOUNT_BROKEN'), '{not json')
+    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_BROKEN'), '{not json')
     await pool.addAccount({
-      id: 'workbuddy-broken', provider: 'workbuddy', nickname: '坏', enabled: true,
-      credentialRef: 'WORKBUDDY_ACCOUNT_BROKEN', createdAt: Date.now(), refreshable: true,
+      id: 'workbuddy-broken', provider: 'buddy', nickname: '坏', enabled: true,
+      credentialRef: 'BUDDY_ACCOUNT_BROKEN', createdAt: Date.now(), refreshable: true,
     })
 
     const removed = await pool.pruneAccountsWithForeignDomain(product)
@@ -521,26 +521,26 @@ describe('pruneAccountsWithForeignDomain', () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
     for (const [ref, domain] of [
-      ['WORKBUDDY_ACCOUNT_A', 'copilot.tencent.com'],
-      ['WORKBUDDY_ACCOUNT_B', 'www.workbuddy.ai'],
-      ['WORKBUDDY_ACCOUNT_C', 'copilot.tencent.com'],
+      ['BUDDY_ACCOUNT_A', 'copilot.tencent.com'],
+      ['BUDDY_ACCOUNT_B', 'www.workbuddy.ai'],
+      ['BUDDY_ACCOUNT_C', 'copilot.tencent.com'],
     ] as const) {
       await ctx.credentials.set(credentialRef(ref), JSON.stringify({
         access_token: 'AT', refresh_token: 'RT',
         expires_at: String(Date.now() + 3_600_000), domain,
       }))
       await pool.addAccount({
-        id: ref.toLowerCase(), provider: 'workbuddy', nickname: ref, enabled: true,
+        id: ref.toLowerCase(), provider: 'buddy', nickname: ref, enabled: true,
         credentialRef: ref, createdAt: Date.now(), refreshable: true,
       })
     }
 
     const removed = await pool.pruneAccountsWithForeignDomain(product)
 
-    expect(removed.sort()).toEqual(['workbuddy_account_a', 'workbuddy_account_c'])
+    expect(removed.sort()).toEqual(['buddy_account_a', 'buddy_account_c'])
     const left = await pool.listAllAccounts()
     expect(left).toHaveLength(1)
-    expect(left[0]!.id).toBe('workbuddy_account_b')
+    expect(left[0]!.id).toBe('buddy_account_b')
   })
 })
 
@@ -554,15 +554,15 @@ describe('pruneAccountsWithForeignDomain', () => {
 describe('AccountPool 模型黑名单', () => {
   it('未配置时没有任何模型被关闭（默认全开）', () => {
     const pool = new AccountPool(createMockContext() as never)
-    expect(pool.disabledModelsFor('buddy').size).toBe(0)
-    expect(pool.listDisabledModels('buddy')).toEqual({})
+    expect(pool.disabledModelsFor('buddy-cn').size).toBe(0)
+    expect(pool.listDisabledModels('buddy-cn')).toEqual({})
   })
 
   it('关闭模型后该模型进入黑名单，其余模型不受影响', async () => {
     const pool = new AccountPool(createMockContext() as never)
-    await pool.setModelDisabled('buddy', 'glm-5.2', true)
+    await pool.setModelDisabled('buddy-cn', 'glm-5.2', true)
 
-    const disabled = pool.disabledModelsFor('buddy')
+    const disabled = pool.disabledModelsFor('buddy-cn')
     expect(disabled.has('glm-5.2')).toBe(true)
     // 没被关掉的模型默认打开 —— 黑名单制的关键断言
     expect(disabled.has('deepseek-v4-flash')).toBe(false)
@@ -572,10 +572,10 @@ describe('AccountPool 模型黑名单', () => {
   it('重新打开时删除条目，而不是写入 false', async () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
-    await pool.setModelDisabled('buddy', 'glm-5.2', true)
-    await pool.setModelDisabled('buddy', 'glm-5.2', false)
+    await pool.setModelDisabled('buddy-cn', 'glm-5.2', true)
+    await pool.setModelDisabled('buddy-cn', 'glm-5.2', false)
 
-    expect(pool.disabledModelsFor('buddy').size).toBe(0)
+    expect(pool.disabledModelsFor('buddy-cn').size).toBe(0)
     // 打开后 provider 表变空，应当整体从配置里消失（不留 { buddy: {} } 噪音）
     const last = ctx.replacePayloads.at(-1)!
     expect(last.disabledModels).toEqual({})
@@ -583,28 +583,28 @@ describe('AccountPool 模型黑名单', () => {
 
   it('不同 provider 的黑名单互不影响', async () => {
     const pool = new AccountPool(createMockContext() as never)
-    await pool.setModelDisabled('buddy', 'glm-5.2', true)
-    await pool.setModelDisabled('workbuddy', 'gpt-5.4', true)
+    await pool.setModelDisabled('buddy-cn', 'glm-5.2', true)
+    await pool.setModelDisabled('buddy', 'gpt-5.4', true)
 
-    expect([...pool.disabledModelsFor('buddy')]).toEqual(['glm-5.2'])
-    expect([...pool.disabledModelsFor('workbuddy')]).toEqual(['gpt-5.4'])
+    expect([...pool.disabledModelsFor('buddy-cn')]).toEqual(['glm-5.2'])
+    expect([...pool.disabledModelsFor('buddy')]).toEqual(['gpt-5.4'])
     expect(pool.disabledModelsFor('codearts').size).toBe(0)
   })
 
   it('关闭多个模型后全部保留', async () => {
     const pool = new AccountPool(createMockContext() as never)
-    await pool.setModelDisabled('buddy', 'glm-5.2', true)
-    await pool.setModelDisabled('buddy', 'hy3', true)
-    await pool.setModelDisabled('buddy', 'kimi-k2.6', true)
+    await pool.setModelDisabled('buddy-cn', 'glm-5.2', true)
+    await pool.setModelDisabled('buddy-cn', 'hy3', true)
+    await pool.setModelDisabled('buddy-cn', 'kimi-k2.6', true)
 
-    expect([...pool.disabledModelsFor('buddy')].sort()).toEqual(['glm-5.2', 'hy3', 'kimi-k2.6'])
+    expect([...pool.disabledModelsFor('buddy-cn')].sort()).toEqual(['glm-5.2', 'hy3', 'kimi-k2.6'])
   })
 
   it('从已有配置载入黑名单', () => {
     const pool = new AccountPool(createMockContext([], {
-      initialDisabledModels: { buddy: { 'glm-5.2': true } },
+      initialDisabledModels: { 'buddy-cn': { 'glm-5.2': true } },
     }) as never)
-    const disabled = pool.disabledModelsFor('buddy')
+    const disabled = pool.disabledModelsFor('buddy-cn')
     expect(disabled.has('glm-5.2')).toBe(true)
     expect(disabled.size).toBe(1)
   })
@@ -617,14 +617,14 @@ describe('AccountPool 模型黑名单', () => {
   it('写账号列表时不会抹掉已有的黑名单', async () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
-    await pool.setModelDisabled('buddy', 'glm-5.2', true)
+    await pool.setModelDisabled('buddy-cn', 'glm-5.2', true)
     await pool.addAccount({
-      id: 'buddy-x', provider: 'buddy', nickname: 'X', enabled: true,
-      credentialRef: 'BUDDY_ACCOUNT_X', createdAt: Date.now(), refreshable: true,
+      id: 'buddy-x', provider: 'buddy-cn', nickname: 'X', enabled: true,
+      credentialRef: 'BUDDY_CN_ACCOUNT_X', createdAt: Date.now(), refreshable: true,
     })
 
-    expect(ctx.replacePayloads.at(-1)!.disabledModels).toEqual({ buddy: { 'glm-5.2': true } })
-    expect(pool.disabledModelsFor('buddy').has('glm-5.2')).toBe(true)
+    expect(ctx.replacePayloads.at(-1)!.disabledModels).toEqual({ 'buddy-cn': { 'glm-5.2': true } })
+    expect(pool.disabledModelsFor('buddy-cn').has('glm-5.2')).toBe(true)
   })
 
   /** 反向回归：写黑名单时若丢掉账号列表，账号池会被清空。 */
@@ -632,10 +632,10 @@ describe('AccountPool 模型黑名单', () => {
     const ctx = createMockContext()
     const pool = new AccountPool(ctx as never)
     await pool.addAccount({
-      id: 'buddy-y', provider: 'buddy', nickname: 'Y', enabled: true,
-      credentialRef: 'BUDDY_ACCOUNT_Y', createdAt: Date.now(), refreshable: true,
+      id: 'buddy-y', provider: 'buddy-cn', nickname: 'Y', enabled: true,
+      credentialRef: 'BUDDY_CN_ACCOUNT_Y', createdAt: Date.now(), refreshable: true,
     })
-    await pool.setModelDisabled('buddy', 'glm-5.2', true)
+    await pool.setModelDisabled('buddy-cn', 'glm-5.2', true)
 
     expect(ctx.replacePayloads.at(-1)!.accounts).toHaveLength(1)
     expect(await pool.listAllAccounts()).toHaveLength(1)
@@ -645,20 +645,20 @@ describe('AccountPool 模型黑名单', () => {
     // 模拟手工编辑过的/老版本的配置文件：数组、字符串、false 都应被丢弃
     const pool = new AccountPool(createMockContext([], {
       initialDisabledModels: {
-        buddy: { 'glm-5.2': true, 'hy3': false, 'bad': 'yes' } as never,
+        'buddy-cn': { 'glm-5.2': true, 'hy3': false, 'bad': 'yes' } as never,
         broken: ['glm-5.2'] as never,
       },
     }) as never)
 
     // 只有显式 true 的条目生效
-    expect([...pool.disabledModelsFor('buddy')]).toEqual(['glm-5.2'])
+    expect([...pool.disabledModelsFor('buddy-cn')]).toEqual(['glm-5.2'])
     // 结构非法的 provider 整层丢弃
     expect(pool.disabledModelsFor('broken').size).toBe(0)
   })
 
   it('无 settings scope 时降级为内存态，不抛错', async () => {
     const pool = new AccountPool({ get: () => undefined, logger: { warn: () => {}, info: () => {} } } as never)
-    await pool.setModelDisabled('buddy', 'glm-5.2', true)
-    expect(pool.disabledModelsFor('buddy').has('glm-5.2')).toBe(true)
+    await pool.setModelDisabled('buddy-cn', 'glm-5.2', true)
+    expect(pool.disabledModelsFor('buddy-cn').has('glm-5.2')).toBe(true)
   })
 })

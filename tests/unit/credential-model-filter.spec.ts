@@ -19,6 +19,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { AccountPool } from '../../src/account-pool.js'
 import { makeAccountPicker, makeCredentialResolver } from '../../src/index.js'
+import { accountCredentialRefName } from '../../src/jet-hub-rpc.js'
 import { BuddyAdapter, DEFAULT_MODEL } from '../../src/buddy-adapter.js'
 import { CodeArtsAdapter } from '../../src/llm-adapter.js'
 import { LobsteraiAdapter } from '../../src/lobsterai-adapter.js'
@@ -88,7 +89,10 @@ function makeAccount(
     provider,
     nickname: id,
     enabled: true,
-    credentialRef: `${provider.toUpperCase()}_ACCOUNT_${id}`,
+    // 与生产代码同规矩：provider 名里的连字符要折成下划线才是指针合法的 ref
+    // （`buddy-cn` → `BUDDY_CN_ACCOUNT_*`），否则 credentialRef() 直接抛
+    // `must match /^[A-Za-z_][A-Za-z0-9_]*$/`。
+    credentialRef: accountCredentialRefName(provider, id),
     createdAt: 1,
     expiresAt: Date.now() + HOUR,
     refreshable: true,
@@ -114,12 +118,12 @@ async function makeBuddyPool(
   const { ctx, credentials } = createPoolContext()
   const pool = new AccountPool(ctx as never)
   for (const spec of specs) {
-    const entry = makeAccount(spec.id, 'buddy', spec.limits)
+    const entry = makeAccount(spec.id, 'buddy-cn', spec.limits)
     credentials.set(credentialRef(entry.credentialRef), JSON.stringify(buddyCredential(spec.token)))
     await pool.addAccount(entry)
   }
   const resolveCredential = makeCredentialResolver<BuddyCredential>(
-    ctx as never, pool, 'buddy', 'BUDDY_ACCESS_TOKEN',
+    ctx as never, pool, 'buddy-cn', 'BUDDY_CN_ACCESS_TOKEN',
   )
   return { ctx, pool, resolveCredential }
 }
@@ -164,7 +168,7 @@ describe('凭据在发请求前按目标模型选择（场景 A 核心修复）'
       return sseResponse(OK_SSE)
     }) as unknown as typeof fetch
     const adapter = new BuddyAdapter({
-      credentialRef: credentialRef('BUDDY_ACCESS_TOKEN'),
+      credentialRef: credentialRef('BUDDY_CN_ACCESS_TOKEN'),
       resolveCredential,
       refresh: async () => {},
       fetchImpl: fetcher,
@@ -208,7 +212,7 @@ describe('凭据在发请求前按目标模型选择（场景 A 核心修复）'
 
     const fetcher = vi.fn(async () => new Response(RATE_LIMIT_BODY, { status: 400 })) as unknown as typeof fetch
     const adapter = new BuddyAdapter({
-      credentialRef: credentialRef('BUDDY_ACCESS_TOKEN'),
+      credentialRef: credentialRef('BUDDY_CN_ACCESS_TOKEN'),
       resolveCredential,
       refresh: async () => {},
       fetchImpl: fetcher,
@@ -262,7 +266,7 @@ describe('凭据在发请求前按目标模型选择（场景 A 核心修复）'
       { id: 'a', token: 'AT-A', limits: { [MODEL]: Date.now() + HOUR } },
       { id: 'b', token: 'AT-B' },
     ])
-    const pick = makeAccountPicker(pool, 'buddy')
+    const pick = makeAccountPicker(pool, 'buddy-cn')
 
     expect((await pick(MODEL))?.entry.id).toBe('b')
     // 空参路径（fetchModels / 默认单凭据场景）仍取排序第一，两者互不串味。
@@ -273,7 +277,7 @@ describe('凭据在发请求前按目标模型选择（场景 A 核心修复）'
   })
 
   it('未配置账号池时返回 null，由调用方回退单凭据 ref', async () => {
-    const pick = makeAccountPicker(undefined, 'buddy')
+    const pick = makeAccountPicker(undefined, 'buddy-cn')
     expect(await pick(MODEL)).toBeNull()
     expect(await pick()).toBeNull()
   })
@@ -353,13 +357,13 @@ describe('经真实 apply() 接线：请求直接落在未被限流的账号上'
         { id: 'a', token: 'AT-A', limits: { [MODEL]: Date.now() + HOUR } },
         { id: 'b', token: 'AT-B' },
       ]) {
-        const entry = makeAccount(spec.id, 'buddy', spec.limits)
+        const entry = makeAccount(spec.id, 'buddy-cn', spec.limits)
         await credentials.set(entry.credentialRef, JSON.stringify(buddyCredential(spec.token)))
         // refreshable: false 避免 apply() 里的续期调度器在测试中留下定时器。
         await pool.addAccount({ ...entry, refreshable: false })
       }
 
-      const registered = llm.adapters.find((item) => item.providers.includes('buddy'))
+      const registered = llm.adapters.find((item) => item.providers.includes('buddy-cn'))
       expect(registered, 'buddy 适配器必须已注册').toBeDefined()
 
       await collect(registered!.adapter, {
@@ -392,7 +396,7 @@ describe('适配器调用 resolveCredential 时必须带上目标模型', () => 
     const calls: Array<string | undefined> = []
     let attempt = 0
     const adapter = new BuddyAdapter({
-      credentialRef: credentialRef('BUDDY_ACCESS_TOKEN'),
+      credentialRef: credentialRef('BUDDY_CN_ACCESS_TOKEN'),
       resolveCredential: async (model?: string) => { calls.push(model); return buddyCredential('AT') },
       refresh: async () => {},
       fetchImpl: (async () => {

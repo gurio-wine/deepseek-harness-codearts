@@ -1,5 +1,5 @@
 /**
- * Buddy (腾讯 CodeBuddy) 认证服务
+ * Buddy (腾讯 Buddy CN / Buddy) 认证服务
  *
  * 管理 external-link-v2 轮询式登录、凭据存储与 RefreshScheduler 静默续期，
  * 结构与 CodeArtsAuth 保持一致（同样的调度语义、同样的登出竞态保护）。
@@ -22,16 +22,16 @@ import {
 import { RefreshScheduler } from './refresh.js'
 import type { BuddyCredential, BuddyRemoteModel } from './buddy.js'
 import { AccountPool } from './account-pool.js'
-import { CODEBUDDY, type BuddyProduct } from './product.js'
+import { BUDDY_CN, type BuddyProduct } from './product.js'
 
 /**
- * CodeBuddy 的登录结果存储所用的凭据引用。
+ * Buddy CN 的登录结果存储所用的凭据引用。
  *
- * 直接取自 `CODEBUDDY.defaultCredentialRef`（产品配置是唯一真相源），保留此
+ * 直接取自 `BUDDY_CN.defaultCredentialRef`（产品配置是唯一真相源），保留此
  * 导出仅为兼容既有导入方；新代码请改用 `BuddyAuth` 实例的 `credentialRefName`
  * 字段（随产品变化）。
  */
-export const BUDDY_CREDENTIAL_REF = CODEBUDDY.defaultCredentialRef
+export const BUDDY_CREDENTIAL_REF = BUDDY_CN.defaultCredentialRef
 
 /** 一次成功登录的结果。 */
 export interface BuddyLoginResult {
@@ -60,15 +60,15 @@ export interface BuddyLoginStatus {
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    buddyAuth: BuddyAuth
+    buddyCnAuth: BuddyAuth
     /**
-     * WorkBuddy 的认证服务实例。
+     * Buddy（国际版）的认证服务实例。
      *
-     * 与 `buddyAuth`（CodeBuddy）并列存在：cordis 的 `Service` 构造时按名称
-     * 注册，同名第二次注册会抛 `service "buddyAuth" has been registered`，
+     * 与 `buddyCnAuth`（Buddy CN）并列存在：cordis 的 `Service` 构造时按名称
+     * 注册，同名第二次注册会抛 `service "buddyCnAuth" has been registered`，
      * 故两个产品必须各占一个服务名。
      */
-    workbuddyAuth: BuddyAuth
+    buddyAuth: BuddyAuth
   }
 }
 
@@ -86,12 +86,12 @@ function parseCredential(value: string): BuddyCredential | undefined {
 
 /** Buddy 登录服务：轮询式登录 + refresh_token 静默续期。 */
 export class BuddyAuth extends Service {
-  /** 本实例所属的产品配置（CodeBuddy 或 WorkBuddy）。 */
+  /** 本实例所属的产品配置（Buddy CN 或 Buddy）。 */
   readonly product: BuddyProduct
 
   /**
    * 本实例默认读写的凭据 ref 名称。
-   * CodeBuddy 为 `BUDDY_ACCESS_TOKEN`，WorkBuddy 为 `WORKBUDDY_ACCESS_TOKEN`；
+   * Buddy CN 为 `BUDDY_CN_ACCESS_TOKEN`，Buddy 为 `BUDDY_ACCESS_TOKEN`；
    * 两个产品各自读写自己的 ref，凭据互不可见。
    */
   readonly credentialRefName: string
@@ -117,14 +117,14 @@ export class BuddyAuth extends Service {
     ctx: Context,
     private readonly options: { fetcher?: typeof fetch; product?: BuddyProduct; serviceName?: string } = {},
   ) {
-    // 默认 CodeBuddy，保证既有行为完全不变。
-    const product = options.product ?? CODEBUDDY
+    // 默认 Buddy CN，保证既有行为完全不变。
+    const product = options.product ?? BUDDY_CN
     // 服务名必须随产品区分：cordis 的 Service 在构造时按名称注册，同名第二次
-    // 注册会抛 `service "buddyAuth" has been registered at <root>`，而
-    // CodeBuddy 与 WorkBuddy 需要同时存在两个实例。按产品 id 派生即可得到
-    // 稳定且互不冲突的两个名字：buddy → `buddyAuth`（与改造前完全一致）、
-    // workbuddy → `workbuddyAuth`；显式传入 serviceName 可覆盖。
-    super(ctx, options.serviceName ?? `${product.id}Auth`)
+    // 注册会抛 `service "buddyCnAuth" has been registered at <root>`，而
+    // Buddy CN 与 Buddy 需要同时存在两个实例。服务名由产品配置的 serviceName
+    // **显式给出**（`buddy-cn` 机械派生会得到非标识符风格的 `buddy-cnAuth`，
+    // 与 TraeCnAuth 是同一先例）；显式传入 serviceName 可覆盖。
+    super(ctx, options.serviceName ?? product.serviceName)
     this.product = product
     this.credentialRefName = this.product.defaultCredentialRef
   }
@@ -143,7 +143,7 @@ export class BuddyAuth extends Service {
       ...this.options.fetcher !== undefined ? { fetcher: this.options.fetcher } : {},
       ...flowOptions,
       // 产品配置决定 auth/state 的 platform 与登录 URL 附加参数：调用方显式传入优先，
-      // 否则用本实例的产品（WorkBuddy 实例不会退回 CodeBuddy）。
+      // 否则用本实例的产品（Buddy 实例不会退回 Buddy CN）。
       product: flowOptions.product ?? this.product,
     })
     await this.ctx.credentials.set(ref, flow.access)
@@ -229,8 +229,8 @@ export class BuddyAuth extends Service {
       throw new RefreshTokenExpiredError('无 refresh_token，请重新登录')
     }
     try {
-      // 第 4 个参数是本实例的产品：WorkBuddy 续期时必须带自己的 UA，
-      // 否则会以 CodeBuddy 的身份标识请求刷新接口。
+      // 第 4 个参数是本实例的产品：Buddy 续期时必须带自己的 UA，
+      // 否则会以 Buddy CN 的身份标识请求刷新接口。
       const refreshed = await this.refreshCredential(credential)
       // 登出竞态保护：在途刷新期间已 logout()/stop() 时，跳过凭据回写与调度武装，
       // 避免已登出的凭据被在途刷新复活。
@@ -272,8 +272,8 @@ export class BuddyAuth extends Service {
    * 按凭据 ref 续期**指定账号**的凭据。
    *
    * 与 {@link refresh} 的区别（这是修复既有缺陷的关键）：
-   * - `refresh()` 读写的是本实例的**默认单凭据 ref**（如 `BUDDY_ACCESS_TOKEN`），
-   *   而 Account Hub 的账号卡片对应的是 `BUDDY_ACCOUNT_XXX` ——
+   * - `refresh()` 读写的是本实例的**默认单凭据 ref**（如 `BUDDY_CN_ACCESS_TOKEN`），
+   *   而 Account Hub 的账号卡片对应的是 `BUDDY_CN_ACCOUNT_XXX` ——
    *   用 `refresh()` 去刷账号池里的账号，实际刷的是另一个凭据；
    * - 本方法也**不触碰** `refreshTokenInvalid` / `lastRefreshError` / 调度器：
    *   那些状态属于「单凭据路径」，被多账号操作污染会让 UI 显示错误的失效提示。
@@ -372,8 +372,8 @@ export class BuddyAuth extends Service {
    * 优先使用账号池中的可用账号；无账号池或池为空时回退到固定凭据 ref。
    *
    * **关键**：两处调用都必须把 `this.product` 传给 `fetchModels`，否则
-   * WorkBuddy 实例（Task 7 的 `fetchRemoteModels: () => workbuddy.fetchModels(pool)`）
-   * 会以 `X-Product-Code: codebuddy` + CodeBuddy 的 UA 请求 /v3/config，
+   * Buddy 实例（Task 7 的 `fetchRemoteModels: () => buddy.fetchModels(pool)`）
+   * 会以 `X-Product-Code: codebuddy` + Buddy CN 的 UA 请求 /v3/config，
    * 即携带另一个产品的身份标识。
    */
   async fetchModels(pool?: AccountPool): Promise<BuddyRemoteModel[]> {

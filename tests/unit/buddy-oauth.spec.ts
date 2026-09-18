@@ -9,7 +9,7 @@ import {
   refreshToken,
   runBuddyLoginFlow,
 } from '../../src/buddy-oauth.js'
-import { CODEBUDDY, WORKBUDDY, type BuddyProduct } from '../../src/product.js'
+import { BUDDY_CN, BUDDY, type BuddyProduct } from '../../src/product.js'
 import type { BuddyCredential } from '../../src/buddy.js'
 
 const STATE = 'state-abc'
@@ -191,7 +191,7 @@ describe('buddy refreshToken', () => {
   // 回归（Task 3 审查遗留）：refresh 请求此前硬编码 CodeBuddy 的 UA。
   // 两个内置产品的 userAgent 字面量暂时相同，无法观测该行为，故注入自定义 UA。
   it('续期请求使用传入 product 的 User-Agent', async () => {
-    const custom: BuddyProduct = { ...WORKBUDDY, userAgent: 'WorkBuddy/7.7.7' }
+    const custom: BuddyProduct = { ...BUDDY, userAgent: 'WorkBuddy/7.7.7' }
     const fetcher = routeFetch([{
       when: () => true,
       respond: () => new Response(JSON.stringify({
@@ -216,13 +216,13 @@ describe('buddy refreshToken', () => {
     }])
     await refreshToken(makeCredential(), fetcher)
     const [, init] = (fetcher as unknown as { mock: { calls: Array<[string, RequestInit]> } }).mock.calls[0]
-    expect((init.headers as Record<string, string>)['User-Agent']).toBe(CODEBUDDY.userAgent)
+    expect((init.headers as Record<string, string>)['User-Agent']).toBe(BUDDY_CN.userAgent)
   })
 })
 
 describe('登录轮询的产品身份标识', () => {
   it('loopGetToken 使用传入 product 的 User-Agent', async () => {
-    const custom: BuddyProduct = { ...WORKBUDDY, userAgent: 'WorkBuddy/7.7.7' }
+    const custom: BuddyProduct = { ...BUDDY, userAgent: 'WorkBuddy/7.7.7' }
     const fetcher = routeFetch([{
       when: () => true,
       respond: () => new Response(JSON.stringify({
@@ -236,7 +236,7 @@ describe('登录轮询的产品身份标识', () => {
   })
 
   it('getAccount 使用传入 product 的 User-Agent', async () => {
-    const custom: BuddyProduct = { ...WORKBUDDY, userAgent: 'WorkBuddy/7.7.7' }
+    const custom: BuddyProduct = { ...BUDDY, userAgent: 'WorkBuddy/7.7.7' }
     const fetcher = routeFetch([{
       when: () => true,
       respond: () => new Response(JSON.stringify({
@@ -252,7 +252,7 @@ describe('登录轮询的产品身份标识', () => {
   })
 
   it('runBuddyLoginFlow 把产品传给 token 与 account 两步轮询', async () => {
-    const custom: BuddyProduct = { ...WORKBUDDY, userAgent: 'WorkBuddy/7.7.7' }
+    const custom: BuddyProduct = { ...BUDDY, userAgent: 'WorkBuddy/7.7.7' }
     const fetcher = routeFetch([
       {
         when: (url) => url.includes('/auth/state'),
@@ -328,15 +328,17 @@ describe('buddy fetchModels', () => {
         respond: () => new Response(JSON.stringify({ data: { agents: [{ name: 'craft', models: ['glm-5.3'] }] } }), { status: 200 }),
       },
     ])
-    const models = await fetchModels(makeCredential(), fetcher, undefined, WORKBUDDY)
+    const models = await fetchModels(makeCredential(), fetcher, undefined, BUDDY)
     expect(models.map((m) => m.id)).toEqual(['glm-5.3'])
     const calls = (fetcher as unknown as { mock: { calls: Array<[string, RequestInit]> } }).mock.calls
     expect(calls[0]![0]).toContain('/console/enterprises/personal/models')
     expect(calls.at(-1)![0]).toContain('/v3/config')
     for (const [url, init] of calls) {
       const headers = init.headers as Record<string, string>
+      // ⚠️ 协议值：provider id 已改名为 `buddy`，但出站 X-Product-Code 仍是
+      // `workbuddy`（腾讯后台按它归因用量）。
       expect(headers['X-Product-Code'], `URL=${url}`).toBe('workbuddy')
-      expect(headers['User-Agent']).toBe(WORKBUDDY.userAgent)
+      expect(headers['User-Agent']).toBe(BUDDY.userAgent)
       expect(headers['X-Product']).toBe('SaaS')
     }
   })
@@ -354,7 +356,7 @@ describe('buddy fetchModels', () => {
         },
       }), { status: 200 }),
     }])
-    const models = await fetchModels(makeCredential(), fetcher, undefined, WORKBUDDY)
+    const models = await fetchModels(makeCredential(), fetcher, undefined, BUDDY)
     expect(models.map((m) => m.id)).toEqual(['gpt-5.6-sol', 'glm-5.2'])
     // 命中企业端点后不应再请求 /v3/config
     const urls = (fetcher as unknown as { mock: { calls: Array<[string]> } }).mock.calls.map((c) => c[0])
@@ -372,7 +374,7 @@ describe('buddy fetchModels', () => {
         respond: () => new Response(JSON.stringify({ data: { agents: [{ name: 'craft', models: ['glm-5.3'] }] } }), { status: 200 }),
       },
     ])
-    const models = await fetchModels(makeCredential(), fetcher, undefined, WORKBUDDY)
+    const models = await fetchModels(makeCredential(), fetcher, undefined, BUDDY)
     expect(models.map((m) => m.id)).toEqual(['glm-5.3'])
   })
 
@@ -387,7 +389,7 @@ describe('buddy fetchModels', () => {
         respond: () => new Response(JSON.stringify({ data: { agents: [{ name: 'craft', models: ['glm-5.3'] }] } }), { status: 200 }),
       },
     ])
-    const models = await fetchModels(makeCredential(), fetcher, undefined, WORKBUDDY)
+    const models = await fetchModels(makeCredential(), fetcher, undefined, BUDDY)
     expect(models.map((m) => m.id)).toEqual(['glm-5.3'])
   })
 
@@ -396,7 +398,7 @@ describe('buddy fetchModels', () => {
       when: () => true,
       respond: () => new Response('boom', { status: 500 }),
     }])
-    expect(await fetchModels(makeCredential(), fetcher, undefined, WORKBUDDY)).toEqual([])
+    expect(await fetchModels(makeCredential(), fetcher, undefined, BUDDY)).toEqual([])
   })
 
   it('企业模型端点用不带尾斜杠的路径（带斜杠会 403）', async () => {
@@ -412,7 +414,7 @@ describe('buddy fetchModels', () => {
       },
     ])
     // 记录实际请求 URL（routeFetch 的 respond 不接收参数，故从 mock.calls 取）
-    const models = await fetchModels(makeCredential(), fetcher, undefined, WORKBUDDY)
+    const models = await fetchModels(makeCredential(), fetcher, undefined, BUDDY)
     seen.push(...(fetcher as unknown as { mock: { calls: Array<[string]> } }).mock.calls.map((c) => c[0]))
     expect(models.map((m) => m.id)).toEqual(['glm-5.3'])
     const scopedUrl = seen.find((u) => u.includes('/console/enterprises/personal/models'))
@@ -490,7 +492,7 @@ describe('产品参数化', () => {
         code: 0, data: { state: 'S', authUrl: 'https://copilot.tencent.com/login?platform=workbuddy&state=S' },
       }), { status: 200 }),
     }])
-    await fetchAuthState(fetcher, undefined, WORKBUDDY)
+    await fetchAuthState(fetcher, undefined, BUDDY)
     const [url] = (fetcher as unknown as { mock: { calls: Array<[string]> } }).mock.calls[0]
     expect(url).toContain('platform=workbuddy')
   })
@@ -516,7 +518,7 @@ describe('产品参数化', () => {
       },
     ])
     await runBuddyLoginFlow({
-      fetcher, pollIntervalMs: 0, product: CODEBUDDY,
+      fetcher, pollIntervalMs: 0, product: BUDDY_CN,
       openBrowser: (url) => { openedUrl = url },
     })
     expect(openedUrl).not.toContain('loginSessionId')
@@ -544,10 +546,10 @@ describe('产品参数化', () => {
       },
     ])
     await runBuddyLoginFlow({
-      fetcher, pollIntervalMs: 0, product: WORKBUDDY,
+      fetcher, pollIntervalMs: 0, product: BUDDY,
       openBrowser: (url) => { openedUrl = url },
     })
-    expect(openedUrl).toContain(`version=${WORKBUDDY.pluginVersion as string}`)
+    expect(openedUrl).toContain(`version=${BUDDY.pluginVersion as string}`)
     expect(openedUrl).toMatch(/loginSessionId=[0-9a-f-]{36}/)
     // 服务端下发的 platform 与 state 必须保留
     expect(openedUrl).toContain('platform=workbuddy')
@@ -576,7 +578,7 @@ describe('产品参数化', () => {
     const urls: string[] = []
     for (let i = 0; i < 2; i++) {
       await runBuddyLoginFlow({
-        fetcher: mk(), pollIntervalMs: 0, product: WORKBUDDY,
+        fetcher: mk(), pollIntervalMs: 0, product: BUDDY,
         openBrowser: (url) => { urls.push(url) },
       })
     }
@@ -592,12 +594,12 @@ describe('decorateLoginUrl', () => {
     // 才能保留它；若实现改为「按 product 配置重建 URL」，platform/state 会被
     // 硬编码值覆盖（或整体丢失），认证随即失败。
     const authUrl = 'https://copilot.tencent.com/login?platform=workbuddy&state=S&serverOnly=keep-me'
-    const result = decorateLoginUrl(authUrl, WORKBUDDY)
+    const result = decorateLoginUrl(authUrl, BUDDY)
     const url = new URL(result)
     expect(url.searchParams.get('serverOnly')).toBe('keep-me')
     expect(url.searchParams.get('platform')).toBe('workbuddy')
     expect(url.searchParams.get('state')).toBe('S')
-    expect(url.searchParams.get('version')).toBe(WORKBUDDY.pluginVersion)
+    expect(url.searchParams.get('version')).toBe(BUDDY.pluginVersion)
     expect(url.searchParams.get('loginSessionId')).toBeTruthy()
     // 路径与 origin 也必须原样保留
     expect(url.origin).toBe('https://copilot.tencent.com')
@@ -606,16 +608,16 @@ describe('decorateLoginUrl', () => {
 
   it('appendSessionParams 为 false 时原样返回同一个字符串', () => {
     const authUrl = 'https://copilot.tencent.com/login?platform=ide&state=S'
-    expect(decorateLoginUrl(authUrl, CODEBUDDY)).toBe(authUrl)
+    expect(decorateLoginUrl(authUrl, BUDDY_CN)).toBe(authUrl)
   })
 
   it('URL 非法时原样返回', () => {
-    expect(decorateLoginUrl('not a url', WORKBUDDY)).toBe('not a url')
-    expect(decorateLoginUrl('', WORKBUDDY)).toBe('')
+    expect(decorateLoginUrl('not a url', BUDDY)).toBe('not a url')
+    expect(decorateLoginUrl('', BUDDY)).toBe('')
   })
 
   it('pluginVersion 缺失时不追加 version 参数', () => {
-    const noVersion: BuddyProduct = { ...WORKBUDDY, pluginVersion: undefined }
+    const noVersion: BuddyProduct = { ...BUDDY, pluginVersion: undefined }
     const url = new URL(decorateLoginUrl('https://copilot.tencent.com/login?state=S', noVersion))
     expect(url.searchParams.has('version')).toBe(false)
     expect(url.searchParams.has('loginSessionId')).toBe(true)
@@ -623,7 +625,7 @@ describe('decorateLoginUrl', () => {
 
   it('fetchAuthState 使用 product.userAgent 作为请求头', async () => {
     // 两个内置产品的 userAgent 字面量相同，无法观测该行为；注入自定义 UA 以锁定它。
-    const custom: BuddyProduct = { ...CODEBUDDY, userAgent: 'CustomAgent/9.9.9' }
+    const custom: BuddyProduct = { ...BUDDY_CN, userAgent: 'CustomAgent/9.9.9' }
     const fetcher = routeFetch([{
       when: (url) => url.includes('/auth/state'),
       respond: () => new Response(JSON.stringify({

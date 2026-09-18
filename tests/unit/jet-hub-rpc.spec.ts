@@ -11,7 +11,7 @@ import {
 import type { CreditsEndpointDeps } from '../../src/jet-hub-rpc.js'
 import { AccountPool } from '../../src/account-pool.js'
 import type { ClaimOutcome, CheckinStatus, CreditBalance } from '../../src/credits.js'
-import { WORKBUDDY } from '../../src/product.js'
+import { BUDDY } from '../../src/product.js'
 import { TRAE_CN } from '../../src/trae-cn-product.js'
 import type { ProviderAccountEntry } from '../../src/types.js'
 
@@ -30,7 +30,7 @@ import type { ProviderAccountEntry } from '../../src/types.js'
  * 用它的接受与否作为判据 —— 那正是当初炸掉的那一步。
  */
 describe('accountCredentialRefName（账号凭据 ref 归一化）', () => {
-  const PROVIDERS = ['codearts', 'buddy', 'workbuddy', 'lobsterai', 'trae-cn'] as const
+  const PROVIDERS = ['codearts', 'buddy-cn', 'buddy', 'lobsterai', 'trae-cn'] as const
 
   it.each(PROVIDERS)('%s 产出的 ref 被 credentialRef() 接受，且前缀为 ^[A-Z_]+_ACCOUNT$', (provider) => {
     const name = accountCredentialRefName(provider, 'A1B2C3D4')
@@ -57,8 +57,8 @@ describe('accountCredentialRefName（账号凭据 ref 归一化）', () => {
     // 这四条锁住「改动不外溢」：回归时若有人顺手改了大小写或分隔符，
     // 用户既有账号的凭据会瞬间全部失联。
     expect(accountCredentialRefName('codearts', 'A1B2C3D4')).toBe('CODEARTS_ACCOUNT_A1B2C3D4')
+    expect(accountCredentialRefName('buddy-cn', 'A1B2C3D4')).toBe('BUDDY_CN_ACCOUNT_A1B2C3D4')
     expect(accountCredentialRefName('buddy', 'A1B2C3D4')).toBe('BUDDY_ACCOUNT_A1B2C3D4')
-    expect(accountCredentialRefName('workbuddy', 'A1B2C3D4')).toBe('WORKBUDDY_ACCOUNT_A1B2C3D4')
     expect(accountCredentialRefName('lobsterai', 'A1B2C3D4')).toBe('LOBSTERAI_ACCOUNT_A1B2C3D4')
   })
 
@@ -123,10 +123,10 @@ describe('积分领取结果汇总', () => {
 function makeEntry(overrides: Partial<ProviderAccountEntry> = {}): ProviderAccountEntry {
   return {
     id: 'workbuddy-1',
-    provider: 'workbuddy',
+    provider: 'buddy',
     nickname: '测试号',
     enabled: true,
-    credentialRef: 'WORKBUDDY_ACCOUNT_AAAA1111',
+    credentialRef: 'BUDDY_ACCOUNT_AAAA1111',
     createdAt: 1,
     refreshable: true,
     ...overrides,
@@ -175,7 +175,7 @@ describe('credits.status 单账号异常隔离', () => {
       },
     })
 
-    const results = await collectCreditsStatus(accounts, WORKBUDDY, deps)
+    const results = await collectCreditsStatus(accounts, BUDDY, deps)
 
     // 三个账号都要出现在结果里（不是整批抛异常）
     expect(results.map(r => r.accountId)).toEqual(['bad-ref', 'good-1', 'good-2'])
@@ -184,7 +184,7 @@ describe('credits.status 单账号异常隔离', () => {
     expect(results[1]?.status).not.toBeNull()
     expect(results[2]?.status).not.toBeNull()
     // 坏账号根本没走到 resolve（名称校验先抛）
-    expect(asked).toEqual(['WORKBUDDY_ACCOUNT_AAAA1111', 'WORKBUDDY_ACCOUNT_AAAA1111'])
+    expect(asked).toEqual(['BUDDY_ACCOUNT_AAAA1111', 'BUDDY_ACCOUNT_AAAA1111'])
   })
 
   it('resolve 抛错只让该账号状态为 null，其余账号仍被查询', async () => {
@@ -199,7 +199,7 @@ describe('credits.status 单账号异常隔离', () => {
       },
     })
 
-    const results = await collectCreditsStatus(accounts, WORKBUDDY, deps)
+    const results = await collectCreditsStatus(accounts, BUDDY, deps)
 
     expect(results.map(r => r.accountId)).toEqual(['boom', 'ok'])
     expect(results[0]?.status).toBeNull()
@@ -219,7 +219,7 @@ describe('credits.status 单账号异常隔离', () => {
       },
     })
 
-    const results = await collectCreditsStatus(accounts, WORKBUDDY, deps)
+    const results = await collectCreditsStatus(accounts, BUDDY, deps)
 
     expect(results.map(r => r.accountId)).toEqual(['corrupt', 'network-down', 'ok'])
     expect(results[0]?.status).toBeNull()
@@ -233,7 +233,7 @@ describe('credits.status 单账号异常隔离', () => {
       makeEntry({ id: 'off', enabled: false }),
       makeEntry({ id: 'bad-ref', credentialRef: '非法名称' }),
     ]
-    const results = await collectCreditsStatus(accounts, WORKBUDDY, makeDeps({
+    const results = await collectCreditsStatus(accounts, BUDDY, makeDeps({
       warn: (msg) => warnings.push(msg),
     }))
 
@@ -246,7 +246,7 @@ describe('credits.status 单账号异常隔离', () => {
 
   it('凭据解析为 undefined 时状态为 null，且不调用状态接口', async () => {
     let statusCalls = 0
-    const results = await collectCreditsStatus([makeEntry({ id: 'noconf' })], WORKBUDDY, makeDeps({
+    const results = await collectCreditsStatus([makeEntry({ id: 'noconf' })], BUDDY, makeDeps({
       resolve: async () => undefined,
       fetchStatus: async () => { statusCalls++; return makeStatus() },
     }))
@@ -267,7 +267,7 @@ describe('credits.claimAll 单账号异常隔离与顺序性', () => {
       claim: async () => ({ kind: 'claimed', credit: 100, streakDays: 1, isStreakDay: false }),
     })
 
-    const response = await collectClaimResults(accounts, WORKBUDDY, deps)
+    const response = await collectClaimResults(accounts, BUDDY, deps)
 
     // 停用只影响账号池的自动选择与限流切换；积分照领。
     expect(response.results.map(r => r.accountId)).toEqual(['enabled-1', 'disabled-1', 'disabled-2'])
@@ -291,7 +291,7 @@ describe('credits.claimAll 单账号异常隔离与顺序性', () => {
       },
     })
 
-    const response = await collectClaimResults(accounts, WORKBUDDY, deps)
+    const response = await collectClaimResults(accounts, BUDDY, deps)
 
     // 整批成功返回，三个账号都有结果
     expect(response.results.map(r => r.accountId)).toEqual(['bad-ref', 'good-1', 'good-2'])
@@ -315,7 +315,7 @@ describe('credits.claimAll 单账号异常隔离与顺序性', () => {
       },
     })
 
-    const response = await collectClaimResults(accounts, WORKBUDDY, deps)
+    const response = await collectClaimResults(accounts, BUDDY, deps)
 
     expect(response.results[0]?.outcome).toMatchObject({ kind: 'failed', message: '凭据已被外部删除' })
     expect(response.results[1]?.outcome).toMatchObject({ kind: 'claimed' })
@@ -325,7 +325,7 @@ describe('credits.claimAll 单账号异常隔离与顺序性', () => {
 
   it('凭据未配置记为 failed 且不发起任何请求', async () => {
     let touched = 0
-    const response = await collectClaimResults([makeEntry({ id: 'noconf' })], WORKBUDDY, makeDeps({
+    const response = await collectClaimResults([makeEntry({ id: 'noconf' })], BUDDY, makeDeps({
       resolve: async () => undefined,
       fetchStatus: async () => { touched++; return makeStatus() },
       claim: async () => { touched++; return { kind: 'failed', code: -1, message: 'x' } },
@@ -352,7 +352,7 @@ describe('credits.claimAll 单账号异常隔离与顺序性', () => {
       },
     })
 
-    const response = await collectClaimResults(accounts, WORKBUDDY, deps)
+    const response = await collectClaimResults(accounts, BUDDY, deps)
 
     expect(response.results.map(r => r.outcome.kind))
       .toEqual(['inactive', 'already-claimed', 'claimed'])
@@ -390,7 +390,7 @@ describe('credits.claimAll 单账号异常隔离与顺序性', () => {
       },
     })
 
-    await collectClaimResults(accounts, WORKBUDDY, deps)
+    await collectClaimResults(accounts, BUDDY, deps)
 
     expect(maxInFlight).toBe(1)
   })
@@ -409,7 +409,7 @@ describe('credits.claimAll 单账号异常隔离与顺序性', () => {
       },
     })
 
-    const response = await collectClaimResults(accounts, WORKBUDDY, deps)
+    const response = await collectClaimResults(accounts, BUDDY, deps)
 
     expect(order).toEqual(['entry-0', 'entry-1', 'entry-2'])
     expect(response.results.map(r => r.accountId)).toEqual(['a', 'b', 'c'])
@@ -433,7 +433,7 @@ describe('credits.balances 逐账号余额收集', () => {
 
   it('成功时回传余额与包明细', async () => {
     const deps = makeDeps({ fetchBalance: async () => BALANCE })
-    const results = await collectCreditBalances([makeEntry({ id: 'a' })], WORKBUDDY, deps)
+    const results = await collectCreditBalances([makeEntry({ id: 'a' })], BUDDY, deps)
 
     expect(results).toEqual([{ accountId: 'a', nickname: '测试号', balance: BALANCE }])
   })
@@ -443,7 +443,7 @@ describe('credits.balances 逐账号余额收集', () => {
     let call = 0
     const deps = makeDeps({ fetchBalance: async () => (call++ === 0 ? empty : null) })
     const results = await collectCreditBalances(
-      [makeEntry({ id: 'zero' }), makeEntry({ id: 'failed' })], WORKBUDDY, deps,
+      [makeEntry({ id: 'zero' }), makeEntry({ id: 'failed' })], BUDDY, deps,
     )
 
     // 第一个真余额 0：可展示为 0，不算错误
@@ -460,7 +460,7 @@ describe('credits.balances 逐账号余额收集', () => {
       resolve: async () => undefined,
       fetchBalance: async () => { touched++; return BALANCE },
     })
-    const results = await collectCreditBalances([makeEntry({ id: 'noconf' })], WORKBUDDY, deps)
+    const results = await collectCreditBalances([makeEntry({ id: 'noconf' })], BUDDY, deps)
 
     expect(results[0]!.balance).toBeNull()
     expect(results[0]!.error).toBe('凭据未配置')
@@ -479,7 +479,7 @@ describe('credits.balances 逐账号余额收集', () => {
       warn: (msg) => warnings.push(msg),
     })
     const results = await collectCreditBalances(
-      [makeEntry({ id: 'boom' }), makeEntry({ id: 'ok' })], WORKBUDDY, deps,
+      [makeEntry({ id: 'boom' }), makeEntry({ id: 'ok' })], BUDDY, deps,
     )
 
     expect(results).toHaveLength(2)
@@ -496,7 +496,7 @@ describe('credits.balances 逐账号余额收集', () => {
       fetchBalance: async () => BALANCE,
     })
     const results = await collectCreditBalances(
-      [makeEntry({ id: 'corrupt' }), makeEntry({ id: 'ok' })], WORKBUDDY, deps,
+      [makeEntry({ id: 'corrupt' }), makeEntry({ id: 'ok' })], BUDDY, deps,
     )
 
     expect(results[0]!.balance).toBeNull()
@@ -507,7 +507,7 @@ describe('credits.balances 逐账号余额收集', () => {
   it('停用账号同样查询（停用与余额无关）', async () => {
     const deps = makeDeps({ fetchBalance: async () => BALANCE })
     const results = await collectCreditBalances(
-      [makeEntry({ id: 'off', enabled: false })], WORKBUDDY, deps,
+      [makeEntry({ id: 'off', enabled: false })], BUDDY, deps,
     )
 
     expect(results[0]!.balance).toEqual(BALANCE)
@@ -526,7 +526,7 @@ describe('credits.balances 逐账号余额收集', () => {
       },
     })
     await collectCreditBalances(
-      [makeEntry({ id: 'a' }), makeEntry({ id: 'b' }), makeEntry({ id: 'c' })], WORKBUDDY, deps,
+      [makeEntry({ id: 'a' }), makeEntry({ id: 'b' }), makeEntry({ id: 'c' })], BUDDY, deps,
     )
 
     expect(maxInFlight).toBe(1)
@@ -535,7 +535,7 @@ describe('credits.balances 逐账号余额收集', () => {
   it('结果顺序与账号顺序一致', async () => {
     const deps = makeDeps({ fetchBalance: async () => BALANCE })
     const results = await collectCreditBalances(
-      [makeEntry({ id: 'a' }), makeEntry({ id: 'b' }), makeEntry({ id: 'c' })], WORKBUDDY, deps,
+      [makeEntry({ id: 'a' }), makeEntry({ id: 'b' }), makeEntry({ id: 'c' })], BUDDY, deps,
     )
 
     expect(results.map(r => r.accountId)).toEqual(['a', 'b', 'c'])
@@ -679,10 +679,10 @@ describe('model.list / model.setDisabled 端点', () => {
   it('model.list 回传 llm 的模型目录，并把黑名单回填为 disabled', async () => {
     const { call } = registerEndpoints({
       models: MODELS,
-      disabledModels: { buddy: { hy3: true } },
+      disabledModels: { 'buddy-cn': { hy3: true } },
     })
 
-    const result = await call('model.list', { provider: 'buddy' })
+    const result = await call('model.list', { provider: 'buddy-cn' })
 
     expect(result.ok).toBe(true)
     // hy3 已被适配器过滤掉（桩复刻了真实过滤），由端点补回列表；
@@ -708,15 +708,15 @@ describe('model.list / model.setDisabled 端点', () => {
     const { call } = registerEndpoints({ models: MODELS })
 
     // 初始：全部可见、全部打开
-    const before = await call('model.list', { provider: 'buddy' })
+    const before = await call('model.list', { provider: 'buddy-cn' })
     expect((before.value as { models: Array<{ id: string }> }).models.map(m => m.id))
       .toEqual(['glm-5.2', 'deepseek-v4-flash', 'hy3'])
 
     // 关闭 hy3
-    await call('model.setDisabled', { provider: 'buddy', modelId: 'hy3', disabled: true })
+    await call('model.setDisabled', { provider: 'buddy-cn', modelId: 'hy3', disabled: true })
 
     // 关键断言：hy3 仍出现在设置页列表里，且标记为已关闭 —— 否则无法重新打开
-    const after = await call('model.list', { provider: 'buddy' })
+    const after = await call('model.list', { provider: 'buddy-cn' })
     const models = (after.value as { models: Array<{ id: string; disabled: boolean }> }).models
     const hy3 = models.find(m => m.id === 'hy3')
     expect(hy3).toBeDefined()
@@ -725,8 +725,8 @@ describe('model.list / model.setDisabled 端点', () => {
     expect(models.filter(m => m.disabled).map(m => m.id)).toEqual(['hy3'])
 
     // 重新打开：hy3 恢复正常显示
-    await call('model.setDisabled', { provider: 'buddy', modelId: 'hy3', disabled: false })
-    const reopened = await call('model.list', { provider: 'buddy' })
+    await call('model.setDisabled', { provider: 'buddy-cn', modelId: 'hy3', disabled: false })
+    const reopened = await call('model.list', { provider: 'buddy-cn' })
     const reopenedModels = (reopened.value as { models: Array<{ id: string; disabled: boolean }> }).models
     expect(reopenedModels.map(m => m.id)).toEqual(['glm-5.2', 'deepseek-v4-flash', 'hy3'])
     expect(reopenedModels.every(m => !m.disabled)).toBe(true)
@@ -741,10 +741,10 @@ describe('model.list / model.setDisabled 端点', () => {
     const { call } = registerEndpoints({ models: MODELS })
 
     for (const id of ['glm-5.2', 'hy3']) {
-      await call('model.setDisabled', { provider: 'buddy', modelId: id, disabled: true })
+      await call('model.setDisabled', { provider: 'buddy-cn', modelId: id, disabled: true })
     }
 
-    const listed = await call('model.list', { provider: 'buddy' })
+    const listed = await call('model.list', { provider: 'buddy-cn' })
     const models = (listed.value as { models: Array<{ id: string; disabled: boolean }> }).models
     expect(models.map(m => m.id).sort()).toEqual(['deepseek-v4-flash', 'glm-5.2', 'hy3'])
     expect(models.filter(m => m.disabled).map(m => m.id).sort()).toEqual(['glm-5.2', 'hy3'])
@@ -752,7 +752,7 @@ describe('model.list / model.setDisabled 端点', () => {
 
   it('未配置黑名单时全部模型默认打开（黑名单制）', async () => {
     const { call } = registerEndpoints({ models: MODELS })
-    const result = await call('model.list', { provider: 'workbuddy' })
+    const result = await call('model.list', { provider: 'buddy' })
     const models = (result.value as { models: Array<{ disabled: boolean }> }).models
 
     expect(models.every(m => m.disabled === false)).toBe(true)
@@ -761,30 +761,30 @@ describe('model.list / model.setDisabled 端点', () => {
   it('黑名单按 provider 隔离', async () => {
     const { call } = registerEndpoints({
       models: MODELS,
-      disabledModels: { buddy: { hy3: true } },
+      disabledModels: { 'buddy-cn': { hy3: true } },
     })
 
+    const buddyCn = await call('model.list', { provider: 'buddy-cn' })
     const buddy = await call('model.list', { provider: 'buddy' })
-    const workbuddy = await call('model.list', { provider: 'workbuddy' })
 
     const flagOf = (result: unknown, id: string) =>
       (result as { models: Array<{ id: string; disabled: boolean }> }).models.find(m => m.id === id)!.disabled
 
-    expect(flagOf(buddy.value, 'hy3')).toBe(true)
+    expect(flagOf(buddyCn.value, 'hy3')).toBe(true)
     // 另一个 provider 的同名模型不受影响
-    expect(flagOf(workbuddy.value, 'hy3')).toBe(false)
+    expect(flagOf(buddy.value, 'hy3')).toBe(false)
   })
 
   it('model.setDisabled 持久化到 settings，并在后续 model.list 中生效', async () => {
     const { call, storedValue } = registerEndpoints({ models: MODELS })
 
-    const set = await call('model.setDisabled', { provider: 'buddy', modelId: 'hy3', disabled: true })
+    const set = await call('model.setDisabled', { provider: 'buddy-cn', modelId: 'hy3', disabled: true })
     expect(set.ok).toBe(true)
-    expect(set.value).toEqual({ provider: 'buddy', disabledModels: { hy3: true } })
+    expect(set.value).toEqual({ provider: 'buddy-cn', disabledModels: { hy3: true } })
     // 落盘内容可核对：
-    expect(storedValue().disabledModels).toEqual({ buddy: { hy3: true } })
+    expect(storedValue().disabledModels).toEqual({ 'buddy-cn': { hy3: true } })
 
-    const list = await call('model.list', { provider: 'buddy' })
+    const list = await call('model.list', { provider: 'buddy-cn' })
     const hy3 = (list.value as { models: Array<{ id: string; disabled: boolean }> })
       .models.find(m => m.id === 'hy3')!
     expect(hy3.disabled).toBe(true)
@@ -793,18 +793,18 @@ describe('model.list / model.setDisabled 端点', () => {
   it('重新打开时从黑名单移除（写 false 不残留）', async () => {
     const { call, storedValue } = registerEndpoints({
       models: MODELS,
-      disabledModels: { buddy: { hy3: true } },
+      disabledModels: { 'buddy-cn': { hy3: true } },
     })
 
-    const set = await call('model.setDisabled', { provider: 'buddy', modelId: 'hy3', disabled: false })
+    const set = await call('model.setDisabled', { provider: 'buddy-cn', modelId: 'hy3', disabled: false })
 
-    expect(set.value).toEqual({ provider: 'buddy', disabledModels: {} })
+    expect(set.value).toEqual({ provider: 'buddy-cn', disabledModels: {} })
     expect(storedValue().disabledModels).toEqual({})
   })
 
   it('model.setDisabled 缺少 modelId 时返回 bad-request 而不是静默成功', async () => {
     const { call } = registerEndpoints({ models: MODELS })
-    const result = await call('model.setDisabled', { provider: 'buddy', modelId: '' })
+    const result = await call('model.setDisabled', { provider: 'buddy-cn', modelId: '' })
 
     expect(result.ok).toBe(false)
     expect(result.error?.message).toContain('modelId')
@@ -812,7 +812,7 @@ describe('model.list / model.setDisabled 端点', () => {
 
   it('llm 服务不可用时 model.list 返回可读错误（账号面板不受影响）', async () => {
     const { call } = registerEndpoints({ models: MODELS, withoutLlm: true })
-    const result = await call('model.list', { provider: 'buddy' })
+    const result = await call('model.list', { provider: 'buddy-cn' })
 
     expect(result.ok).toBe(false)
     expect(result.error?.message).toContain('llm 服务不可用')
@@ -820,7 +820,7 @@ describe('model.list / model.setDisabled 端点', () => {
 
   it('适配器 listModels 抛错时返回可读错误而不是裸 500', async () => {
     const { call } = registerEndpoints({ models: MODELS, listModelsError: '令牌已过期' })
-    const result = await call('model.list', { provider: 'buddy' })
+    const result = await call('model.list', { provider: 'buddy-cn' })
 
     expect(result.ok).toBe(false)
     expect(result.error?.message).toContain('令牌已过期')
@@ -897,7 +897,7 @@ describe('积分端点的 provider 能力边界', () => {
   it.each(CREDITS_METHODS)('%s 不会把 CodeBuddy 系一并误拒', async (method) => {
     const call = registerCreditsEndpoints()
     // 两个 Buddy 系产品都能通过 provider 校验，走到 listAccounts（替身返回空）。
-    for (const provider of ['buddy', 'workbuddy']) {
+    for (const provider of ['buddy-cn', 'buddy']) {
       const result = await call(method, { provider })
       expect(result.ok, `${method}/${provider}`).toBe(true)
     }

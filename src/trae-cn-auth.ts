@@ -92,7 +92,7 @@ declare module '@deepseek-ai/cordis' {
     /**
      * Trae CN 的认证服务实例。
      *
-     * 与 `buddyAuth` / `workbuddyAuth` / `codeartsAuth` / `lobsteraiAuth` 并列。
+     * 与 `buddyCnAuth` / `buddyAuth` / `codeartsAuth` / `lobsteraiAuth` 并列。
      * **服务名刻意不是 `${product.id}Auth`**：product.id 为 `trae-cn`，
      * 机械派生会得到 `trae-cnAuth`（带连字符，需用 `ctx['trae-cnAuth']` 访问）。
      * 服务名由产品配置的 `serviceName` 显式给出 `traeCnAuth`，

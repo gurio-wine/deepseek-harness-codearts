@@ -9,7 +9,7 @@ import { CodeArtsAuth } from '../../src/service.js'
 import { BuddyAuth } from '../../src/buddy-auth.js'
 import { LobsteraiAuth } from '../../src/lobsterai-auth.js'
 import { TraeCnAuth } from '../../src/trae-cn-auth.js'
-import { WORKBUDDY } from '../../src/product.js'
+import { BUDDY } from '../../src/product.js'
 import { LOBSTERAI } from '../../src/lobsterai-product.js'
 
 vi.mock('../../src/login.js', () => ({
@@ -188,11 +188,11 @@ describe('plugin entry', () => {
 })
 
 describe('buddy plugin entry', () => {
-  it('registers the buddyAuth service without slash commands', () => {
+  it('registers the buddyCnAuth service without slash commands', () => {
     // 登录/状态/续期都在 Account Hub 设置页完成，命令式入口已移除。
     const { ctx, commands } = makeContext()
     apply(ctx)
-    expect(ctx.buddyAuth).toBeInstanceOf(BuddyAuth)
+    expect(ctx.buddyCnAuth).toBeInstanceOf(BuddyAuth)
     const names = commands.definitions.map((d) => d.name)
     expect(names).not.toContain('buddy-login')
     expect(names).not.toContain('buddy-status')
@@ -202,14 +202,14 @@ describe('buddy plugin entry', () => {
   it('registers the buddy LLM route', () => {
     const { ctx, llm } = makeContext()
     apply(ctx)
-    expect(llm.providers).toContain('buddy')
-    expect(llm.adapters).toContain('buddy')
+    expect(llm.providers).toContain('buddy-cn')
+    expect(llm.adapters).toContain('buddy-cn')
   })
 
   it('stops the buddy refresh scheduler when the plugin context is disposed', async () => {
     const { ctx } = makeContext()
     apply(ctx)
-    const stopSpy = vi.spyOn(ctx.buddyAuth, 'stop')
+    const stopSpy = vi.spyOn(ctx.buddyCnAuth, 'stop')
     await ctx.fiber.dispose()
     expect(stopSpy).toHaveBeenCalled()
   })
@@ -220,31 +220,31 @@ describe('WorkBuddy provider 注册', () => {
     const ctx = createMockContext()
     apply(ctx as never)
     const registered = ctx.llm.registeredProviders
+    expect(registered).toContain('buddy-cn')
     expect(registered).toContain('buddy')
-    expect(registered).toContain('workbuddy')
   })
 
   it('WorkBuddy 使用独立的凭据 ref', () => {
-    expect(WORKBUDDY.defaultCredentialRef).toBe('WORKBUDDY_ACCESS_TOKEN')
+    expect(BUDDY.defaultCredentialRef).toBe('BUDDY_ACCESS_TOKEN')
   })
 
   it('注册 workbuddy 的可配置 provider 目录项', () => {
     const ctx = createMockContext()
     apply(ctx as never)
     const directory = ctx.llm.configurableProviders
-    const entry = directory.find((item: { provider: string }) => item.provider === 'workbuddy')
-    expect(entry).toMatchObject({ provider: 'workbuddy', displayName: WORKBUDDY.displayName })
+    const entry = directory.find((item: { provider: string }) => item.provider === 'buddy')
+    expect(entry).toMatchObject({ provider: 'buddy', displayName: BUDDY.displayName })
   })
 
-  // 关键前置：registerBuddyLlm 为 WorkBuddy 产生 settingsNs = llm-workbuddy。
+  // 关键前置：registerBuddyLlm 为 WorkBuddy 产生 settingsNs = llm-buddy。
   // 该 namespace 未注册时，模型设置页会在 refFor → deriveKeyRef(provider)
   // 处以 `provider.toUpperCase is not a function` 崩溃。
-  it('workbuddy 的 settingsNs 为 llm-workbuddy，且对应 settings namespace 已注册', () => {
+  it('workbuddy 的 settingsNs 为 llm-buddy，且对应 settings namespace 已注册', () => {
     const ctx = createMockContext()
     apply(ctx as never)
-    const entry = ctx.llm.configurableProviders.find((item: { provider: string }) => item.provider === 'workbuddy')
-    expect(entry?.settingsNs).toBe('llm-workbuddy')
-    expect(ctx.settings.registeredNamespaces).toContain('llm-workbuddy')
+    const entry = ctx.llm.configurableProviders.find((item: { provider: string }) => item.provider === 'buddy')
+    expect(entry?.settingsNs).toBe('llm-buddy')
+    expect(ctx.settings.registeredNamespaces).toContain('llm-buddy')
   })
 
   it('不注册任何 buddy/workbuddy 斜杠命令（入口在 Account Hub 设置页）', () => {
@@ -263,52 +263,52 @@ describe('WorkBuddy provider 注册', () => {
   })
 
   // cordis 的 Service 构造时按名称注册，同名第二次注册会抛
-  // `service "buddyAuth" has been registered`。两个产品必须各占一个服务名，
+  // `service "buddyCnAuth" has been registered`。两个产品必须各占一个服务名，
   // 否则 apply() 直接抛错、插件完全无法加载。
-  it('同时暴露 buddyAuth 与 workbuddyAuth 两个独立实例，各读自己的凭据 ref', () => {
+  it('同时暴露 buddyCnAuth 与 buddyAuth 两个独立实例，各读自己的凭据 ref', () => {
     const ctx = createMockContext()
     apply(ctx as never)
+    expect(ctx.buddyCnAuth).toBeInstanceOf(BuddyAuth)
     expect(ctx.buddyAuth).toBeInstanceOf(BuddyAuth)
-    expect(ctx.workbuddyAuth).toBeInstanceOf(BuddyAuth)
-    expect(ctx.buddyAuth).not.toBe(ctx.workbuddyAuth)
+    expect(ctx.buddyCnAuth).not.toBe(ctx.buddyAuth)
+    expect(ctx.buddyCnAuth.product.id).toBe('buddy-cn')
     expect(ctx.buddyAuth.product.id).toBe('buddy')
-    expect(ctx.workbuddyAuth.product.id).toBe('workbuddy')
+    expect(ctx.buddyCnAuth.credentialRefName).toBe('BUDDY_CN_ACCESS_TOKEN')
     expect(ctx.buddyAuth.credentialRefName).toBe('BUDDY_ACCESS_TOKEN')
-    expect(ctx.workbuddyAuth.credentialRefName).toBe('WORKBUDDY_ACCESS_TOKEN')
   })
 
-  it('workbuddyAuth 只读 WorkBuddy 自己的凭据 ref', async () => {
+  it('buddyAuth 只读 WorkBuddy 自己的凭据 ref', async () => {
     const ctx = createMockContext()
     apply(ctx as never)
     // 只写入 CodeBuddy 的 ref：WorkBuddy 必须报告未配置。
-    await ctx.credentials.set('BUDDY_ACCESS_TOKEN', JSON.stringify({
+    await ctx.credentials.set('BUDDY_CN_ACCESS_TOKEN', JSON.stringify({
       access_token: 'AT', refresh_token: 'RT', expires_at: String(Date.now() + 7_200_000),
     }))
-    expect((await ctx.workbuddyAuth.status()).configured).toBe(false)
+    expect((await ctx.buddyAuth.status()).configured).toBe(false)
 
     // 写入 WorkBuddy 自己的 ref 后变为已配置。
-    await ctx.credentials.set('WORKBUDDY_ACCESS_TOKEN', JSON.stringify({
+    await ctx.credentials.set('BUDDY_ACCESS_TOKEN', JSON.stringify({
       access_token: 'AT2', refresh_token: 'RT2', expires_at: String(Date.now() + 7_200_000),
     }))
-    expect((await ctx.workbuddyAuth.status()).configured).toBe(true)
+    expect((await ctx.buddyAuth.status()).configured).toBe(true)
   })
 
-  it('buddyAuth 与 workbuddyAuth 的凭据互相隔离', async () => {
+  it('buddyCnAuth 与 buddyAuth 的凭据互相隔离', async () => {
     const ctx = createMockContext()
     apply(ctx as never)
     // 只写 CodeBuddy 的 ref：CodeBuddy 已配置、WorkBuddy 未配置。
-    await ctx.credentials.set('BUDDY_ACCESS_TOKEN', JSON.stringify({
+    await ctx.credentials.set('BUDDY_CN_ACCESS_TOKEN', JSON.stringify({
       access_token: 'AT', refresh_token: 'RT', expires_at: String(Date.now() + 7_200_000),
     }))
-    expect((await ctx.buddyAuth.status()).configured).toBe(true)
-    expect((await ctx.workbuddyAuth.status()).configured).toBe(false)
+    expect((await ctx.buddyCnAuth.status()).configured).toBe(true)
+    expect((await ctx.buddyAuth.status()).configured).toBe(false)
   })
 
   it('dispose 时同时停止 Buddy 与 WorkBuddy 的续期调度', async () => {
     const ctx = createMockContext()
     apply(ctx as never)
-    const buddyStop = vi.spyOn(ctx.buddyAuth, 'stop')
-    const workbuddyStop = vi.spyOn(ctx.workbuddyAuth, 'stop')
+    const buddyStop = vi.spyOn(ctx.buddyCnAuth, 'stop')
+    const workbuddyStop = vi.spyOn(ctx.buddyAuth, 'stop')
     await ctx.fiber.dispose()
     expect(buddyStop).toHaveBeenCalled()
     expect(workbuddyStop).toHaveBeenCalled()
@@ -383,15 +383,15 @@ describe('LobsterAI provider 注册', () => {
     expect(ctx.lobsteraiAuth.product.id).toBe('lobsterai')
     expect(ctx.lobsteraiAuth.credentialRefName).toBe('LOBSTERAI_ACCESS_TOKEN')
     // 四个 provider 的服务实例必须两两不同（同名二次注册会抛错）。
+    expect(ctx.lobsteraiAuth).not.toBe(ctx.buddyCnAuth)
     expect(ctx.lobsteraiAuth).not.toBe(ctx.buddyAuth)
-    expect(ctx.lobsteraiAuth).not.toBe(ctx.workbuddyAuth)
   })
 
   it('lobsteraiAuth 只读自己的凭据 ref（不串用腾讯系凭据）', async () => {
     const ctx = createMockContext()
     apply(ctx as never)
     // 只写入 CodeBuddy 的 ref：LobsterAI 必须报告未配置。
-    await ctx.credentials.set('BUDDY_ACCESS_TOKEN', JSON.stringify({
+    await ctx.credentials.set('BUDDY_CN_ACCESS_TOKEN', JSON.stringify({
       access_token: 'AT', refresh_token: 'RT', expires_at: String(Date.now() + 7_200_000),
     }))
     expect((await ctx.lobsteraiAuth.status()).configured).toBe(false)
@@ -427,8 +427,8 @@ describe('Trae CN provider 注册（认证服务 + 模型路由）', () => {
   it('与既有四个 provider 的服务实例两两不同（同名二次注册会抛错）', () => {
     const ctx = createMockContext()
     apply(ctx as never)
+    expect(ctx.traeCnAuth).not.toBe(ctx.buddyCnAuth)
     expect(ctx.traeCnAuth).not.toBe(ctx.buddyAuth)
-    expect(ctx.traeCnAuth).not.toBe(ctx.workbuddyAuth)
     expect(ctx.traeCnAuth).not.toBe(ctx.lobsteraiAuth)
     expect(ctx.traeCnAuth).not.toBe(ctx.codeartsAuth)
   })

@@ -758,7 +758,7 @@ export class CodeArtsAdapter extends LlmAdapter {
    */
   providerInfo(provider: string): LlmProviderInfo {
     const id = typeof provider === 'string' && provider.length > 0 ? provider : PROVIDER
-    return { id, name: 'CodeArts Agent' }
+    return { id, name: 'Codearts' }
   }
 
   /** 动态模型缓存（首次 listModels 成功后填充）。 */
@@ -1448,13 +1448,13 @@ export class CodeArtsAdapter extends LlmAdapter {
 /** 在 ctx.llm 上注册 codearts 提供商路由和适配器。 */
 export function registerCodeArtsLlm(ctx: Context, options: CodeArtsAdapterOptions): void {
   ctx.llm.registerConfigurableProviders([
-    { provider: PROVIDER, displayName: 'CodeArts Agent', settingsNs: 'llm-codearts', settingsPath: [] },
+    { provider: PROVIDER, displayName: 'Codearts', settingsNs: 'llm-codearts', settingsPath: [] },
   ])
   ctx.llm.registerAdapter([PROVIDER], new CodeArtsAdapter(options))
 }
 
 /**
- * CodeBuddy 系（buddy / workbuddy）表示「用量超出频率限制」的业务码。
+ * Buddy 系（buddy-cn / buddy）表示「用量超出频率限制」的业务码。
  *
  * 判据优先用结构化业务码而非文案：**它与语言无关**，且不受服务端改文案影响。
  * 国际版与国内版用的是同一个码（实测均为 6004），只有 msg 文案分中英文。
@@ -1468,7 +1468,7 @@ const RATE_LIMIT_BUSINESS_CODE = 6004
  * 网关返回的裸文本、以及 CodeArts（华为云）的中文错误都只有文案可判。
  *
  * ⚠️ **中英文都必须列全**。历史缺陷（用户报障，仅国际版暴露）：此处早期只有
- * 中文词（频率限制 / 使用量已超出 / 频率超出 / 重置），而国际版 WorkBuddy
+ * 中文词（频率限制 / 使用量已超出 / 频率超出 / 重置），而国际版 Buddy
  * （www.workbuddy.ai）返回的是英文
  * `usage exceeds frequency limit ... your usage will reset at <时间> UTC+8`。
  * 结果 `isRateLimited` 恒为 false → 适配器**跳过整个账号切换分支**，直接抛出
@@ -1507,7 +1507,7 @@ export function isRateLimited(body: string): boolean {
  * 重置时间的两种句式（中文 / 英文），并**捕获实际时区**而非硬编码 UTC+8。
  *
  * 中文（buddy 国内版）："您的使用量已超出频率限制，将在 2026-09-11 18:08:17 UTC+8 重置"
- * 英文（workbuddy 国际版）："... your usage will reset at 2026-09-17 09:09:36 UTC+8, alternatively, ..."
+ * 英文（Buddy 国际版）："... your usage will reset at 2026-09-17 09:09:36 UTC+8, alternatively, ..."
  *
  * 早期只列了中文句式，导致国际版即使判定为限流也只能走「1 小时后重试」的
  * 兜底，丢掉服务端给出的真实重置时刻（UI 限流徽章因此显示错误时间）。
@@ -1515,7 +1515,7 @@ export function isRateLimited(body: string): boolean {
 const RESET_TIME_PATTERN = /(?:将在|reset at)\s+([\d-]+\s+[\d:]+)\s+(UTC[+-]\d+(?::\d+)?)/i
 
 /**
- * CodeBuddy 系表示「**账号积分/额度耗尽**」的业务码。
+ * Buddy 系表示「**账号积分/额度耗尽**」的业务码。
  *
  * 与 {@link RATE_LIMIT_BUSINESS_CODE}（6004，模型级频率限制）是**两种不同的失败**：
  * 6004 是该模型当前用超了频次、过一段时间会自行恢复；11114 是**该账号的积分/

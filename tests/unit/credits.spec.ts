@@ -7,7 +7,7 @@ import {
   fetchCheckinStatus,
   fetchCreditBalance,
 } from '../../src/credits.js'
-import { CODEBUDDY, WORKBUDDY } from '../../src/product.js'
+import { BUDDY_CN, BUDDY } from '../../src/product.js'
 import type { BuddyCredential } from '../../src/buddy.js'
 
 function makeCredential(): BuddyCredential {
@@ -40,7 +40,7 @@ describe('积分签到模块', () => {
         theme_name: 'Buddy加油站', end_time: '2026-09-15 23:59:59',
       },
     }), { status: 200 }))
-    const status = await fetchCheckinStatus(makeCredential(), WORKBUDDY, fetcher)
+    const status = await fetchCheckinStatus(makeCredential(), BUDDY, fetcher)
     expect(status).toEqual({
       active: true, todayCheckedIn: false, streakDays: 3, dailyCredit: 100,
       todayCredit: 0, isStreakDay: false, totalCredits: 300,
@@ -51,7 +51,7 @@ describe('积分签到模块', () => {
 
   it('fetchCheckinStatus 对缺失字段容错（不抛异常，取默认值）', async () => {
     const fetcher = stubFetch(() => new Response(JSON.stringify({ code: 0, data: {} }), { status: 200 }))
-    const status = await fetchCheckinStatus(makeCredential(), WORKBUDDY, fetcher)
+    const status = await fetchCheckinStatus(makeCredential(), BUDDY, fetcher)
     expect(status).toEqual({
       active: false, todayCheckedIn: false, streakDays: 0, dailyCredit: 0,
       todayCredit: 0, isStreakDay: false, totalCredits: 0,
@@ -61,19 +61,19 @@ describe('积分签到模块', () => {
 
   it('fetchCheckinStatus 在网络失败时返回 null', async () => {
     const fetcher = vi.fn(async () => { throw new Error('network down') }) as unknown as typeof fetch
-    expect(await fetchCheckinStatus(makeCredential(), WORKBUDDY, fetcher)).toBeNull()
+    expect(await fetchCheckinStatus(makeCredential(), BUDDY, fetcher)).toBeNull()
   })
 
   it('fetchCheckinStatus 在非 0 code 时返回 null', async () => {
     const fetcher = stubFetch(() => new Response(JSON.stringify({ code: 500, msg: 'boom' }), { status: 200 }))
-    expect(await fetchCheckinStatus(makeCredential(), WORKBUDDY, fetcher)).toBeNull()
+    expect(await fetchCheckinStatus(makeCredential(), BUDDY, fetcher)).toBeNull()
   })
 
   it('claimDailyCheckin 成功时返回 claimed 与领取数额', async () => {
     const fetcher = stubFetch(() => new Response(JSON.stringify({
       code: 0, msg: 'OK', data: { credit: 100, streak_days: 1, is_streak_day: false },
     }), { status: 200 }))
-    expect(await claimDailyCheckin(makeCredential(), WORKBUDDY, fetcher)).toEqual({
+    expect(await claimDailyCheckin(makeCredential(), BUDDY, fetcher)).toEqual({
       kind: 'claimed', credit: 100, streakDays: 1, isStreakDay: false,
     })
   })
@@ -82,7 +82,7 @@ describe('积分签到模块', () => {
     const fetcher = stubFetch(() => new Response(JSON.stringify({
       code: 10001, msg: '今天已签到，请明天再来',
     }), { status: 400 }))
-    const outcome = await claimDailyCheckin(makeCredential(), WORKBUDDY, fetcher)
+    const outcome = await claimDailyCheckin(makeCredential(), BUDDY, fetcher)
     expect(outcome.kind).toBe('already-claimed')
     expect(outcome).toMatchObject({ message: '今天已签到，请明天再来' })
   })
@@ -90,21 +90,21 @@ describe('积分签到模块', () => {
   it('claimDailyCheckin 对 code 1001/1002/1003 同样视为非致命', async () => {
     for (const [code, expected] of [[1001, 'already-claimed'], [1002, 'inactive'], [1003, 'inactive']] as const) {
       const fetcher = stubFetch(() => new Response(JSON.stringify({ code, msg: `err ${code}` }), { status: 400 }))
-      const outcome = await claimDailyCheckin(makeCredential(), WORKBUDDY, fetcher)
+      const outcome = await claimDailyCheckin(makeCredential(), BUDDY, fetcher)
       expect(outcome.kind).toBe(expected)
     }
   })
 
   it('claimDailyCheckin 对其他错误返回 failed 并保留 code 与消息', async () => {
     const fetcher = stubFetch(() => new Response(JSON.stringify({ code: 500, msg: '服务器错误' }), { status: 500 }))
-    expect(await claimDailyCheckin(makeCredential(), WORKBUDDY, fetcher)).toEqual({
+    expect(await claimDailyCheckin(makeCredential(), BUDDY, fetcher)).toEqual({
       kind: 'failed', code: 500, message: '服务器错误',
     })
   })
 
   it('claimDailyCheckin 在网络异常时返回 failed', async () => {
     const fetcher = vi.fn(async () => { throw new Error('socket hang up') }) as unknown as typeof fetch
-    const outcome = await claimDailyCheckin(makeCredential(), WORKBUDDY, fetcher)
+    const outcome = await claimDailyCheckin(makeCredential(), BUDDY, fetcher)
     expect(outcome.kind).toBe('failed')
     expect(outcome).toMatchObject({ message: expect.stringContaining('socket hang up') })
   })
@@ -115,7 +115,7 @@ describe('积分签到模块', () => {
       seen = init?.headers as Headers
       return new Response(JSON.stringify({ code: 0, data: { credit: 100, streak_days: 1, is_streak_day: false } }), { status: 200 })
     }) as unknown as typeof fetch
-    await claimDailyCheckin(makeCredential(), WORKBUDDY, fetcher)
+    await claimDailyCheckin(makeCredential(), BUDDY, fetcher)
     expect(seen?.get('Authorization')).toBe('Bearer AT')
     expect(seen?.get('X-Product-Code')).toBe('workbuddy')
     expect(seen?.get('X-User-Id')).toBe('uid-1')
@@ -131,7 +131,7 @@ describe('积分签到模块', () => {
       body = init?.body
       return new Response(JSON.stringify({ code: 0, data: { credit: 1, streak_days: 1, is_streak_day: false } }), { status: 200 })
     }) as unknown as typeof fetch
-    await claimDailyCheckin(makeCredential(), WORKBUDDY, fetcher)
+    await claimDailyCheckin(makeCredential(), BUDDY, fetcher)
     expect(method).toBe('POST')
     expect(body).toBe('{}')
   })
@@ -207,7 +207,7 @@ describe('积分余额查询', () => {
 
   it('解析双层嵌套的响应并汇总各包余额', async () => {
     const fetcher = stubFetch(() => new Response(JSON.stringify(REAL_BALANCE_RESPONSE), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY, fetcher)
 
     expect(balance).not.toBeNull()
     expect(balance!.packages).toHaveLength(2)
@@ -222,7 +222,7 @@ describe('积分余额查询', () => {
 
   it('总额与 IDE 的 Credits Balance 一致（347.87）', async () => {
     const fetcher = stubFetch(() => new Response(JSON.stringify(REAL_BALANCE_RESPONSE), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY, fetcher)
 
     expect(balance!.total).toBe(347.87)
     // 服务端的 TotalDosage 是终身口径且取整，不能直接拿来用
@@ -265,7 +265,7 @@ describe('积分余额查询', () => {
         },
       },
     }), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY_CN, fetcher)
 
     // 0 + 55.67 + 100 —— 与 IDE 一致
     expect(balance!.total).toBe(155.67)
@@ -278,7 +278,7 @@ describe('积分余额查询', () => {
       code: 0,
       data: { Response: { Data: { Accounts: [{ PackageName: 'X', CycleCapacityRemain: 42, CycleCapacitySize: 50, CycleCapacityUsed: 8 }] } } },
     }), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY, fetcher)
 
     expect(balance!.packages[0]).toMatchObject({ remaining: 42, total: 50, used: 8 })
     expect(balance!.total).toBe(42)
@@ -299,7 +299,7 @@ describe('积分余额查询', () => {
         },
       },
     }), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY, fetcher)
 
     expect(balance!.packages.map(p => p.name)).toEqual(['次级名', 'CODE-ONLY', ''])
   })
@@ -329,7 +329,7 @@ describe('积分余额查询', () => {
         },
       },
     }), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY_CN, fetcher)
 
     expect(balance!.total).toBe(55.67)
     expect(balance!.expiredTotal).toBe(200)
@@ -351,7 +351,7 @@ describe('积分余额查询', () => {
         },
       },
     }), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY_CN, fetcher)
 
     expect(balance!.packages[0]!.active).toBe(false)
     expect(balance!.total).toBe(0)
@@ -372,7 +372,7 @@ describe('积分余额查询', () => {
         },
       },
     }), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY_CN, fetcher)
 
     expect(balance!.packages[0]!.active).toBe(true)
     expect(balance!.total).toBe(30)
@@ -392,7 +392,7 @@ describe('积分余额查询', () => {
         },
       },
     }), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY_CN, fetcher)
 
     expect(balance!.total).toBe(0)
     expect(balance!.expiredTotal).toBe(30)
@@ -400,7 +400,7 @@ describe('积分余额查询', () => {
 
   it('业务码非 0 时返回 null（不把错误当成 0 积分）', async () => {
     const fetcher = stubFetch(() => new Response(JSON.stringify({ code: 10001, msg: 'boom' }), { status: 200 }))
-    expect(await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)).toBeNull()
+    expect(await fetchCreditBalance(makeCredential(), BUDDY, fetcher)).toBeNull()
   })
 
   it('嵌套层级缺失时返回 null 而不是崩溃', async () => {
@@ -413,20 +413,20 @@ describe('积分余额查询', () => {
       { code: 0, data: { Response: { Data: { Accounts: 'nope' } } } },
     ]) {
       const fetcher = stubFetch(() => new Response(JSON.stringify(payload), { status: 200 }))
-      expect(await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)).toBeNull()
+      expect(await fetchCreditBalance(makeCredential(), BUDDY, fetcher)).toBeNull()
     }
   })
 
   it('网络异常返回 null 而不是抛出', async () => {
     const fetcher = vi.fn(async () => { throw new Error('socket hang up') }) as unknown as typeof fetch
-    expect(await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)).toBeNull()
+    expect(await fetchCreditBalance(makeCredential(), BUDDY, fetcher)).toBeNull()
   })
 
   it('Accounts 为空数组时余额为 0（区别于查询失败）', async () => {
     const fetcher = stubFetch(() => new Response(JSON.stringify({
       code: 0, data: { Response: { Data: { Accounts: [] } } },
     }), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY, fetcher)
 
     expect(balance).not.toBeNull()
     expect(balance!.total).toBe(0)
@@ -456,7 +456,7 @@ describe('积分余额查询', () => {
         },
       },
     }), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY, fetcher)
 
     expect(balance!.total).toBe(655.67)
     // 明细保留原始精度，不做二次加工
@@ -472,7 +472,7 @@ describe('积分余额查询', () => {
         },
       },
     }), { status: 200 }))
-    const balance = await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+    const balance = await fetchCreditBalance(makeCredential(), BUDDY, fetcher)
 
     expect(balance!.total).toBe(247.87)
   })
@@ -488,8 +488,8 @@ describe('积分余额查询', () => {
       return new Response(JSON.stringify({ code: 0, data: { Response: { Data: { Accounts: [] } } } }), { status: 200 })
     }) as unknown as typeof fetch
 
-    await fetchCreditBalance(makeCredential(), CODEBUDDY, fetcher)
-    await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+    await fetchCreditBalance(makeCredential(), BUDDY_CN, fetcher)
+    await fetchCreditBalance(makeCredential(), BUDDY, fetcher)
 
     expect(seen[0]).toBe('https://copilot.tencent.com/v2/billing/meter/get-user-resource')
     expect(seen[1]).toBe('https://www.workbuddy.ai/v2/billing/meter/get-user-resource')
@@ -502,7 +502,7 @@ describe('积分余额查询', () => {
       return new Response(JSON.stringify({ code: 0, data: { Response: { Data: { Accounts: [] } } } }), { status: 200 })
     }) as unknown as typeof fetch
 
-    await fetchCreditBalance(makeCredential(), WORKBUDDY, fetcher)
+    await fetchCreditBalance(makeCredential(), BUDDY, fetcher)
     expect(seen?.get('X-Product-Code')).toBe('workbuddy')
     expect(seen?.get('X-Domain')).toBe('www.workbuddy.ai')
     expect(seen?.get('Authorization')).toBe('Bearer AT')
@@ -525,7 +525,7 @@ describe('积分余额查询', () => {
 
     // 凭据里是 CodeBuddy 的域名，但当前产品是 WorkBuddy
     const stale = { ...makeCredential(), domain: 'copilot.tencent.com' }
-    await fetchCreditBalance(stale, WORKBUDDY, fetcher)
+    await fetchCreditBalance(stale, BUDDY, fetcher)
 
     expect(seen?.get('X-Domain')).toBe('www.workbuddy.ai')
   })

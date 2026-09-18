@@ -1,5 +1,5 @@
 /**
- * 腾讯 CodeBuddy 认证常量、凭据结构与纯解析逻辑
+ * 腾讯 Buddy CN 认证常量、凭据结构与纯解析逻辑
  *
  * 逆向自 CodeBuddy CN IDE (genie 扩展 v4.11.2) 的 external-link-v2 轮询式登录：
  * - fetchAuthState → POST /v2/plugin/auth/state?platform=ide 获取 state + authUrl
@@ -8,30 +8,30 @@
  * - getAccount     → GET /v2/plugin/login/account?state=... 轮询获取账户信息
  * - refreshToken   → POST /v2/plugin/auth/token/refresh 刷新 token
  *
- * 与 CodeArts 的 PKCE OAuth + 本地回调服务器不同，CodeBuddy 采用**轮询式**：
+ * 与 CodeArts 的 PKCE OAuth + 本地回调服务器不同，Buddy 系采用**轮询式**：
  * 客户端不起本地服务器，而是定期轮询后端 API 检查登录状态。
  *
  * 本模块只放常量与纯函数（无网络、无存储），网络流程见 buddy-oauth.ts。
  *
- * 依赖方向：本模块从 `src/product.ts` 读取 CodeBuddy 的产品差异取值（只读，
+ * 依赖方向：本模块从 `src/product.ts` 读取 Buddy CN 的产品差异取值（只读，
  * 不反向导出）。`product.ts` 不 import 本模块，故不构成循环依赖。
  */
 
-import { CODEBUDDY } from './product.js'
+import { BUDDY_CN } from './product.js'
 
 // ── API 端点常量（逆向自 genie 扩展 product.json + index.js） ──
 //
 // 下列取值中，凡属「产品差异」的（endpoint / platform / UA / productCode /
-// apiDomain）一律从 `src/product.ts` 的 CODEBUDDY 产品配置**派生**，此处不再
+// apiDomain）一律从 `src/product.ts` 的 BUDDY_CN 产品配置**派生**，此处不再
 // 重复字面量：产品差异的唯一真相源是 product.ts，改端点只需改那一处。
 // 路径与轮询参数（PREFIX_PATH 等）两产品共用、非差异项，保持字面量。
 
 /** 主 API 端点（product.json endpoint）。 */
-export const API_ENDPOINT = CODEBUDDY.endpoint
+export const API_ENDPOINT = BUDDY_CN.endpoint
 /** API 路径前缀（product.json authentication.attributes.prefixPath，两产品相同）。 */
 export const PREFIX_PATH = '/plugin'
 /** 平台标识（product.json authentication.attributes.platform）。 */
-export const PLATFORM = CODEBUDDY.platform
+export const PLATFORM = BUDDY_CN.platform
 /** 登录网站首页（copilot.tencent.com → www.codebuddy.cn 映射）。 */
 export const WEBSITE_HOME = 'https://www.codebuddy.cn'
 
@@ -84,21 +84,21 @@ export const HTTP_HEADER_PRODUCT_CODE = 'X-Product-Code'
  * User-Agent 标识（对齐 IDE 的 getUserAgent() → CodeBuddyIDE/${platformVersion}）。
  * platformVersion 来自 IDE product.json version 字段（1.106.1），非 genie 版本。
  */
-export const BUDDY_USER_AGENT = CODEBUDDY.userAgent
+export const BUDDY_USER_AGENT = BUDDY_CN.userAgent
 /** X-Product-Code 值（对齐 IDE headers 设置）。 */
-export const BUDDY_PRODUCT_CODE = CODEBUDDY.productCode
+export const BUDDY_PRODUCT_CODE = BUDDY_CN.productCode
 /** X-Product 默认值（deploymentType，对齐 ProductEndpointHttpInterceptor）。 */
 export const BUDDY_DEPLOYMENT_TYPE = 'SaaS'
 /** 刷新来源标识（对齐 IDE 的 ide-main）。 */
 export const AUTH_REFRESH_SOURCE = 'ide-main'
 
 /** API 端点的裸域名（X-Domain 头的值）。 */
-export const API_DOMAIN = CODEBUDDY.apiDomain
+export const API_DOMAIN = BUDDY_CN.apiDomain
 
 // ── 凭据数据结构 ──
 
 /**
- * 持久化的 CodeBuddy 凭据。
+ * 持久化的 Buddy 系凭据。
  *
  * 对齐 IDE 的 auth 对象结构（accessToken/refreshToken/expiresAt/...）
  * 加上 account 对象（uid/nickname/enterpriseId/type）。除两个令牌外的字段
@@ -152,7 +152,7 @@ export interface BuddyAccount {
  * 从凭据 expires_at 解析毫秒时间戳（兼容毫秒时间戳 / 秒级时间戳 / ISO 8601）。
  * 无法解析或缺失时返回 undefined。
  *
- * 后备来源（e2e 实证 2026-09-11）：CodeBuddy 的 `/v2/plugin/auth/token`
+ * 后备来源（e2e 实证 2026-09-11）：Buddy CN 的 `/v2/plugin/auth/token`
  * **不返回绝对的 `expiresAt`**，只返回相对的 `expiresIn`。若凭据里的
  * `expires_at` 为空（历史写入或后端变更），回退到解析 access_token 这个
  * JWT 的 `exp` 声明——它同样是权威的过期时刻。
@@ -188,7 +188,7 @@ export function jwtExpiresAtMs(token: string): number | undefined {
 }
 
 /**
- * 从 JWT payload 读取 `nickname`（CodeBuddy 的 login/account 响应不含昵称，
+ * 从 JWT payload 读取 `nickname`（Buddy CN 的 login/account 响应不含昵称，
  * 昵称只在 access_token 的声明里）。解析失败返回空串。
  */
 export function jwtNickname(token: string): string {
@@ -239,7 +239,7 @@ export function credentialAuthHeaders(credential: BuddyCredential): Record<strin
 /**
  * 从 JSON 安全读取字符串字段（兼容后端把时间戳返回为数字）。
  *
- * 会剔除 CR/LF 等控制字符：CodeBuddy 的 `scope` 字段有时返回多行文本
+ * 会剔除 CR/LF 等控制字符：Buddy CN 的 `scope` 字段有时返回多行文本
  * （如 "profile\n    offline_access\n    email"）。这些换行会被凭据的
  * JSON 字符串原样携带，并在落盘到 YAML（`.credentials.yaml`）时被当作
  * 多行标量，破坏 JSON 结构 —— 重新读取时 `JSON.parse` 失败，表现为

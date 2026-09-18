@@ -1,5 +1,5 @@
 /**
- * WorkBuddy 每日签到（领取积分）客户端。
+ * Buddy 系每日签到（领取积分）客户端。
  *
  * 端点与格式均来自对 WorkBuddy 5.5.6 的逆向 + 真实请求实测（2026-09-14）：
  *
@@ -36,8 +36,8 @@ export const DAILY_CHECKIN_PATH = '/v2/billing/meter/daily-checkin'
 /**
  * 积分余额查询端点。
  *
- * **两个产品通用**（2026-09-15 实测）：CodeBuddy 中国版
- * （copilot.tencent.com）与 WorkBuddy 国际版（www.workbuddy.ai）都实现该端点，
+ * **两个产品通用**（2026-09-15 实测）：Buddy CN（腾讯 CodeBuddy 中国版）
+ * 与 Buddy（腾讯 WorkBuddy 国际版，www.workbuddy.ai）都实现该端点，
  * 请求头与响应结构完全一致，只有 baseURL 不同（随 `product.endpoint` 切换）。
  *
  * 这与签到能力形成对比 —— **签到**只有中国版有（国际版内核里连
@@ -99,7 +99,7 @@ export type ClaimOutcome =
  * ## 一个账号为什么有多个包
  *
  * 每个包是**一份独立的积分授予**（套餐 + 若干运营活动赠包），各自有独立的
- * 计量周期与到期时间。实测某 CodeBuddy 账号有 5 个包：1 个体验版套餐 +
+ * 计量周期与到期时间。实测某 Buddy CN 账号有 5 个包：1 个体验版套餐 +
  * 4 份「国内运营裂变包」，其中 2 份已过期、1 份本周期已耗尽、2 份可用。
  * 所以界面上「5 个资源包」不等于 5 份额度，需要区分有效与失效。
  *
@@ -171,7 +171,7 @@ export interface CreditBalance {
  *
  * `X-Domain` **以产品配置为准**，而不是优先用凭据里的 `credential.domain`：
  * 凭据的 domain 是"登录时用的域名"的快照，若它系从另一个产品遗留/迁移而来
- * （典型场景：早期 workbuddy 指向中国版，改造成国际版后旧凭据仍写着
+ * （典型场景：国际版 provider（`buddy`）早年指向中国版，改造后旧凭据仍写着
  * copilot.tencent.com），跟着凭据走就会把请求的身份标识发错区域。请求的
  * baseURL 来自 `product.endpoint`，X-Domain 必须与之一致，否则前后矛盾。
  *
@@ -356,7 +356,7 @@ function readPreciseNumber(source: Record<string, unknown>, baseKey: string): nu
 /**
  * 服务端标记「该资源包已过期」的 Status 值（实测）。
  *
- * 实测某 CodeBuddy 账号的 5 个包里，两个带 `ExpiredTime`（2026-06-02 /
+ * 实测某 Buddy CN 账号的 5 个包里，两个带 `ExpiredTime`（2026-06-02 /
  * 2026-06-06）的条目 Status 均为 3，三个有效条目为 0。故把 3 视为失效；
  * 其他未知取值一律当成有效（宁可多显示一个额度，也不要把能用的额度藏起来）。
  */

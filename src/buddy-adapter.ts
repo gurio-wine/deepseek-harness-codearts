@@ -1,5 +1,5 @@
 /**
- * buddy (腾讯 CodeBuddy) LlmAdapter
+ * Buddy 系 (腾讯 Buddy CN / Buddy) LlmAdapter
  *
  * 使用标准 OpenAI Chat Completions 协议 + Bearer access_token 鉴权。
  * 认证由 buddy-auth.ts 服务完成（external-link-v2 轮询式登录 + refresh_token 续期）。
@@ -28,18 +28,18 @@ import {
   credentialExpiresAtMs,
 } from './buddy.js'
 import type { BuddyCredential, BuddyRemoteModel } from './buddy.js'
-import { CODEBUDDY, resolveUserAgent, type BuddyFallbackModel, type BuddyProduct } from './product.js'
+import { BUDDY_CN, resolveUserAgent, type BuddyFallbackModel, type BuddyProduct } from './product.js'
 import { isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, resolveToolPairing } from './sse.js'
 
 /**
- * CodeBuddy（中国版）的 chat completions 基址。
+ * Buddy CN（中国版）的 chat completions 基址。
  *
- * 由 `CODEBUDDY.endpoint` 派生（产品配置是唯一真相源）；仅供既有导入方
+ * 由 `BUDDY_CN.endpoint` 派生（产品配置是唯一真相源）；仅供既有导入方
  * （如 e2e 探针）使用。适配器实例实际请求的基址是
- * `` `${this.product.endpoint}/v2` `` —— 国际版 WorkBuddy 的域名不同
+ * `` `${this.product.endpoint}/v2` `` —— 国际版 Buddy 的域名不同
  * （www.workbuddy.ai），故不能再用本常量拼接请求 URL。
  */
-export const CHAT_API_BASE = `${CODEBUDDY.endpoint}/v2`
+export const CHAT_API_BASE = `${BUDDY_CN.endpoint}/v2`
 
 /**
  * 是否为 DeepSeek 系模型（前缀匹配，不区分大小写）。
@@ -57,7 +57,7 @@ function isDeepSeekModel(model: string): boolean {
  * CodeBuddy 的 provider 路由名（历史常量，保留导出以兼容既有导入方）。
  *
  * 注意：适配器实例实际使用的路由名是 `product.id`（`this.product.id`），
- * 本常量只表示 CodeBuddy 那一份取值，不再代表所有产品。
+ * 本常量只表示 Buddy CN 那一份取值，不再代表所有产品。
  */
 export const PROVIDER = 'buddy'
 
@@ -194,11 +194,11 @@ export interface BuddyAdapterOptions {
   /** 多账号池（用于限流时切换账号） */
   accountPool?: AccountPool
   /**
-   * 产品配置；默认为 CodeBuddy。
+   * 产品配置；默认为 Buddy CN。
    *
    * 决定请求身份标识（X-Product-Code / User-Agent）、模型元数据的 provider
    * 字段、providerInfo 的展示名，以及 registerBuddyLlm 注册的路由与
-   * settingsNs。两个内置产品（CodeBuddy / WorkBuddy）共用同一后端与协议，
+   * settingsNs。两个内置产品（Buddy CN / Buddy）共用同一后端与协议，
    * 差异全部由本配置承载。
    */
   product?: BuddyProduct
@@ -216,13 +216,13 @@ function contentToText(content: unknown): string {
 }
 
 /**
- * 将 harness 对话消息序列化为 CodeBuddy chat-completions 的传输格式。
+ * 将 harness 对话消息序列化为 Buddy chat-completions 的传输格式。
  *
  * 与 openai_chat/codearts 适配器一致：assistant 的 `tool-call` 块转为
  * `tool_calls`，`reasoning` 块折叠为 `reasoning_content`，user 消息中搭载的
  * 工具结果展开为独立的 `{role: 'tool'}` 消息。
  *
- * 两点 CodeBuddy 特有要求（对齐 Rust buddy.rs）：
+ * 两点 Buddy 特有要求（对齐 Rust buddy.rs）：
  * - assistant 消息**始终**携带 `reasoning_content` 字段（推理模型缺失会 400）
  *   ——与 codearts 的 deepseek-v4 校验一致；
  * - 正文为空且带 tool_calls 时 `content` 必须为 `null`（对齐 openai_chat.rs）。
@@ -284,7 +284,7 @@ function serializeMessages(
     const toolResults = content.filter((block): block is { type: string; toolCallId: unknown; content: unknown } =>
       typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'tool-result')
     const text = contentToText(message.content)
-    // 含图片时 content 升级为 OpenAI 多模态 parts（CodeBuddy 唯一接受的图片
+    // 含图片时 content 升级为 OpenAI 多模态 parts（Buddy 唯一接受的图片
     // 形态；{type:'image'} 会以 `unsupported content type ... image` 400）。
     const parts = imageUrls === undefined || imageUrls.size === 0
       ? undefined
@@ -339,7 +339,7 @@ function errorDetail(body: string): string {
  * `failure.code === CONTEXT_WINDOW_EXCEEDED` 的失败压缩上下文并重试）；
  * 若一律标成 INVALID_REQUEST，长会话一旦越过窗口就会直接把裸错误抛给用户。
  *
- * 实测报文（国际版 WorkBuddy，deepseek-v4.1-flash）：
+ * 实测报文（国际版 Buddy，deepseek-v4.1-flash）：
  * ```
  * {"code":11115,"msg":"prompt is too long: 1061554 tokens > 1048576 maximum",
  *  "extError":{"code":"context_length_exceeded","type":"invalid_request_error",...},
@@ -369,7 +369,7 @@ function httpErrorCode(status: number, body: string): string {
 }
 
 /**
- * SSE 流空闲超时。buddy（CodeBuddy）后端对 SSE 连接有空闲断连策略：模型
+ * SSE 流空闲超时。Buddy 系后端对 SSE 连接有空闲断连策略：模型
  * 生成超长推理或大工具调用参数时，两次 chunk 之间可能静默数十秒。原实现
  * 直接 `await reader.read()` 且没有任何超时——连接被服务端掐断后若对端
  * 既不发数据也不关连接（半开连接），read() 会**永久挂起**，generator 永不
@@ -451,9 +451,9 @@ function collectImages(content: readonly unknown[], refs: Map<string, unknown>):
   }
 }
 
-/** buddy (腾讯 CodeBuddy 系) 模型适配器。使用 Bearer access_token 鉴权。 */
+/** Buddy 系 (腾讯 Buddy CN / Buddy) 模型适配器。使用 Bearer access_token 鉴权。 */
 export class BuddyAdapter extends LlmAdapter {
-  /** 本适配器所属的产品配置（默认 CodeBuddy）。 */
+  /** 本适配器所属的产品配置（默认 Buddy CN）。 */
   private readonly product: BuddyProduct
   private readonly fetchImpl: typeof fetch
   /**
@@ -477,8 +477,8 @@ export class BuddyAdapter extends LlmAdapter {
 
   constructor(private readonly options: BuddyAdapterOptions) {
     super()
-    // 默认 CodeBuddy，保证既有行为完全不变。
-    this.product = options.product ?? CODEBUDDY
+    // 默认 Buddy CN，保证既有行为完全不变。
+    this.product = options.product ?? BUDDY_CN
     this.fetchImpl = options.fetchImpl ?? fetch
     this.sessionId = options.sessionId ?? crypto.randomUUID().replace(/-/g, '')
     const fallback = this.product.fallbackModels ?? []
@@ -500,8 +500,8 @@ export class BuddyAdapter extends LlmAdapter {
    * 直接回退到本适配器所属产品的 id，避免
    * `undefined.toUpperCase is not a function` 在客户端炸开。
    *
-   * 展示名同样来自产品配置：CodeBuddy 为 'CodeBuddy (腾讯)'，
-   * WorkBuddy 为 'WorkBuddy'。
+   * 展示名同样来自产品配置：Buddy CN 为 'Buddy CN'，
+   * Buddy 为 'Buddy'。
    */
   providerInfo(provider: string): LlmProviderInfo {
     const id = typeof provider === 'string' && provider.length > 0 ? provider : this.product.id
@@ -543,7 +543,7 @@ export class BuddyAdapter extends LlmAdapter {
    * 用产品兜底表校正远端结果。
    *
    * 为什么需要校正：服务端按**认证上下文**决定返回哪些模型，插件的 CLI
-   * token 拿到的集合可能是残缺甚至错的 —— 实测 WorkBuddy 国际版的 CLI token
+   * token 拿到的集合可能是残缺甚至错的 —— 实测 Buddy 的 CLI token
    * 只拿到 13 个内部别名（含实际不可用的 `o4-mini`），而 IDE 用的是 20 个
    * （含全部 GPT 系列）。此时若直接采信远端，模型选择器会缺掉用户真正要用的模型。
    *
@@ -551,7 +551,7 @@ export class BuddyAdapter extends LlmAdapter {
    * - 只保留兜底表里声明的 id（远端多出来的别名/内部模型被丢弃）；
    * - 兜底表声明但远端缺失的模型补进来（用兜底表的元数据）。
    *
-   * 没有产品兜底表（如 CodeBuddy）时原样返回远端结果，保持既有行为。
+   * 没有产品兜底表（如 Buddy CN）时原样返回远端结果，保持既有行为。
    */
   private reconcileWithFallback(models: readonly BuddyRemoteModel[]): BuddyRemoteModel[] {
     const fallback = this.product.fallbackModels
@@ -621,7 +621,7 @@ export class BuddyAdapter extends LlmAdapter {
     await this.ensureRemoteModels()
     const source = this.remoteModels ?? this.staticFallbackModels()
     // 用户在 Account Hub 关闭的模型（黑名单制：不在表里即默认打开）。
-    // 按本适配器的产品 id 取表，CodeBuddy 与 WorkBuddy 的开关互不影响。
+    // 按本适配器的产品 id 取表，Buddy CN 与 Buddy 的开关互不影响。
     const disabled = this.options.accountPool?.disabledModelsFor(this.product.id)
     const listed = disabled === undefined || disabled.size === 0
       ? source
@@ -638,7 +638,7 @@ export class BuddyAdapter extends LlmAdapter {
    * 静态兜底模型目录：优先用产品自带的 `fallbackModels`，否则用通用默认表。
    *
    * 产品兜底表存在的原因：模型池由服务端按认证上下文下发，插件的 CLI
-   * token 未必能取到完整集合（实测 WorkBuddy 国际版经 CLI token 只能拿到
+   * token 未必能取到完整集合（实测 Buddy 经 CLI token 只能拿到
    * 13 个别名，拿不到 GPT 系列）。产品兜底表提供该产品权威的完整清单。
    */
   private staticFallbackModels(): readonly { id: string; name: string }[] {
@@ -718,9 +718,9 @@ export class BuddyAdapter extends LlmAdapter {
     let currentAccountId = ''
     if (this.options.accountPool && credential) {
       try {
-        // provider 实参必须是本适配器所属产品的 id（buddy / workbuddy）：
+        // provider 实参必须是本适配器所属产品的 id（buddy-cn / buddy）：
         // AccountPool 先按 entry.provider !== provider 过滤账号，写死 'buddy'
-        // 时 WorkBuddy 账号（provider='workbuddy'）永远匹配不到，限流时间
+        // 时另一产品的账号（provider 不同）永远匹配不到，限流时间
         // 无法归属账号，UI 也永不显示限流标记。
         currentAccountId = await this.options.accountPool.findAccountIdByCredential(
           this.product.id,
@@ -742,7 +742,7 @@ export class BuddyAdapter extends LlmAdapter {
     await this.ensureRemoteModels()
 
     // 2. 序列化消息
-    // 图片：读原始字节并以内联 data URL 发出——这是 CodeBuddy 唯一接受的
+    // 图片：读原始字节并以内联 data URL 发出——这是 Buddy 系唯一接受的
     // 图片形态（{type:'image'} 会被服务端 400 拒绝）。
     const imageRefs = new Map<string, unknown>()
     for (const message of options.messages) {
@@ -861,7 +861,7 @@ export class BuddyAdapter extends LlmAdapter {
               currentAccountId, parsed.modelId, parsed.resetTimeMs,
             )
           }
-          // 取下一个未尝试过的可用账号（同样按本产品 id 过滤，否则 WorkBuddy
+          // 取下一个未尝试过的可用账号（同样按本产品 id 过滤，否则另一产品
           // 永远取不到候选账号，限流后无法自动切换）。
           //
           // 必须把 `tried` 传给池：见 `AccountPool.getAvailableAccount` 的说明 ——
@@ -939,7 +939,7 @@ export class BuddyAdapter extends LlmAdapter {
   /**
    * 消费 SSE 响应并产出 StreamChunk。
    *
-   * CodeBuddy 返回标准 OpenAI SSE：`delta.content` 为正文、
+   * Buddy 返回标准 OpenAI SSE：`delta.content` 为正文、
    * `delta.reasoning_content` 为思考、`delta.tool_calls` 为工具调用。
    * 流式工具调用仅首个分片携带真实 id（chatcmpl-tool-xxx），后续参数分片
    * 只有 index——按 index 缓存 id 保证同一工具的所有分片 id 一致。
@@ -1173,16 +1173,16 @@ function isCredentialExpired(credential: BuddyCredential): boolean {
 }
 
 /**
- * 在 ctx.llm 上注册 CodeBuddy 系产品的 provider 路由与适配器。
+ * 在 ctx.llm 上注册 Buddy 系产品的 provider 路由与适配器。
  *
  * 路由名、配置页展示名与 settingsNs 全部由产品配置驱动：
- * CodeBuddy 得到 `buddy` / `llm-buddy`（与改造前完全一致），
- * WorkBuddy 得到 `workbuddy` / `llm-workbuddy`。
+ * Buddy CN 得到 `buddy-cn` / `llm-buddy-cn`，
+ * Buddy 得到 `buddy` / `llm-buddy`。
  * 注意 settingsNs 必须与 `src/index.ts` 的 registerProviderSettings 注册的
  * namespace 保持一致，否则模型设置页会因未注册 namespace 崩溃。
  */
 export function registerBuddyLlm(ctx: Context, options: BuddyAdapterOptions): void {
-  const product = options.product ?? CODEBUDDY
+  const product = options.product ?? BUDDY_CN
   ctx.llm.registerConfigurableProviders([
     { provider: product.id, displayName: product.displayName, settingsNs: `llm-${product.id}`, settingsPath: [] },
   ])

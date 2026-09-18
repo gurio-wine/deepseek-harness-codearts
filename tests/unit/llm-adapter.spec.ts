@@ -50,7 +50,9 @@ function poolWithDisabled(provider: string, ids: string[]) {
 
 describe('CodeArtsAdapter', () => {
   it('providerInfo identifies the codearts route', () => {
-    expect(makeAdapter().providerInfo('codearts')).toMatchObject({ id: 'codearts', name: 'CodeArts Agent' })
+    // 展示名与其它 provider 统一为「产品名」风格（Codearts），不再用
+    // 'CodeArts Agent' —— 模型选择器里应显示产品名而非 IDE 形态名。
+    expect(makeAdapter().providerInfo('codearts')).toMatchObject({ id: 'codearts', name: 'Codearts' })
   })
 
   it('listModels advertises the openpangu-2.0 and deepseek-v4 models alongside the GLM family', async () => {
@@ -688,7 +690,7 @@ describe('CodeArtsAdapter', () => {
 
   it('blacklist is keyed by provider: another route\'s entries do not leak in', async () => {
     // 池里只有 buddy 的黑名单，codearts 路由不该被它影响
-    const adapter = makeAdapter({ accountPool: poolWithDisabled('buddy', ['GLM-5.2']) })
+    const adapter = makeAdapter({ accountPool: poolWithDisabled('buddy-cn', ['GLM-5.2']) })
     expect((await adapter.listModels('codearts')).map((m) => m.id)).toContain('GLM-5.2')
   })
 

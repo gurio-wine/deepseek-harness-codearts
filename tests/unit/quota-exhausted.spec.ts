@@ -217,7 +217,7 @@ describe('BuddyAdapter 账号积分耗尽切换', () => {
     const pool = makePool({ id: 'acct-1', token: 'AT1' }, [{ id: 'acct-2', token: 'AT2' }])
     const sentTokens: string[] = []
     const adapter = new BuddyAdapter({
-      credentialRef: credentialRef('BUDDY_ACCESS_TOKEN'),
+      credentialRef: credentialRef('BUDDY_CN_ACCESS_TOKEN'),
       resolveCredential: async () => makeBuddyCredential({ access_token: 'AT1' }),
       refresh: async () => {},
       accountPool: pool as never,
@@ -250,7 +250,7 @@ describe('BuddyAdapter 账号积分耗尽切换', () => {
     )
     const sentTokens: string[] = []
     const adapter = new BuddyAdapter({
-      credentialRef: credentialRef('BUDDY_ACCESS_TOKEN'),
+      credentialRef: credentialRef('BUDDY_CN_ACCESS_TOKEN'),
       resolveCredential: async () => makeBuddyCredential({ access_token: 'AT1' }),
       refresh: async () => {},
       accountPool: pool as never,
@@ -273,7 +273,7 @@ describe('BuddyAdapter 账号积分耗尽切换', () => {
     const pool = makePool({ id: 'acct-1', token: 'AT1' }, [{ id: 'acct-2', token: 'AT2' }])
     const sentTokens: string[] = []
     const adapter = new BuddyAdapter({
-      credentialRef: credentialRef('BUDDY_ACCESS_TOKEN'),
+      credentialRef: credentialRef('BUDDY_CN_ACCESS_TOKEN'),
       resolveCredential: async () => makeBuddyCredential({ access_token: 'AT1' }),
       refresh: async () => {},
       accountPool: pool as never,

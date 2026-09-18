@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BUDDY_CREDENTIAL_REF, BuddyAuth } from '../../src/buddy-auth.js'
 import { RefreshTokenExpiredError, runBuddyLoginFlow } from '../../src/buddy-oauth.js'
 import type { BuddyCredential } from '../../src/buddy.js'
-import { WORKBUDDY } from '../../src/product.js'
+import { BUDDY } from '../../src/product.js'
 
 vi.mock('../../src/buddy-oauth.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/buddy-oauth.js')>()
@@ -93,11 +93,11 @@ afterEach(() => {
 })
 
 describe('BuddyAuth', () => {
-  it('registers as ctx.buddyAuth on construction', () => {
+  it('registers as ctx.buddyCnAuth on construction', () => {
     const { ctx } = makeContext()
     const service = newService(ctx)
-    expect(ctx.buddyAuth).toBeInstanceOf(BuddyAuth)
-    expect(ctx.buddyAuth.name).toBe('buddyAuth')
+    expect(ctx.buddyCnAuth).toBeInstanceOf(BuddyAuth)
+    expect(ctx.buddyCnAuth.name).toBe('buddyCnAuth')
   })
 
   it('login stores the credential JSON under the fixed ref', async () => {
@@ -293,21 +293,21 @@ describe('BuddyAuth silent refresh', () => {
 describe('产品参数化', () => {
   it('默认构造使用 CodeBuddy 配置', () => {
     const auth = new BuddyAuth(createMockContext() as never)
+    expect(auth.product.id).toBe('buddy-cn')
+    expect(auth.credentialRefName).toBe('BUDDY_CN_ACCESS_TOKEN')
+  })
+
+  it('传入 WorkBuddy 配置时使用其 platform 与凭据 ref', () => {
+    const auth = new BuddyAuth(createMockContext() as never, { product: BUDDY })
     expect(auth.product.id).toBe('buddy')
     expect(auth.credentialRefName).toBe('BUDDY_ACCESS_TOKEN')
   })
 
-  it('传入 WorkBuddy 配置时使用其 platform 与凭据 ref', () => {
-    const auth = new BuddyAuth(createMockContext() as never, { product: WORKBUDDY })
-    expect(auth.product.id).toBe('workbuddy')
-    expect(auth.credentialRefName).toBe('WORKBUDDY_ACCESS_TOKEN')
-  })
-
   it('WorkBuddy 实例的 status 读取自己的凭据 ref', async () => {
     const ctx = createMockContext()
-    const auth = new BuddyAuth(ctx as never, { product: WORKBUDDY })
+    const auth = new BuddyAuth(ctx as never, { product: BUDDY })
     // 只写入 WorkBuddy 的 ref
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCESS_TOKEN'), JSON.stringify({
+    await ctx.credentials.set(credentialRef('BUDDY_ACCESS_TOKEN'), JSON.stringify({
       access_token: 'AT', refresh_token: 'RT', expires_at: String(Date.now() + 3_600_000),
     }))
     const status = await auth.status()
@@ -316,8 +316,8 @@ describe('产品参数化', () => {
 
   it('WorkBuddy 实例看不到 CodeBuddy 的凭据', async () => {
     const ctx = createMockContext()
-    const auth = new BuddyAuth(ctx as never, { product: WORKBUDDY })
-    await ctx.credentials.set(credentialRef('BUDDY_ACCESS_TOKEN'), JSON.stringify({
+    const auth = new BuddyAuth(ctx as never, { product: BUDDY })
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCESS_TOKEN'), JSON.stringify({
       access_token: 'AT', refresh_token: 'RT', expires_at: String(Date.now() + 3_600_000),
     }))
     const status = await auth.status()
@@ -329,32 +329,32 @@ describe('产品参数化', () => {
 
   it('WorkBuddy 的 logout 不会清除 CodeBuddy 的凭据', async () => {
     const ctx = createMockContext()
-    const auth = new BuddyAuth(ctx as never, { product: WORKBUDDY })
+    const auth = new BuddyAuth(ctx as never, { product: BUDDY })
     const buddyValue = JSON.stringify(makeCredential())
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCESS_TOKEN'), buddyValue)
     await ctx.credentials.set(credentialRef('BUDDY_ACCESS_TOKEN'), buddyValue)
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCESS_TOKEN'), buddyValue)
 
     await auth.logout()
 
-    expect(await ctx.credentials.resolve(credentialRef('WORKBUDDY_ACCESS_TOKEN'))).toBeUndefined()
-    expect((await ctx.credentials.resolve(credentialRef('BUDDY_ACCESS_TOKEN')))?.value).toBe(buddyValue)
+    expect(await ctx.credentials.resolve(credentialRef('BUDDY_ACCESS_TOKEN'))).toBeUndefined()
+    expect((await ctx.credentials.resolve(credentialRef('BUDDY_CN_ACCESS_TOKEN')))?.value).toBe(buddyValue)
   })
 
   it('WorkBuddy 的 checkExpired 只看自己的凭据', async () => {
     const ctx = createMockContext()
-    const auth = new BuddyAuth(ctx as never, { product: WORKBUDDY })
+    const auth = new BuddyAuth(ctx as never, { product: BUDDY })
     // 只写 CodeBuddy 的有效凭据 → WorkBuddy 仍视为未配置（即已过期）
-    await ctx.credentials.set(credentialRef('BUDDY_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
     expect(await auth.checkExpired()).toBe(true)
 
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
+    await ctx.credentials.set(credentialRef('BUDDY_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
     expect(await auth.checkExpired()).toBe(false)
   })
 
   it('WorkBuddy 的 fetchModels 只解析自己的凭据', async () => {
     const ctx = createMockContext()
     // 用 CodeBuddy 的凭据：若 WorkBuddy 误读它，会发出请求并返回模型列表。
-    await ctx.credentials.set(credentialRef('BUDDY_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
       data: { agents: [{ name: 'craft', models: ['auto', 'glm-5.3'] }] },
     }), { status: 200 })) as unknown as typeof fetch
@@ -363,10 +363,10 @@ describe('产品参数化', () => {
     const pool = {
       getAvailableAccount: async (provider: string) => { queried.push(provider); return undefined },
     }
-    const auth = new BuddyAuth(ctx as never, { product: WORKBUDDY, fetcher })
+    const auth = new BuddyAuth(ctx as never, { product: BUDDY, fetcher })
 
     expect(await auth.fetchModels(pool as never)).toEqual([])
-    expect(queried).toEqual(['workbuddy'])
+    expect(queried).toEqual(['buddy'])
     expect(fetcher).not.toHaveBeenCalled()
   })
 
@@ -383,57 +383,57 @@ describe('产品参数化', () => {
     const pool = {
       addAccount: async (entry: { provider: string; credentialRef: string }) => { added.push(entry) },
     }
-    const auth = new BuddyAuth(ctx as never, { product: WORKBUDDY, fetcher: refreshFetcher() })
+    const auth = new BuddyAuth(ctx as never, { product: BUDDY, fetcher: refreshFetcher() })
     services.push(auth)
 
     const result = await auth.login({ accountId: 'wb-1', pool: pool as never })
 
-    expect(String(result.ref)).toBe('WORKBUDDY_ACCESS_TOKEN')
+    expect(String(result.ref)).toBe('BUDDY_ACCESS_TOKEN')
     expect(added).toHaveLength(1)
-    expect(added[0]).toMatchObject({ provider: 'workbuddy', credentialRef: 'WORKBUDDY_ACCESS_TOKEN' })
+    expect(added[0]).toMatchObject({ provider: 'buddy', credentialRef: 'BUDDY_ACCESS_TOKEN' })
     expect(mockedRunBuddyLoginFlow).toHaveBeenCalledWith(
-      expect.objectContaining({ product: WORKBUDDY }),
+      expect.objectContaining({ product: BUDDY }),
     )
-    expect(await ctx.credentials.resolve(credentialRef('WORKBUDDY_ACCESS_TOKEN'))).toBeDefined()
-    expect(await ctx.credentials.resolve(credentialRef('BUDDY_ACCESS_TOKEN'))).toBeUndefined()
+    expect(await ctx.credentials.resolve(credentialRef('BUDDY_ACCESS_TOKEN'))).toBeDefined()
+    expect(await ctx.credentials.resolve(credentialRef('BUDDY_CN_ACCESS_TOKEN'))).toBeUndefined()
   })
 
   it('WorkBuddy 的 refreshAll 只续期本产品账号', async () => {
     const ctx = createMockContext()
     const credential = makeCredential({ refresh_token: '' })
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCOUNT_T1'), JSON.stringify(credential))
+    await ctx.credentials.set(credentialRef('BUDDY_ACCOUNT_T1'), JSON.stringify(credential))
     const listed: string[] = []
     const updated: string[] = []
     const pool = {
       listAccounts: async (provider: string) => {
         listed.push(provider)
-        return [{ id: 'wb-1', provider, enabled: true, refreshable: true, credentialRef: 'WORKBUDDY_ACCOUNT_T1' }]
+        return [{ id: 'wb-1', provider, enabled: true, refreshable: true, credentialRef: 'BUDDY_ACCOUNT_T1' }]
       },
       updateAccount: async (id: string) => { updated.push(id) },
     }
-    const auth = new BuddyAuth(ctx as never, { product: WORKBUDDY, fetcher: refreshFetcher() })
+    const auth = new BuddyAuth(ctx as never, { product: BUDDY, fetcher: refreshFetcher() })
     services.push(auth)
 
     await auth.refreshAll(pool as never)
 
     // 只查自己的 provider，且无 refresh_token 的账号被标记为不可续期。
-    expect(listed).toEqual(['workbuddy'])
+    expect(listed).toEqual(['buddy'])
     expect(updated).toEqual(['wb-1'])
   })
 
   it('WorkBuddy 的 refresh 只续期自己的凭据', async () => {
     const ctx = createMockContext()
     // 只有 CodeBuddy 的凭据 → WorkBuddy 必须报「未配置」，且不得发出刷新请求。
-    await ctx.credentials.set(credentialRef('BUDDY_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
     const fetcher = refreshFetcher()
-    const auth = new BuddyAuth(ctx as never, { product: WORKBUDDY, fetcher })
+    const auth = new BuddyAuth(ctx as never, { product: BUDDY, fetcher })
 
     await expect(auth.refresh()).rejects.toThrow('未配置凭据，请先登录')
     expect(fetcher).not.toHaveBeenCalled()
 
     // 写入自己的凭据后可正常续期。
     await ctx.credentials.set(
-      credentialRef('WORKBUDDY_ACCESS_TOKEN'),
+      credentialRef('BUDDY_ACCESS_TOKEN'),
       JSON.stringify(makeCredential({ refresh_token: '' })),
     )
     await expect(auth.refresh()).rejects.toThrow(RefreshTokenExpiredError)
@@ -444,11 +444,11 @@ describe('产品参数化', () => {
     try {
       const ctx = createMockContext()
       // 只有 CodeBuddy 的（已过期）凭据：若 WorkBuddy 误读，会武装调度并发出刷新请求。
-      await ctx.credentials.set(credentialRef('BUDDY_ACCESS_TOKEN'), JSON.stringify(
+      await ctx.credentials.set(credentialRef('BUDDY_CN_ACCESS_TOKEN'), JSON.stringify(
         makeCredential({ expires_at: String(Date.now() - 60_000) }),
       ))
       const fetcher = refreshFetcher()
-      const auth = new BuddyAuth(ctx as never, { product: WORKBUDDY, fetcher })
+      const auth = new BuddyAuth(ctx as never, { product: BUDDY, fetcher })
       services.push(auth)
       const refreshSpy = vi.spyOn(auth, 'refresh')
 
@@ -468,21 +468,21 @@ describe('产品参数化', () => {
 
   it('WorkBuddy 的 refresh 发出的请求带 WorkBuddy 的 User-Agent', async () => {
     const ctx = createMockContext()
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
+    await ctx.credentials.set(credentialRef('BUDDY_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
     const fetcher = refreshFetcher()
-    const auth = new BuddyAuth(ctx as never, { product: WORKBUDDY, fetcher })
+    const auth = new BuddyAuth(ctx as never, { product: BUDDY, fetcher })
 
     await auth.refresh()
 
     const init = (fetcher as unknown as { mock: { calls: Array<[string, RequestInit]> } }).mock.calls[0][1]
     // 两个内置产品的 UA 字面量相同，故这里比对 product.userAgent 而非字面量，
     // 鉴别力由 buddy-oauth.spec.ts 的注入式用例提供。
-    expect((init.headers as Record<string, string>)['User-Agent']).toBe(WORKBUDDY.userAgent)
+    expect((init.headers as Record<string, string>)['User-Agent']).toBe(BUDDY.userAgent)
   })
 
   it('WorkBuddy 的 fetchModels 请求带 X-Product-Code: workbuddy', async () => {
     const ctx = createMockContext()
-    await ctx.credentials.set(credentialRef('WORKBUDDY_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
+    await ctx.credentials.set(credentialRef('BUDDY_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       // 企业模型端点返回空 → 触发回退，使两个端点都被请求到
@@ -493,24 +493,26 @@ describe('产品参数化', () => {
         data: { agents: [{ name: 'craft', models: ['glm-5.3'] }] },
       }), { status: 200 })
     }) as unknown as typeof fetch
-    const auth = new BuddyAuth(ctx as never, { product: WORKBUDDY, fetcher })
+    const auth = new BuddyAuth(ctx as never, { product: BUDDY, fetcher })
 
     expect((await auth.fetchModels()).map((m) => m.id)).toEqual(['glm-5.3'])
 
     const calls = (fetcher as unknown as { mock: { calls: Array<[string, RequestInit]> } }).mock.calls
-    // 企业模型端点优先，回退到 /v3/config；两次请求都必须带 workbuddy 身份。
+    // 企业模型端点优先，回退到 /v3/config；两次请求都必须带国际版身份。
     expect(calls[0]![0]).toContain('/console/enterprises/personal/models')
     expect(calls.at(-1)![0]).toContain('/v3/config')
     for (const [, init] of calls) {
       const headers = init.headers as Record<string, string>
+      // ⚠️ 协议值：provider id 已改名为 `buddy`，但出站 X-Product-Code 仍是
+      // `workbuddy` —— 腾讯后台按它归因用量，绝不随显示名/路由名变化。
       expect(headers['X-Product-Code']).toBe('workbuddy')
-      expect(headers['User-Agent']).toBe(WORKBUDDY.userAgent)
+      expect(headers['User-Agent']).toBe(BUDDY.userAgent)
     }
   })
 
-  it('默认 CodeBuddy 实例的 fetchModels 仍带 codebuddy 产品码', async () => {
+  it('默认 Buddy CN 实例的 fetchModels 仍带 codebuddy 产品码', async () => {
     const ctx = createMockContext()
-    await ctx.credentials.set(credentialRef('BUDDY_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
+    await ctx.credentials.set(credentialRef('BUDDY_CN_ACCESS_TOKEN'), JSON.stringify(makeCredential()))
     const fetcher = vi.fn(async () => new Response(JSON.stringify({
       data: { agents: [{ name: 'craft', models: ['glm-5.3'] }] },
     }), { status: 200 })) as unknown as typeof fetch

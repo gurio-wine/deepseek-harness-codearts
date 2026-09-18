@@ -3,7 +3,7 @@
  *
  * ## 为什么不复用 `BuddyProduct` / `LobsteraiProduct`
  *
- * 三者是**三条互不相干的协议线**：CodeBuddy 系走腾讯的 external-link 轮询登录 +
+ * 三者是**三条互不相干的协议线**：Buddy 系走腾讯的 external-link 轮询登录 +
  * `X-Product-Code` 归属头；LobsterAI 走本地回调 + `authCode` 换 token + keyfrom
  * 身份载荷；Trae CN 走**本地回调 + PKCE（S256）+ authCode 换 token** +
  * `Cloud-IDE-JWT` 鉴权。三个类型的字段集合几乎不相交
@@ -410,7 +410,7 @@ export interface TraeCnProduct {
    *
    * **刻意不用 `${product.id}Auth` 机械派生**：产品 id 为 `trae-cn`，
    * 机械派生会得到 `trae-cnAuth` —— 带连字符的属性名虽在 JS 里合法，
-   * 但与 `buddyAuth` / `workbuddyAuth` / `lobsteraiAuth` / `codeartsAuth`
+   * 但与 `buddyCnAuth` / `buddyAuth` / `lobsteraiAuth` / `codeartsAuth`
    * 四个既有两个单词驼峰名风格不一致，且无法用点号语法访问
    * （必须写 `ctx['trae-cnAuth']`）。这里显式声明 `traeCnAuth`，
    * 让「用户可见的 provider 名」与「代码里的服务标识符」各自取合适的形态。
@@ -455,7 +455,7 @@ export const ALL_TRAE_CN_PRODUCTS: readonly TraeCnProduct[] = [TRAE_CN]
 /**
  * 按 provider id 取 Trae CN 产品配置；未知 id 返回 undefined。
  *
- * 与 `productById`（CodeBuddy 系）、`lobsteraiProductById` 分开：三者返回
+ * 与 `productById`（Buddy 系）、`lobsteraiProductById` 分开：三者返回
  * **不同类型**，合并成一个函数会让调用方拿到联合类型后再也不得不做类型收窄。
  */
 export function traeCnProductById(id: string): TraeCnProduct | undefined {

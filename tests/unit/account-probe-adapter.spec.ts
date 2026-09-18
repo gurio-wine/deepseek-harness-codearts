@@ -1,13 +1,13 @@
 /**
  * 遗留缺陷回归测试：`account-probe` 的适配器选择必须按**产品配置**判定。
  *
- * 原始实现只判断 `entry.provider === 'buddy'`，于是 `workbuddy` 账号落入
- * else 分支、被交给 `CodeArtsAdapter`（华为云 HMAC 签名 + 错误端点）去发
- * WorkBuddy 凭据，探测必然失败。本文件用被 mock 的 BuddyAdapter 验证：
- * buddy 与 workbuddy 都走 BuddyAdapter，且各自带上自己的 product 配置。
+ * 原始实现只判断 `entry.provider === 'buddy'`（当年的中国版），于是国际版
+ * 账号落入 else 分支、被交给 `CodeArtsAdapter`（华为云 HMAC 签名 + 错误端点）
+ * 去发它的凭据，探测必然失败。本文件用被 mock 的 BuddyAdapter 验证：
+ * `buddy-cn` 与 `buddy` 都走 BuddyAdapter，且各自带上自己的 product 配置。
  *
  * 注意：BuddyAdapter 被替换为桩（不发任何网络请求），CodeArtsAdapter 保持
- * 真实但**在本文件内不会被构造** —— 若缺陷复发，workbuddy 分支会构造真实
+ * 真实但**在本文件内不会被构造** —— 若缺陷复发，国际版分支会构造真实
  * CodeArtsAdapter 并发起网络请求，测试随即失败。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -41,10 +41,11 @@ async function adapterInstances(): Promise<Array<{ product?: { id: string; produ
 function makeEntry(overrides: Partial<ProviderAccountEntry>): ProviderAccountEntry {
   return {
     id: 'wb-1',
-    provider: 'workbuddy',
+    // 默认夹具用国际版（provider id 为 `buddy`）。
+    provider: 'buddy',
     nickname: '测试号',
     enabled: true,
-    credentialRef: 'WORKBUDDY_ACCOUNT_TEST',
+    credentialRef: 'BUDDY_ACCOUNT_TEST',
     createdAt: 1,
     refreshable: true,
     modelRateLimits: { 'deepseek-v4.1-flash': Date.now() + 3_600_000 },
@@ -70,7 +71,7 @@ describe('account-probe 适配器选择按产品判定', () => {
     ;(await adapterInstances()).length = 0
   })
 
-  it('workbuddy 账号走 BuddyAdapter 并携带 WorkBuddy 产品配置', async () => {
+  it('buddy（国际版）账号走 BuddyAdapter 并携带 Buddy 产品配置', async () => {
     const { retestAccount } = await import('../../src/account-probe.js')
     const result = await retestAccount(makePool([makeEntry({})]), 'wb-1')
 
@@ -80,21 +81,22 @@ describe('account-probe 适配器选择按产品判定', () => {
 
     const instances = await adapterInstances()
     expect(instances).toHaveLength(1)
-    expect(instances[0]?.product?.id).toBe('workbuddy')
+    expect(instances[0]?.product?.id).toBe('buddy')
+    // ⚠️ 协议值：provider id 是 `buddy`，但它出站的 productCode 仍是 `workbuddy`。
     expect(instances[0]?.product?.productCode).toBe('workbuddy')
   })
 
-  it('buddy 账号仍走 BuddyAdapter 且携带 CodeBuddy 产品配置', async () => {
+  it('buddy-cn 账号仍走 BuddyAdapter 且携带 Buddy CN 产品配置', async () => {
     const { retestAccount } = await import('../../src/account-probe.js')
     await retestAccount(makePool([makeEntry({
       id: 'buddy-1',
-      provider: 'buddy',
-      credentialRef: 'BUDDY_ACCOUNT_TEST',
+      provider: 'buddy-cn',
+      credentialRef: 'BUDDY_CN_ACCOUNT_TEST',
     })]), 'buddy-1')
 
     const instances = await adapterInstances()
     expect(instances).toHaveLength(1)
-    expect(instances[0]?.product?.id).toBe('buddy')
+    expect(instances[0]?.product?.id).toBe('buddy-cn')
     expect(instances[0]?.product?.productCode).toBe('codebuddy')
   })
 })

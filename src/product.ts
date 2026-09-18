@@ -1,15 +1,28 @@
 /**
- * CodeBuddy 系产品配置。
+ * Buddy 系产品配置。
  *
  * 这些产品同源：共用同一 CLI 内核、同一认证协议（cli-external-link）与同一套
  * ProductProvider 机制，差异全部收敛到这里，使多个 provider 共用一套实现。
  *
  * 实测依据（2026-09-14，逆向各产品 cli/product.json + 真实请求）：
  *
- * | 产品              | endpoint                    | platform       | genieVersion |
- * |-------------------|-----------------------------|----------------|--------------|
- * | CodeBuddy（中国） | https://copilot.tencent.com | ide            | —            |
- * | WorkBuddy（国际） | https://www.workbuddy.ai    | workbuddy-ai   | 5.5.2        |
+ * | 产品                    | endpoint                    | platform       | genieVersion |
+ * |-------------------------|-----------------------------|----------------|--------------|
+ * | Buddy CN（腾讯 CodeBuddy 中国版） | https://copilot.tencent.com | ide       | —            |
+ * | Buddy（腾讯 WorkBuddy 国际版）    | https://www.workbuddy.ai    | workbuddy-ai | 5.5.2     |
+ *
+ * ## 命名（2026-09 统一）
+ *
+ * 显示名与 provider id 都按「产品品牌」而非「历史代号」命名：
+ * 中国版 CodeBuddy → `buddy-cn`（导出常量 {@link BUDDY_CN}），
+ * 国际版 WorkBuddy → `buddy`（导出常量 {@link BUDDY}）。
+ *
+ * ⚠️ **协议值不随命名变化**：`productCode` / `attributionName` / `userAgent` /
+ * `platform` / `endpoint` / `apiDomain` 是出站身份标识（`X-Product-Code`、
+ * `X-Product` / `X-IDE-Name` / `X-IDE-Type`、User-Agent、模型池归属），
+ * 腾讯后台按它们归因用量。改显示名时**绝不能**跟着动这些字段 ——
+ * 上表里 `buddy-cn` 的 productCode 仍是 `codebuddy`、attributionName 仍是
+ * `CodeBuddy`；`buddy` 的仍是 `workbuddy` / `WorkBuddy`。
  *
  * 关于「模型列表为何不能共用」：两者的**路径与响应解析完全相同**
  * （`GET /v3/config` → `data.data.models` / `data.data.agents`），
@@ -22,7 +35,11 @@
  * `src/buddy.ts` / `src/buddy-auth.ts` / `src/buddy-adapter.ts` 中与产品差异
  * 相关的导出（API_ENDPOINT / PLATFORM / API_DOMAIN / BUDDY_USER_AGENT /
  * BUDDY_PRODUCT_CODE / BUDDY_CREDENTIAL_REF / CHAT_API_BASE）已改为从本模块的
- * CODEBUDDY 配置**派生**，只保留原有的导出签名以兼容既有导入方。
+ * BUDDY_CN 配置**派生**，只保留原有的导出签名以兼容既有导入方。
+ *
+ * 改名（`buddy`→`buddy-cn` / `workbuddy`→`buddy`）是一次**破坏性变更**：
+ * 落在 `settings.yaml` 与 `.credentials.yaml` 里的旧 id、旧凭据 ref、
+ * 旧 settingsNs 由 `src/provider-rename-migration.ts` 在启动时一次性承接。
  *
  * 依赖方向：`product.ts` 不 import 任何业务模块（见下方 import 列表为空的
  * 约束），只有业务模块单向 import 本模块，故不存在循环依赖；同理，新增产品
@@ -52,21 +69,32 @@ export interface BuddyUserAgentRule {
 }
 
 /**
- * 国际版（WorkBuddy AI）模型线 → UA 分档规则。
+ * 国际版（Buddy）模型线 → UA 分档规则。
  *
  * 判据来自 IDE 客户端形态：国际版产品名是 `WorkBuddy AI`，其客户端出站 UA
  * 遵循官方三段式 `WorkBuddy/<ver> WorkBuddy AI/<ver> CLI/<ver>`。GPT / Gemini
  * 系仅在国际版池中提供，归入国际版形态；国内系模型（glm/hy/kimi/minimax）
  * 虽在国际版池中也可见，但仍沿用国内客户端形态（`WorkBuddy/<ver> WorkBuddy/...`），
  * 与 realm 无关。
+ *
+ * 常量名保留 `WORKBUDDY_*`：它描述的是**出站 UA 字符串的品牌字样**（协议值），
+ * 不是 provider 名 —— provider 名已统一为 `buddy` / `buddy-cn`。
  */
 const WORKBUDDY_UA_INTL = 'WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2'
 const WORKBUDDY_UA_CN = 'WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/5.5.2'
 
-/** 一个 CodeBuddy 系产品的全部差异配置。 */
+/** 一个 Buddy 系产品的全部差异配置。 */
 export interface BuddyProduct {
   /** provider 标识：注册到 ctx.llm 的路由名，也是账号列表的 provider 字段值 */
-  id: 'buddy' | 'workbuddy'
+  id: 'buddy-cn' | 'buddy'
+  /**
+   * cordis 服务名（`ctx.<serviceName>`）。
+   *
+   * 为什么**显式给出**而不是机械派生 `${id}Auth`：`buddy-cn` 机械派生会得到
+   * 非标识符风格的 `buddy-cnAuth`，与 `TraeCnProduct.serviceName` 是同一先例
+   * （见 `src/trae-cn-product.ts` 与 AGENTS.md 的「LLM Provider 约定」）。
+   */
+  serviceName: string
   /** auth/state 的 platform 查询参数 */
   platform: string
   /**
@@ -129,7 +157,7 @@ export interface BuddyProduct {
   fallbackModels?: readonly BuddyFallbackModel[]
   /**
    * 登录 URL 是否需要追加 `version` 与 `loginSessionId`。
-   * CodeBuddy 不需要；WorkBuddy 需要（对齐 workbuddy-desktop 认证配置）。
+   * Buddy CN 不需要；Buddy（国际版）需要（对齐 workbuddy-desktop 认证配置）。
    */
   appendSessionParams: boolean
   /** 追加到登录 URL 的版本号（appendSessionParams 为 true 时使用） */
@@ -137,7 +165,7 @@ export interface BuddyProduct {
 }
 
 /**
- * CodeBuddy（腾讯 CodeBuddy，中国版），platform = ide。
+ * Buddy CN（腾讯 CodeBuddy 中国版），platform = ide。
  *
  * 本配置是产品差异取值的唯一真相源：`src/buddy.ts` / `src/buddy-auth.ts` /
  * `src/buddy-adapter.ts` 中同名的历史常量（PLATFORM / BUDDY_PRODUCT_CODE /
@@ -145,7 +173,7 @@ export interface BuddyProduct {
  * CHAT_API_BASE）均由此处派生，不再是独立字面量。
  */
 /**
- * CodeBuddy（中国版）的内置模型目录。
+ * Buddy CN（中国版）的内置模型目录。
  *
  * 数据来源：`/v3/config` 的 `craft` agent 白名单，并**逐个用真实请求验证可用**
  * （`POST /v2/chat/completions`，stream 模式）。只收录实测返回可用的模型 ——
@@ -153,7 +181,7 @@ export interface BuddyProduct {
  * （glm-4.6/4.7/5.0、minimax-m2.5、kimi-k2.5/k2.8-preview、hunyuan-* 等），
  * 列进选择器只会让用户选中后报错，故一律不收录。
  */
-const CODEBUDDY_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
+const BUDDY_CN_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
   {
     id: 'hy4-preview', name: 'Hy4 preview', contextWindow: 1_000_000, supportsImages: true,
     reasoningEfforts: ['high'], defaultReasoningEffort: 'high',
@@ -194,26 +222,29 @@ const CODEBUDDY_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
   { id: 'minimax-m3', name: 'MiniMax-M3', contextWindow: 512_000, supportsImages: true, reasoningEfforts: ['medium'] },
 ]
 
-export const CODEBUDDY: BuddyProduct = {
-  id: 'buddy',
+export const BUDDY_CN: BuddyProduct = {
+  id: 'buddy-cn',
+  serviceName: 'buddyCnAuth',
   platform: 'ide',
   endpoint: 'https://copilot.tencent.com',
   apiDomain: 'copilot.tencent.com',
-  displayName: 'CodeBuddy (腾讯)',
+  displayName: 'Buddy CN',
+  // ⚠️ 协议值：X-Product-Code 仍为 'codebuddy'（腾讯后台按它归因，别跟着显示名改）。
   productCode: 'codebuddy',
   userAgent: 'CodeBuddyIDE/1.106.1',
   // 中国版只有一条产品线，无需按模型分档：全部模型沿用 IDE UA。
   userAgentByModelFamily: [],
+  // ⚠️ 协议值：X-Product / X-IDE-Name / X-IDE-Type 仍为 'CodeBuddy'。
   attributionName: 'CodeBuddy',
   clientVersion: '1.106.1',
   cliVersion: '2.137.1',
-  defaultCredentialRef: 'BUDDY_ACCESS_TOKEN',
+  defaultCredentialRef: 'BUDDY_CN_ACCESS_TOKEN',
   appendSessionParams: false,
-  fallbackModels: CODEBUDDY_FALLBACK_MODELS,
+  fallbackModels: BUDDY_CN_FALLBACK_MODELS,
 }
 
 /**
- * WorkBuddy 国际版的内置模型目录。
+ * Buddy（腾讯 WorkBuddy 国际版 / WorkBuddy AI）的内置模型目录。
  *
  * 数据来源：IDE 的本地缓存 `~/.workbuddy-ai/local_storage/*.info`
  * （`WorkbuddyAuthProductCoordinator` 写入的 ProductManager 合并结果），
@@ -221,7 +252,7 @@ export const CODEBUDDY: BuddyProduct = {
  *
  * 顺序即 IDE 的展示顺序（`cli` agent 白名单顺序），不要随意重排。
  */
-const WORKBUDDY_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
+const BUDDY_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
   { id: 'default-model', name: 'Auto', contextWindow: 176_000, supportsImages: true },
   { id: 'fast-model', name: 'Fast', contextWindow: 200_000, supportsImages: true, reasoningEfforts: ['medium'] },
   { id: 'balanced-model', name: 'Balanced', contextWindow: 256_000, supportsImages: true, reasoningEfforts: ['medium'] },
@@ -275,7 +306,7 @@ const WORKBUDDY_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
 ]
 
 /**
- * WorkBuddy 国际版（腾讯 WorkBuddy AI），platform = workbuddy-ai。
+ * Buddy（腾讯 WorkBuddy 国际版 / WorkBuddy AI），platform = workbuddy-ai。
  *
  * 逆向自 `C:\Users\Jet\AppData\Local\Programs\WorkBuddyAI`（5.5.2）的 cli/product.json：
  * - `applicationName` = "workbuddy-ai"
@@ -284,14 +315,19 @@ const WORKBUDDY_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
  * - `prefixPath` = "/plugin"（与中国版相同）
  *
  * 该产品**没有**每日签到积分接口（内核中只有 `/v2/billing/meter/get-dosage-notify`），
- * 因此 Account Hub 不为其渲染「一键领取积分」按钮；积分领取在 CodeBuddy 侧完成。
+ * 因此 Account Hub 不为其渲染「一键领取积分」按钮；积分领取在 Buddy CN 侧完成。
+ *
+ * ⚠️ provider id 已从 `workbuddy` 改为 `buddy`；`productCode` / `attributionName` /
+ * `platform` / `endpoint` / UA 这些**出站协议值一个字符都没变**。
  */
-export const WORKBUDDY: BuddyProduct = {
-  id: 'workbuddy',
+export const BUDDY: BuddyProduct = {
+  id: 'buddy',
+  serviceName: 'buddyAuth',
   platform: 'workbuddy-ai',
   endpoint: 'https://www.workbuddy.ai',
   apiDomain: 'www.workbuddy.ai',
-  displayName: 'WorkBuddy (国际版)',
+  displayName: 'Buddy',
+  // ⚠️ 协议值：X-Product-Code 仍为 'workbuddy'。
   productCode: 'workbuddy',
   // 默认档：国际版产品形态（无按模型命中时使用）。
   userAgent: WORKBUDDY_UA_INTL,
@@ -306,23 +342,23 @@ export const WORKBUDDY: BuddyProduct = {
     { match: 'kimi-', ua: WORKBUDDY_UA_CN },
     { match: 'minimax-', ua: WORKBUDDY_UA_CN },
   ],
+  // ⚠️ 协议值：X-Product / X-IDE-Name / X-IDE-Type 仍为 'WorkBuddy'。
   attributionName: 'WorkBuddy',
   clientVersion: '5.5.2',
   cliVersion: '5.5.2',
-  defaultCredentialRef: 'WORKBUDDY_ACCESS_TOKEN',
+  defaultCredentialRef: 'BUDDY_ACCESS_TOKEN',
   appendSessionParams: true,
   pluginVersion: '5.5.2',
-  fallbackModels: WORKBUDDY_FALLBACK_MODELS,
+  fallbackModels: BUDDY_FALLBACK_MODELS,
 }
 
 /** 全部产品配置，供按 id 查询与遍历注册使用。 */
-export const ALL_PRODUCTS: readonly BuddyProduct[] = [CODEBUDDY, WORKBUDDY]
+export const ALL_PRODUCTS: readonly BuddyProduct[] = [BUDDY_CN, BUDDY]
 
 /** 按 provider id 取产品配置；未知 id 返回 undefined。 */
 export function productById(id: string): BuddyProduct | undefined {
   return ALL_PRODUCTS.find((product) => product.id === id)
 }
-
 /**
  * 按模型 id 解析该产品应使用的 User-Agent（按模型族分档）。
  *

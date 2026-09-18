@@ -3,11 +3,11 @@
  *
  * 覆盖两个**既有缺陷**（T7 修复）：
  *
- * 1. **workbuddy 分支缺失**：原实现只判 `codearts` / `buddy`，workbuddy 落入
+ * 1. **workbuddy 分支缺失**：原实现只判 `codearts` / `buddy-cn`，workbuddy 落入
  *    else 抛 `Unknown provider` —— 即 WorkBuddy 账号卡片的「刷新」按钮一直是坏的。
  * 2. **刷错凭据**：原实现调 `service.refresh()`，而该方法读写的是该 provider 的
- *    **默认单凭据 ref**（如 `BUDDY_ACCESS_TOKEN`），Account Hub 账号卡片对应的却是
- *    `BUDDY_ACCOUNT_XXX` —— 于是「刷新这个账号」实际刷的是另一个凭据。
+ *    **默认单凭据 ref**（如 `BUDDY_CN_ACCESS_TOKEN`），Account Hub 账号卡片对应的却是
+ *    `BUDDY_CN_ACCOUNT_XXX` —— 于是「刷新这个账号」实际刷的是另一个凭据。
  *
  * 这两个缺陷都无法靠 `collect*` 那类纯函数测试发现（它们不在那条代码路径上），
  * 因此这里直接驱动 `registerJetHubRpc` 注册的 HTTP 处理器，断言真实分派行为。
@@ -82,8 +82,8 @@ async function callRefresh(
     ctx as never,
     makePool(accounts) as never,
     makeServiceStub('codearts', calls) as never,
+    makeServiceStub('buddy-cn', calls) as never,
     makeServiceStub('buddy', calls) as never,
-    makeServiceStub('workbuddy', calls) as never,
     makeServiceStub('lobsterai', calls) as never,
   )
   const response = await getHandler()(new Request('http://127.0.0.1/api/jet-hub', {
@@ -115,27 +115,27 @@ function entry(provider: string, credentialRef: string): ProviderAccountEntry {
 }
 
 describe('account.refresh 分派（T7 回归）', () => {
-  it('buddy 账号刷新**自己的** credentialRef，而不是默认单凭据 ref', async () => {
-    // 缺陷 2 的回归：原实现调 buddy.refresh()（读 BUDDY_ACCESS_TOKEN），
+  it('buddy-cn 账号刷新**自己的** credentialRef，而不是默认单凭据 ref', async () => {
+    // 缺陷 2 的回归：原实现调 buddy.refresh()（读 BUDDY_CN_ACCESS_TOKEN），
     // 刷的是另一个凭据。
     const { calls, value } = await callRefresh(
-      [entry('buddy', 'BUDDY_ACCOUNT_AAAA1111')], 'buddy-1',
+      [entry('buddy-cn', 'BUDDY_CN_ACCOUNT_AAAA1111')], 'buddy-cn-1',
     )
     expect(value.success).toBe(true)
-    expect(calls).toEqual([{ service: 'buddy', credentialRef: 'BUDDY_ACCOUNT_AAAA1111' }])
+    expect(calls).toEqual([{ service: 'buddy-cn', credentialRef: 'BUDDY_CN_ACCOUNT_AAAA1111' }])
     // 绝不能退化成「刷默认凭据」。
     expect(calls.some((c) => c.service.includes('refresh(default)'))).toBe(false)
   })
 
-  it('workbuddy 账号可刷新且不再抛 Unknown provider（缺陷 1 的回归）', async () => {
-    // 原实现只判 codearts / buddy，workbuddy 落到 else 抛
-    // `Unknown provider: workbuddy`，value.success 为 false。
+  it('buddy 账号可刷新且不再抛 Unknown provider（缺陷 1 的回归）', async () => {
+    // 原实现只判 codearts / buddy（当年的中国版 id），国际版落到 else 抛
+    // `Unknown provider`，value.success 为 false。
     const { calls, value } = await callRefresh(
-      [entry('workbuddy', 'WORKBUDDY_ACCOUNT_BBBB2222')], 'workbuddy-1',
+      [entry('buddy', 'BUDDY_ACCOUNT_BBBB2222')], 'buddy-1',
     )
     expect(value.success).toBe(true)
     expect(value.error).toBeUndefined()
-    expect(calls).toEqual([{ service: 'workbuddy', credentialRef: 'WORKBUDDY_ACCOUNT_BBBB2222' }])
+    expect(calls).toEqual([{ service: 'buddy', credentialRef: 'BUDDY_ACCOUNT_BBBB2222' }])
   })
 
   it('lobsterai 账号刷新自己的 credentialRef（新增 provider 不得重蹈覆辙）', async () => {
@@ -157,8 +157,8 @@ describe('account.refresh 分派（T7 回归）', () => {
   it('四个 provider 各自分派到对应服务（互不串用）', async () => {
     const accounts = [
       entry('codearts', 'CODEARTS_ACCOUNT_1'),
+      entry('buddy-cn', 'BUDDY_CN_ACCOUNT_1'),
       entry('buddy', 'BUDDY_ACCOUNT_1'),
-      entry('workbuddy', 'WORKBUDDY_ACCOUNT_1'),
       entry('lobsterai', 'LOBSTERAI_ACCOUNT_1'),
     ]
     for (const target of accounts) {

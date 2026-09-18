@@ -123,12 +123,12 @@ async function probeWithAdapter(
   // 其他并发会话），凭据真的过期就让它以 AUTH 失败并如实上报。
   //
   // **三个产品线各自选适配器**，顺序不能颠倒也不能只判前两个：
-  // - CodeBuddy 系（buddy / workbuddy）→ BuddyAdapter，按各自 product 发请求；
+  // - Buddy 系（buddy-cn / buddy）→ BuddyAdapter，按各自 product 发请求；
   // - LobsterAI → LobsteraiAdapter（自己的端点与头族）；
   // - 其余（codearts）→ CodeArtsAdapter（华为云 HMAC 签名）。
   //
-  // 历史上这里只判断 `provider === 'buddy'`，导致 workbuddy 落入 else 分支、
-  // 用华为云 HMAC 签名去发 WorkBuddy 凭据而必然失败（见下方 productById 的
+  // 历史上这里只判断 `provider === 'buddy'`，导致国际版（当年叫 workbuddy）落入 else 分支、
+  // 用华为云 HMAC 签名去发 Buddy 凭据而必然失败（见下方 productById 的
   // 原注释）；现在 lobsterai 若不加分支会重蹈覆辙 —— 它的协议与两者都不同，
   // 用 CodeArtsAdapter 会以完全错误的签名与端点发请求。
   const buddyProduct = productById(entry.provider)

@@ -32,7 +32,7 @@ import {
   type ClaimOutcome,
   type CreditBalance,
 } from './credits.js'
-import { CODEBUDDY, productById, type BuddyProduct } from './product.js'
+import { BUDDY, BUDDY_CN, productById, type BuddyProduct } from './product.js'
 import {
   claimLobsteraiDailyCheckin,
   fetchLobsteraiCreditBalance,
@@ -111,10 +111,15 @@ function shortId(): string {
  *
  * `trae-cn` → `TRAE_CN_ACCOUNT_XXX`，与 `src/trae-cn-product.ts` 的
  * `accountCredentialRefPrefix`（`TRAE_CN_ACCOUNT`）**逐字符一致** —— 后者是
- * 该前缀的唯一真相源，本函数必须与它同值。
+ * 该前缀的唯一真相源，本函数必须与它同值。同理 `buddy-cn` →
+ * `BUDDY_CN_ACCOUNT_XXX`（与 `product.ts` 的 `defaultCredentialRef`
+ * `BUDDY_CN_ACCESS_TOKEN` 同族）。
  *
- * 无连字符的 provider（`codearts` / `buddy` / `workbuddy` / `lobsterai`）
+ * 无连字符的 provider（`codearts` / `buddy` / `lobsterai`）
  * 输出与归一化前**完全相同**，既有账号的 ref 全部兼容，**无需迁移**。
+ * ⚠️ 但 `buddy` 这个 id 本身**换了产品**（原中国版 → 现国际版），
+ * 旧 `BUDDY_ACCOUNT_*` 前缀下躺着的是中国版凭据 —— 这段历史由
+ * `src/provider-rename-migration.ts` 一次性搬运，**不能**只靠本函数的兼容性。
  */
 export function accountCredentialRefName(provider: string, suffix: string): string {
   return `${provider.toUpperCase().replace(/-/g, '_')}_ACCOUNT_${suffix}`
@@ -275,7 +280,7 @@ export interface CreditsEndpointDeps<
   /**
    * 领取前是否先查一次签到状态（默认 `true`）。
    *
-   * CodeBuddy 系拆成「查状态 + 领取」两个独立端点，先查可以省掉一次无效的
+   * Buddy 系拆成「查状态 + 领取」两个独立端点，先查可以省掉一次无效的
    * 领取请求（活动未开 / 今天已领时直接短路）。
    *
    * LobsterAI 的领取流程**自身就是多步的**（slot → context → check_in），
@@ -340,7 +345,7 @@ export async function collectClaimResults<TCredential = BuddyCredential, TProduc
 ): Promise<RpcCreditsClaimAllResponse> {
   const fetchStatus = deps.fetchStatus ?? (fetchCheckinStatus as unknown as NonNullable<CreditsEndpointDeps<TCredential, TProduct>['fetchStatus']>)
   const claim = deps.claim ?? (claimDailyCheckin as unknown as NonNullable<CreditsEndpointDeps<TCredential, TProduct>['claim']>)
-  // 默认保留预检（CodeBuddy 系需要）；LobsterAI 显式传 false 跳过。
+  // 默认保留预检（Buddy 系需要）；LobsterAI 显式传 false 跳过。
   const precheck = deps.precheckStatus !== false
   const results: RpcCreditsClaimAllResponse['results'] = []
   const outcomes: ClaimOutcome[] = []
@@ -454,13 +459,13 @@ export function registerJetHubRpc(
   ctx: Context,
   pool: AccountPool,
   codearts: CodeArtsAuth,
+  buddyCn: BuddyAuth,
   buddy: BuddyAuth,
-  workbuddy: BuddyAuth,
   lobsterai: LobsteraiAuth,
   traeCn: TraeCnAuth,
 ): void {
   ctx.inject(['connection'], (connectionCtx) => {
-    registerJetHubEndpoints(connectionCtx as Context, pool, codearts, buddy, workbuddy, lobsterai, traeCn)
+    registerJetHubEndpoints(connectionCtx as Context, pool, codearts, buddyCn, buddy, lobsterai, traeCn)
   })
 }
 
@@ -469,8 +474,8 @@ function registerJetHubEndpoints(
   ctx: Context,
   pool: AccountPool,
   codearts: CodeArtsAuth,
+  buddyCn: BuddyAuth,
   buddy: BuddyAuth,
-  workbuddy: BuddyAuth,
   lobsterai: LobsteraiAuth,
   traeCn: TraeCnAuth,
 ): void {
@@ -547,7 +552,7 @@ function registerJetHubEndpoints(
         // 输出与归一化前逐字符相同。
         const refName = accountCredentialRefName(provider, suffix)
 
-        // CodeBuddy 系（buddy / workbuddy）共用两步登录流程：
+        // Buddy 系（buddy-cn / buddy）共用两步登录流程：
         // 只获取 loginUrl 和 state 立即返回，后台用同一个 state 异步执行
         // 完整登录流程。两者的差异只在产品配置（platform、登录 URL 附加
         // 参数、X-Product-Code、User-Agent），全部由 product 承载。
@@ -558,7 +563,7 @@ function registerJetHubEndpoints(
           try {
             const authState = await fetchAuthState(undefined, undefined, product)
             state = authState.state
-            // WorkBuddy 的登录 URL 需要追加 version 与 loginSessionId
+            // Buddy（国际版）的登录 URL 需要追加 version 与 loginSessionId
             authUrl = decorateLoginUrl(authState.authUrl, product)
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error)
@@ -579,7 +584,7 @@ function registerJetHubEndpoints(
           runBuddyLoginFlow({ openBrowser: () => {}, state, product }).then(async (flow) => {
             await ctx.credentials.set(ref, flow.access)
             // 续期定时器归属该产品自己的服务实例
-            ;(product.id === CODEBUDDY.id ? buddy : workbuddy).scheduleRefresh()
+            ;(product.id === BUDDY_CN.id ? buddyCn : buddy).scheduleRefresh()
             const credential = parseBuddyCredential(flow.access)
             await pool.updateAccount(id, {
               nickname: credential?.nickname ?? id,
@@ -651,7 +656,7 @@ function registerJetHubEndpoints(
           })
           return { ok: true, value: { accountId: id, loginUrl: loginSession.loginUrl } }
         } else if (provider === LOBSTERAI.id) {
-          // LobsterAI 与 CodeBuddy 系一样走**两段式**，但第一段不是「轮询式取 state」，
+          // LobsterAI 与 Buddy 系一样走**两段式**，但第一段不是「轮询式取 state」，
           // 而是「起本地回调服务器拿 loginUrl」：
           //   1. 先 prepare（起 127.0.0.1 回调服务器）→ 立即返回 loginUrl；
           //   2. 客户端在同一用户手势内 open 该 URL —— 这正是本次改造的目的：
@@ -659,7 +664,7 @@ function registerJetHubEndpoints(
           //      早已过期，客户端兜底会自行开窗，把 DSH 页面顶掉；
           //   3. 后台 awaitCredential 完成后写凭据并补全占位账号。
           //
-          // 宿主 opener 为空函数（对齐上面 CodeBuddy 分支的 `openBrowser: () => {}`）：
+          // 宿主 opener 为空函数（对齐上面 Buddy 分支的 `openBrowser: () => {}`）：
           // 打开动作归客户端，宿主再开一次会变成两个标签页。prepareLogin 本身
           // 不接收 openBrowser，这里通过「根本不打开」来表达同一约束。
           let prepared
@@ -797,8 +802,8 @@ function registerJetHubEndpoints(
           // 按 **entry.provider** 分派到对应服务，并调用**按凭据 ref 的**
           // 续期入口 —— 两处都是修复既有缺陷的关键：
           //
-          // 1. 原实现只处理 codearts / buddy，`workbuddy` 会落到 else 抛
-          //    `Unknown provider`，即 WorkBuddy 账号卡片的「刷新」按钮一直是坏的；
+          // 1. 原实现只处理 codearts / buddy，国际版（当年叫 `workbuddy`）会落到 else 抛
+          //    `Unknown provider`，即该产品账号卡片的「刷新」按钮一直是坏的；
           // 2. 原实现调的是 `service.refresh()`，它读写的是该 provider 的
           //    **默认单凭据 ref**（如 BUDDY_ACCESS_TOKEN），而账号卡片对应的是
           //    BUDDY_ACCOUNT_XXX —— 于是「刷新这个账号」实际刷的是另一个凭据，
@@ -806,8 +811,8 @@ function registerJetHubEndpoints(
           // 按 **entry.provider** 分派到对应服务，并调用**按凭据 ref 的**
           // 续期入口 —— 两处都是修复既有缺陷的关键：
           //
-          // 1. 原实现只处理 codearts / buddy，`workbuddy` 会落到 else 抛
-          //    `Unknown provider`，即 WorkBuddy 账号卡片的「刷新」按钮一直是坏的；
+          // 1. 原实现只处理 codearts / buddy，国际版（当年叫 `workbuddy`）会落到 else 抛
+          //    `Unknown provider`，即该产品账号卡片的「刷新」按钮一直是坏的；
           // 2. 原实现调的是 `service.refresh()`，它读写的是该 provider 的
           //    **默认单凭据 ref**（如 BUDDY_ACCESS_TOKEN），而账号卡片对应的是
           //    BUDDY_ACCOUNT_XXX —— 于是「刷新这个账号」实际刷的是另一个凭据，
@@ -816,11 +821,11 @@ function registerJetHubEndpoints(
             case 'codearts':
               await codearts.refreshAccountCredential(entry.credentialRef)
               break
-            case 'buddy':
-              await buddy.refreshAccountCredential(entry.credentialRef)
+            case BUDDY_CN.id:
+              await buddyCn.refreshAccountCredential(entry.credentialRef)
               break
-            case 'workbuddy':
-              await workbuddy.refreshAccountCredential(entry.credentialRef)
+            case BUDDY.id:
+              await buddy.refreshAccountCredential(entry.credentialRef)
               break
             case LOBSTERAI.id:
               await lobsterai.refreshAccountCredential(entry.credentialRef)
@@ -920,7 +925,7 @@ function registerJetHubEndpoints(
         const req = payload as RpcCreditsStatusRequest
         if (req.provider === LOBSTERAI.id) {
           // LobsterAI 没有独立的「签到状态」端点：活动状态要经
-          // slot → context 两步才能得到，且语义与 CodeBuddy 的
+          // slot → context 两步才能得到，且语义与 Buddy 的
           // CheckinStatus 不同构（无 streak/dailyCredit 等概念）。
           // 故这里如实返回 null，而不是臆造一份状态对象。
           const accounts = await pool.listAccounts(req.provider)

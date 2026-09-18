@@ -3,7 +3,7 @@
  *
  * ## 为什么不复用 `BuddyProduct`
  *
- * `src/product.ts` 的 `BuddyProduct` 是**围绕 CodeBuddy 系协议**设计的，
+ * `src/product.ts` 的 `BuddyProduct` 是**围绕 Buddy 系协议**设计的，
  * 它的这些字段对 LobsterAI 完全无意义：
  *
  * - `productCode` / `attributionName` / `clientVersion` / `cliVersion`
@@ -11,9 +11,9 @@
  *   只发 `X-LobsterAI-Client-*`；
  * - `apiDomain`（`X-Domain` 头）—— 无此头；
  * - `userAgentByModelFamily` —— 那是腾讯后台按 UA 归因的机制；
- * - `appendSessionParams` / `pluginVersion` —— WorkBuddy 登录 URL 的后缀参数。
+ * - `appendSessionParams` / `pluginVersion` —— Buddy（国际版）登录 URL 的后缀参数。
  *
- * 且 `BuddyProduct.id` 是字面量联合 `'buddy' | 'workbuddy'`，加第三个值会牵动
+ * 且 `BuddyProduct.id` 是字面量联合 `'buddy-cn' | 'buddy'`，加第三个值会牵动
  * `productById` / `registerBuddyLlm` / `reconcileWithFallback` 一串调用点。
  *
  * 因此这里定义**平行**的 `LobsteraiProduct`：共用的是架构**模式**
@@ -182,7 +182,7 @@ const LOBSTERAI_FALLBACK_MODELS: readonly LobsteraiFallbackModel[] = [
 /**
  * LobsterAI provider 配置。
  *
- * 与 CodeBuddy / WorkBuddy 并列的第三个产品线，但**协议完全不同**：
+ * 与 Buddy CN / Buddy 并列的第三个产品线，但**协议完全不同**：
  * 它不走腾讯的 external-link 轮询登录，而是本地回调 + `authCode` 换 token。
  */
 export const LOBSTERAI: LobsteraiProduct = {
@@ -204,7 +204,7 @@ export const ALL_LOBSTERAI_PRODUCTS: readonly LobsteraiProduct[] = [LOBSTERAI]
 /**
  * 按 provider id 取 LobsterAI 产品配置；未知 id 返回 undefined。
  *
- * 与 `productById`（CodeBuddy 系）分开：两者返回**不同类型**，
+ * 与 `productById`（Buddy 系）分开：两者返回**不同类型**，
  * 合并成一个函数会让调用方拿到联合类型后再也不得不做类型收窄。
  */
 export function lobsteraiProductById(id: string): LobsteraiProduct | undefined {

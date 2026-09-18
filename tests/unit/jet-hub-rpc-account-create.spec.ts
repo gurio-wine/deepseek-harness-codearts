@@ -42,7 +42,7 @@ import { AccountPool } from '../../src/account-pool.js'
 import { CodeArtsAuth } from '../../src/service.js'
 import { BuddyAuth } from '../../src/buddy-auth.js'
 import { LobsteraiAuth } from '../../src/lobsterai-auth.js'
-import { CODEBUDDY, WORKBUDDY } from '../../src/product.js'
+import { BUDDY_CN, BUDDY } from '../../src/product.js'
 import { LOBSTERAI } from '../../src/lobsterai-product.js'
 import { LOBSTERAI_CALLBACK_PATH } from '../../src/lobsterai.js'
 import {
@@ -53,6 +53,7 @@ import {
 import { REDIRECT_PATH, exchangeAuthorizationCode } from '../../src/oauth.js'
 import { hasActiveCodeartsLogin } from '../../src/login.js'
 import { hasActiveLobsteraiLogin } from '../../src/lobsterai-oauth.js'
+import { accountCredentialRefName } from '../../src/jet-hub-rpc.js'
 import type { ProviderAccountEntry } from '../../src/types.js'
 
 vi.mock('../../src/buddy-oauth.js', async (importOriginal) => ({
@@ -216,13 +217,13 @@ function createHarness(): Harness {
     credentials,
   } as never)
 
-  // 真实 Auth 服务实例：四个服务名互不冲突（buddyAuth / workbuddyAuth /
+  // 真实 Auth 服务实例：四个服务名互不冲突（buddyCnAuth / buddyAuth /
   // codeartsAuth / lobsteraiAuth），可在同一个 cordis Context 上共存。
   const serviceCtx = new Context()
   serviceCtx.provide('credentials', credentials as never)
   const codearts = new CodeArtsAuth(serviceCtx, { fetcher: offlineFetcher })
-  const buddy = new BuddyAuth(serviceCtx, { product: CODEBUDDY })
-  const workbuddy = new BuddyAuth(serviceCtx, { product: WORKBUDDY })
+  const buddy = new BuddyAuth(serviceCtx, { product: BUDDY_CN })
+  const workbuddy = new BuddyAuth(serviceCtx, { product: BUDDY })
   const lobsterai = new LobsteraiAuth(serviceCtx, {
     // 注入 fetcher 而非打桩模块：这样 prepareLogin / exchange 走真实代码路径。
     fetcher: (async () => lobsteraiResponder()) as unknown as typeof fetch,
@@ -323,9 +324,9 @@ async function completeLogin(
   loginUrl: string,
   flow?: FlowHandle,
 ): Promise<void> {
-  if (provider === 'buddy' || provider === 'workbuddy') {
+  if (provider === 'buddy-cn' || provider === 'buddy') {
     if (flow === undefined) throw new Error('buddy 系用例必须先创建 flow deferred')
-    flow.resolve(buddyFlowResult(provider === 'buddy' ? '腾讯号' : '国际号'))
+    flow.resolve(buddyFlowResult(provider === 'buddy-cn' ? '腾讯号' : '国际号'))
     return
   }
   if (provider === 'codearts') {
@@ -353,7 +354,7 @@ afterEach(async () => {
 
 // ── 四个 provider 的公共契约 ─────────────────────────────────────────────────
 
-const ALL_PROVIDERS = ['codearts', 'buddy', 'workbuddy', 'lobsterai'] as const
+const ALL_PROVIDERS = ['codearts', 'buddy-cn', 'buddy', 'lobsterai'] as const
 
 describe.each(ALL_PROVIDERS)('account.create —— %s 两段式契约', (provider) => {
   /**
@@ -364,12 +365,12 @@ describe.each(ALL_PROVIDERS)('account.create —— %s 两段式契约', (provid
    */
   async function startCreate(harness: Harness, options: { exchangeFails?: boolean } = {}) {
     let flow: FlowHandle | undefined
-    if (provider === 'buddy' || provider === 'workbuddy') {
+    if (provider === 'buddy-cn' || provider === 'buddy') {
       flow = deferred<BuddyLoginFlowResult>()
       mockedRunBuddyLoginFlow.mockReturnValue(flow.promise)
       mockedFetchAuthState.mockResolvedValue({
         state: 'state-1',
-        authUrl: provider === 'buddy'
+        authUrl: provider === 'buddy-cn'
           ? 'https://copilot.tencent.com/login?platform=ide'
           : 'https://www.workbuddy.ai/login?platform=workbuddy-ai',
       })
@@ -407,7 +408,13 @@ describe.each(ALL_PROVIDERS)('account.create —— %s 两段式契约', (provid
     // refName 由 provider 名 + 短 id 派生。**注意**：它用的是**另一个**短 id，
     // 与 accountId 的后缀并不相同（`shortId()` 被调用了两次）—— 这是有意的：
     // 凭据名不该能从账号 id 反推出来。此处只锁形状。
-    expect(placeholder.credentialRef).toMatch(new RegExp(`^${provider.toUpperCase()}_ACCOUNT_[0-9A-F]{8}$`))
+    //
+    // 前缀的连字符要折成下划线（`buddy-cn` → `BUDDY_CN`），故直接用生产函数
+    // `accountCredentialRefName` 的前缀口径，而不是 `toUpperCase()` —— 后者对
+    // 带连字符的 provider 会得出非法 ref 形状（`BUDDY-CN_ACCOUNT_*`），
+    // 而 ref 名不允许含连字符（`/^[A-Za-z_][A-Za-z0-9_]*$/`）。
+    const refPrefix = accountCredentialRefName(provider, '')
+    expect(placeholder.credentialRef).toMatch(new RegExp(`^${refPrefix}[0-9A-F]{8}$`))
 
     // 此刻凭据还不存在 —— 这正是不阻塞在登录上的证据：若 RPC 内 `await login(...)`，
     // 这个断言根本执行不到（用例会挂在 create 上直到超时）。
@@ -444,8 +451,8 @@ describe.each(ALL_PROVIDERS)('account.create —— %s 两段式契约', (provid
     expect(completed.expiresAt).toBeGreaterThan(Date.now())
     // nickname 来自凭据：buddy 系取凭据里的 nickname，lobsterai 取自 exchange
     // 的 user.nickname，codearts 用 accountId（其凭据没有昵称字段）。
-    if (provider === 'buddy') expect(completed.nickname).toBe('腾讯号')
-    if (provider === 'workbuddy') expect(completed.nickname).toBe('国际号')
+    if (provider === 'buddy-cn') expect(completed.nickname).toBe('腾讯号')
+    if (provider === 'buddy') expect(completed.nickname).toBe('国际号')
     if (provider === 'lobsterai') expect(completed.nickname).toBe('龙虾号')
     if (provider === 'codearts') expect(completed.nickname).toBe(result.value.accountId)
 
@@ -475,7 +482,7 @@ describe.each(ALL_PROVIDERS)('account.create —— %s 两段式契约', (provid
     const { result, flow } = await startCreate(harness, { exchangeFails: provider === 'codearts' })
     if (!result.ok) throw new Error(`create 失败：${JSON.stringify(result)}`)
 
-    if (provider === 'buddy' || provider === 'workbuddy') {
+    if (provider === 'buddy-cn' || provider === 'buddy') {
       // 用户在浏览器里点了取消 / 轮询超时。
       flow!.reject(new Error('登录窗口已关闭'))
     } else {
@@ -507,7 +514,7 @@ describe.each(ALL_PROVIDERS)('account.create —— %s 两段式契约', (provid
     if (!result.ok) throw new Error(`create 失败：${JSON.stringify(result)}`)
     const accountId = result.value.accountId
 
-    if (provider === 'buddy' || provider === 'workbuddy') {
+    if (provider === 'buddy-cn' || provider === 'buddy') {
       flow!.reject(new Error('登录窗口已关闭'))
     } else {
       await completeLogin(provider, result.value.loginUrl, flow)
@@ -547,7 +554,7 @@ describe('account.create —— 各 provider 的登录地址来源', () => {
     })
     mockedRunBuddyLoginFlow.mockReturnValue(flow.promise)
 
-    const result = await createAccount(harness, 'buddy')
+    const result = await createAccount(harness, 'buddy-cn')
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.value.loginUrl).toBe('https://copilot.tencent.com/login?platform=ide')
@@ -563,13 +570,13 @@ describe('account.create —— 各 provider 的登录地址来源', () => {
     })
     mockedRunBuddyLoginFlow.mockReturnValue(flow.promise)
 
-    const result = await createAccount(harness, 'workbuddy')
+    const result = await createAccount(harness, 'buddy')
     expect(result.ok).toBe(true)
     if (!result.ok) return
     const url = new URL(result.value.loginUrl)
     // platform 等原始参数必须保留 —— decorateLoginUrl 只追加、不重建。
     expect(url.searchParams.get('platform')).toBe('workbuddy-ai')
-    expect(url.searchParams.get('version')).toBe(WORKBUDDY.pluginVersion)
+    expect(url.searchParams.get('version')).toBe(BUDDY.pluginVersion)
     expect(url.searchParams.get('loginSessionId')).toMatch(/^[0-9a-f-]{36}$/)
     flow.resolve(buddyFlowResult('国际号'))
   })
@@ -631,18 +638,18 @@ describe('account.create —— login.poll 的完成判据是「凭据可解析�
     })
     mockedRunBuddyLoginFlow.mockReturnValue(flow.promise)
 
-    const result = await createAccount(harness, 'buddy')
+    const result = await createAccount(harness, 'buddy-cn')
     if (!result.ok) throw new Error('create 失败')
     const accountId = result.value.accountId
 
     flow.resolve(buddyFlowResult('腾讯号'))
     await vi.waitFor(async () => {
-      const poll = await harness.call<{ done: boolean }>('login.poll', { accountId, provider: 'buddy' })
+      const poll = await harness.call<{ done: boolean }>('login.poll', { accountId, provider: 'buddy-cn' })
       expect(poll.ok && poll.value.done).toBe(true)
     })
 
     // 到此为止没有任何额外等待：状态必须**已经是**一致的。
-    const entry = (await harness.accounts('buddy')).find((e) => e.id === accountId)
+    const entry = (await harness.accounts('buddy-cn')).find((e) => e.id === accountId)
     expect(entry).toBeDefined()
     expect(entry!.refreshable).toBe(true)
     expect(entry!.nickname).toBe('腾讯号')
@@ -658,14 +665,14 @@ describe('account.create —— login.poll 的完成判据是「凭据可解析�
     })
     mockedRunBuddyLoginFlow.mockReturnValue(flow.promise)
 
-    const result = await createAccount(harness, 'buddy')
+    const result = await createAccount(harness, 'buddy-cn')
     if (!result.ok) throw new Error('create 失败')
 
     // 第一段绝不写凭据（此刻账号还只是占位）。
     expect(harness.credentials.writes).toEqual([])
     // ref 名与 accountId 的后缀**不同**（`shortId()` 调了两次），
     // 因此从池里的占位条目取权威值，而不是从 accountId 反推。
-    const placeholderRef = (await harness.accounts('buddy'))[0]!.credentialRef
+    const placeholderRef = (await harness.accounts('buddy-cn'))[0]!.credentialRef
 
     flow.resolve(buddyFlowResult('腾讯号'))
     await vi.waitFor(() => {
@@ -718,11 +725,11 @@ describe('login.poll —— 非法 credentialRef 的预检（不抛 TypeError）
       authUrl: 'https://copilot.tencent.com/login?platform=ide',
     })
     mockedRunBuddyLoginFlow.mockReturnValue(deferred<BuddyLoginFlowResult>().promise)
-    const created = await createAccount(harness, 'buddy')
+    const created = await createAccount(harness, 'buddy-cn')
     if (!created.ok) throw new Error(`create 失败：${JSON.stringify(created)}`)
 
     const poll = await harness.call<{ done: boolean; success?: boolean; error?: string }>(
-      'login.poll', { accountId: created.value.accountId, provider: 'buddy' },
+      'login.poll', { accountId: created.value.accountId, provider: 'buddy-cn' },
     )
     expect(poll.ok).toBe(true)
     if (!poll.ok) return
@@ -735,7 +742,7 @@ describe('login.poll —— 非法 credentialRef 的预检（不抛 TypeError）
   it('未知 accountId 仍报未完成（不因失败登记表的存在而变语义）', async () => {
     const harness = createHarness()
     const poll = await harness.call<{ done: boolean; error?: string }>(
-      'login.poll', { accountId: 'nobody-00000000', provider: 'buddy' },
+      'login.poll', { accountId: 'nobody-00000000', provider: 'buddy-cn' },
     )
     expect(poll.ok && poll.value.done).toBe(false)
   })
@@ -791,16 +798,16 @@ describe('account.create —— provider 级互斥（login-in-progress）', () =
     })
     const firstFlow = deferred<BuddyLoginFlowResult>()
     mockedRunBuddyLoginFlow.mockReturnValue(firstFlow.promise)
-    const first = await createAccount(harness, 'buddy')
+    const first = await createAccount(harness, 'buddy-cn')
     expect(first.ok).toBe(true)
 
     const secondFlow = deferred<BuddyLoginFlowResult>()
     mockedRunBuddyLoginFlow.mockReturnValue(secondFlow.promise)
-    const second = await createAccount(harness, 'buddy')
+    const second = await createAccount(harness, 'buddy-cn')
     expect(second.ok).toBe(true)
     if (!first.ok || !second.ok) return
     expect(second.value.accountId).not.toBe(first.value.accountId)
-    expect(await harness.accounts('buddy')).toHaveLength(2)
+    expect(await harness.accounts('buddy-cn')).toHaveLength(2)
 
     firstFlow.resolve(buddyFlowResult('一号'))
     secondFlow.resolve(buddyFlowResult('二号'))

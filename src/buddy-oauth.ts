@@ -1,5 +1,5 @@
 /**
- * 腾讯 CodeBuddy 认证网络流程（external-link-v2 轮询式）
+ * 腾讯 Buddy 系认证网络流程（external-link-v2 轮询式）
  *
  * 对齐 IDE genie 扩展的 NativeAuthBridgeService，流程为
  * fetchAuthState → 打开浏览器 → 轮询 token → 轮询 account，
@@ -41,7 +41,7 @@ import {
   parseTokenData,
 } from './buddy.js'
 import type { BuddyAccount, BuddyCredential, BuddyRemoteModel, BuddyToken } from './buddy.js'
-import { CODEBUDDY, type BuddyProduct } from './product.js'
+import { BUDDY_CN, type BuddyProduct } from './product.js'
 
 /** 在浏览器中打开登录 URL；永不抛出（失败时打印 URL 供手动打开）。 */
 export type OpenBrowser = (url: string) => void
@@ -70,7 +70,7 @@ export interface BuddyLoginFlowOptions {
   pollIntervalMs?: number
   /** 已有的 auth state（跳过 fetchAuthState，直接使用此 state 轮询 token）。 */
   state?: string
-  /** 产品配置；默认为 CodeBuddy。 */
+  /** 产品配置；默认为 Buddy CN。 */
   product?: BuddyProduct
 }
 
@@ -104,7 +104,7 @@ interface RequestOptions {
   signal?: AbortSignal
 }
 
-/** 发起一次 CodeBuddy 控制面请求，返回 (status, body)。网络失败会抛出。 */
+/** 发起一次 Buddy 系控制面请求，返回 (status, body)。网络失败会抛出。 */
 async function request(
   method: 'GET' | 'POST',
   url: string,
@@ -131,12 +131,12 @@ async function request(
 
 /**
  * POST /v2/plugin/auth/state?platform=<product.platform> → 获取 state + authUrl
- * （无需认证）。platform 与 User-Agent 随产品配置变化，默认 CodeBuddy。
+ * （无需认证）。platform 与 User-Agent 随产品配置变化，默认 Buddy CN。
  */
 export async function fetchAuthState(
   fetcher: typeof fetch = fetch,
   signal?: AbortSignal,
-  product: BuddyProduct = CODEBUDDY,
+  product: BuddyProduct = BUDDY_CN,
 ): Promise<{ state: string; authUrl: string }> {
   const url = `${product.endpoint}${AUTH_STATE_PATH}?platform=${product.platform}`
   const headers: Record<string, string> = {
@@ -171,8 +171,8 @@ export async function fetchAuthState(
  * 错误码 11217 = token 尚未就绪 → 继续轮询；网络错误同样继续轮询，
  * 不中断登录流程（对齐 Rust loop_get_token）。
  *
- * `options.product` 决定 User-Agent（默认 CodeBuddy）；调用方（登录流程）
- * 必须传入，否则 WorkBuddy 会携带 CodeBuddy 的身份标识。
+ * `options.product` 决定 User-Agent（默认 Buddy CN）；调用方（登录流程）
+ * 必须传入，否则 Buddy 会携带 Buddy CN 的身份标识。
  */
 export async function loopGetToken(
   state: string,
@@ -181,12 +181,12 @@ export async function loopGetToken(
     timeoutMs?: number
     pollIntervalMs?: number
     signal?: AbortSignal
-    /** 产品配置；默认为 CodeBuddy。 */
+    /** 产品配置；默认为 Buddy CN。 */
     product?: BuddyProduct
   } = {},
 ): Promise<BuddyToken> {
   const fetcher = options.fetcher ?? fetch
-  const product = options.product ?? CODEBUDDY
+  const product = options.product ?? BUDDY_CN
   const url = `${product.endpoint}${AUTH_TOKEN_PATH}?state=${encodeURIComponent(state)}`
   const headers: Record<string, string> = {
     [HTTP_HEADER_NO_AUTHORIZATION]: 'true',
@@ -225,7 +225,7 @@ export async function loopGetToken(
  *
  * 错误码 12151 = 账户信息尚未完成 → 继续轮询。
  *
- * `options.product` 决定 User-Agent（默认 CodeBuddy）。
+ * `options.product` 决定 User-Agent（默认 Buddy CN）。
  */
 export async function getAccount(
   state: string,
@@ -235,19 +235,19 @@ export async function getAccount(
     timeoutMs?: number
     pollIntervalMs?: number
     signal?: AbortSignal
-    /** 产品配置；默认为 CodeBuddy。 */
+    /** 产品配置；默认为 Buddy CN。 */
     product?: BuddyProduct
   } = {},
 ): Promise<BuddyAccount> {
   const fetcher = options.fetcher ?? fetch
-  const product = options.product ?? CODEBUDDY
+  const product = options.product ?? BUDDY_CN
   const url = `${product.endpoint}${LOGIN_ACCOUNT_PATH}?state=${encodeURIComponent(state)}`
   const headers: Record<string, string> = {
     [HTTP_HEADER_DOMAIN]: token.domain,
     Authorization: `Bearer ${token.accessToken}`,
     [HTTP_HEADER_NO_USER_ID]: 'true',
     [HTTP_HEADER_NO_ENTERPRISE_ID]: 'true',
-    'User-Agent': (options.product ?? CODEBUDDY).userAgent,
+    'User-Agent': (options.product ?? BUDDY_CN).userAgent,
   }
   const deadline = Date.now() + (options.timeoutMs ?? LOGIN_TIMEOUT_MS)
   const interval = options.pollIntervalMs ?? POLL_INTERVAL_MS
@@ -282,14 +282,14 @@ export async function getAccount(
  * refresh_token 被后端判定失效（401/403 或 message 含 expired/invalid）时抛
  * {@link RefreshTokenExpiredError}，调用方据此停止续期并提示重新登录。
  *
- * `product` 放在参数列表**末尾**（默认 CodeBuddy），既让 WorkBuddy 携带
+ * `product` 放在参数列表**末尾**（默认 Buddy CN），既让 Buddy 携带
  * 自己的 User-Agent，又不破坏既有的位置参数调用点。
  */
 export async function refreshToken(
   credential: BuddyCredential,
   fetcher: typeof fetch = fetch,
   signal?: AbortSignal,
-  product: BuddyProduct = CODEBUDDY,
+  product: BuddyProduct = BUDDY_CN,
 ): Promise<BuddyToken> {
   if (!isRefreshable(credential)) {
     throw new RefreshTokenExpiredError('无 refresh_token，请重新登录')
@@ -297,8 +297,8 @@ export async function refreshToken(
   const url = `${product.endpoint}${AUTH_REFRESH_PATH}`
   const headers: Record<string, string> = {
     ...credentialRequestHeaders(credential),
-    // credentialRequestHeaders 走的是 CodeBuddy 的 UA/域名常量，这里按产品覆盖，
-    // 否则 WorkBuddy 续期时会以 CodeBuddy 的身份标识发请求。
+    // credentialRequestHeaders 走的是 Buddy CN 的 UA/域名常量，这里按产品覆盖，
+    // 否则 Buddy 续期时会以 Buddy CN 的身份标识发请求。
     [HTTP_HEADER_DOMAIN]: product.apiDomain,
     'User-Agent': product.userAgent,
     Authorization: `Bearer ${credential.access_token}`,
@@ -340,23 +340,23 @@ export class RefreshTokenExpiredError extends Error {
  *
  * 失败时返回空数组（调用方回退到内置列表）。
  *
- * `product` 放在参数列表**末尾**（默认 CodeBuddy）：它决定 X-Product-Code
- * 与 User-Agent 两个身份标识。**必须**由调用方传入，否则 WorkBuddy 会发出
+ * `product` 放在参数列表**末尾**（默认 Buddy CN）：它决定 X-Product-Code
+ * 与 User-Agent 两个身份标识。**必须**由调用方传入，否则 Buddy 会发出
  * `X-Product-Code: codebuddy` 的请求。
  */
 export async function fetchModels(
   credential: BuddyCredential,
   fetcher: typeof fetch = fetch,
   signal?: AbortSignal,
-  product: BuddyProduct = CODEBUDDY,
+  product: BuddyProduct = BUDDY_CN,
 ): Promise<BuddyRemoteModel[]> {
   if (credential.access_token.length === 0) return []
   const headers: Record<string, string> = {
     ...credentialAuthHeaders(credential),
-    // credentialAuthHeaders 内置 CodeBuddy 的 UA/域名，这里按产品覆盖。
+    // credentialAuthHeaders 内置 Buddy CN 的 UA/域名，这里按产品覆盖。
     [HTTP_HEADER_DOMAIN]: product.apiDomain,
     'User-Agent': product.userAgent,
-    // X-Product 是**部署类型**（SaaS），CodeBuddy 与 WorkBuddy 共用同一取值，
+    // X-Product 是**部署类型**（SaaS），Buddy CN 与 Buddy 共用同一取值，
     // 故保持常量；随产品变化的是 X-Product-Code。
     [HTTP_HEADER_PRODUCT]: BUDDY_DEPLOYMENT_TYPE,
     [HTTP_HEADER_PRODUCT_CODE]: product.productCode,
@@ -433,7 +433,7 @@ async function defaultOpenBrowser(url: string): Promise<void> {
 /**
  * 按产品配置装饰登录 URL。
  *
- * WorkBuddy（appendSessionParams 为 true）需要额外携带 `version` 与
+ * Buddy（appendSessionParams 为 true）需要额外携带 `version` 与
  * `loginSessionId`：前者为产品版本号，后者为客户端生成的 UUID，仅用于
  * 服务端日志追踪（实测无校验语义，故每次登录生成新值均可）。
  * 其余产品原样返回。
@@ -468,7 +468,7 @@ export function decorateLoginUrl(authUrl: string, product: BuddyProduct): string
 export async function runBuddyLoginFlow(options: BuddyLoginFlowOptions = {}): Promise<BuddyLoginFlowResult> {
   const fetcher = options.fetcher ?? fetch
   const open = options.openBrowser ?? defaultOpenBrowser
-  const product = options.product ?? CODEBUDDY
+  const product = options.product ?? BUDDY_CN
 
   let state: string
   let authUrl: string
@@ -480,7 +480,7 @@ export async function runBuddyLoginFlow(options: BuddyLoginFlowOptions = {}): Pr
     const result = await fetchAuthState(fetcher, undefined, product)
     state = result.state
     authUrl = result.authUrl
-    // WorkBuddy 的登录 URL 需要追加 version 与 loginSessionId；
+    // Buddy 的登录 URL 需要追加 version 与 loginSessionId；
     // platform/state/路径全部由服务端下发的 authUrl 决定，不得重新拼接。
     const decorated = decorateLoginUrl(authUrl, product)
     await open(decorated)
@@ -491,8 +491,8 @@ export async function runBuddyLoginFlow(options: BuddyLoginFlowOptions = {}): Pr
     fetcher,
     ...options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {},
     ...options.pollIntervalMs !== undefined ? { pollIntervalMs: options.pollIntervalMs } : {},
-    // 轮询 token / 账户两步同样带产品身份标识，否则 WorkBuddy 登录会以
-    // CodeBuddy 的 UA 发请求。
+    // 轮询 token / 账户两步同样带产品身份标识，否则 Buddy 登录会以
+    // Buddy CN 的 UA 发请求。
     product,
   }
   const token = await loopGetToken(state, pollOptions)

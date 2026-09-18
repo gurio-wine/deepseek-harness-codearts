@@ -122,8 +122,8 @@ describe('lobsteraiProductById', () => {
 
   it('对未知 id 返回 undefined（含 CodeBuddy 系的 id）', () => {
     // 两个 productById 刻意分开：返回类型不同，合并会让调用方不得不做类型收窄。
+    expect(lobsteraiProductById('buddy-cn')).toBeUndefined()
     expect(lobsteraiProductById('buddy')).toBeUndefined()
-    expect(lobsteraiProductById('workbuddy')).toBeUndefined()
     expect(lobsteraiProductById('codearts')).toBeUndefined()
     expect(lobsteraiProductById('')).toBeUndefined()
   })

@@ -32,7 +32,20 @@ interface JetHubSettingsValue {
   accounts?: ProviderAccountEntry[]
   /** 模型黑名单（见 {@link ModelDisableMap}）。 */
   disabledModels?: ModelDisableMap
+  /** 数据版本号，供一次性迁移 short-circuit（见 provider-rename-migration.ts）。 */
+  schemaVersion?: number
 }
+
+/**
+ * 当前数据版本号。
+ *
+ * - `0`（或字段缺失）= 旧命名：provider 为 `buddy`（中国版）/ `workbuddy`（国际版）；
+ * - `1` = 新命名（`buddy-cn` / `buddy`），已由
+ *   `src/provider-rename-migration.ts` 迁移完毕。
+ *
+ * 迁移函数在版本号 ≥1 时整体 short-circuit，因此这个数字只会前进。
+ */
+export const JET_HUB_SCHEMA_VERSION = 1
 
 /** ctx.settings.register() 返回的 owner scope（只用到 get/replace）。 */
 interface SettingsScopeLike {
@@ -72,6 +85,10 @@ const jetHubSchema = Schema.object({
   // 为什么带 `.default({})`：namespace 首次注册时配置文件里没有该字段，
   // 没有默认值的话 `scope.get()` 会返回 undefined，需在读取处层层判空。
   disabledModels: Schema.dict(Schema.any()).default({}),
+  // 数据版本号。`0` = 旧命名（buddy=中国版 / workbuddy=国际版）尚未迁移；
+  // 见 {@link JET_HUB_SCHEMA_VERSION}。**必须带 default**：老配置文件里没有
+  // 这个字段，缺失时按 0 处理才等价于「迁移尚未执行」。
+  schemaVersion: Schema.number().default(0),
 })
 
 /**
@@ -139,6 +156,14 @@ export class AccountPool {
    * resolved 快照在 replace() 后未必立即更新，因此加载一次后即以本副本为准）。
    */
   private modelCache: ModelDisableMap = {}
+  /**
+   * 数据版本号的**权威进程内副本**（同 {@link cache} / {@link modelCache}）。
+   *
+   * 一次性迁移（provider 改名）靠它 short-circuit，因此它必须与账号、黑名单
+   * 一起参与「读 → 改 → 整体 replace」，漏带就会在下次写入时被重置为 0，
+   * 让迁移在每次启动时重跑。
+   */
+  private versionCache = 0
   /** 是否已从 settings scope 完成首次载入。 */
   private loaded = false
 
@@ -173,6 +198,10 @@ export class AccountPool {
     // 黑名单是后来才加入的字段：老配置文件里没有它，缺失时保持空表
     // （等价于"全部模型默认打开"），而不是报错或让整次载入失败。
     this.modelCache = sanitizeDisabledModels(value?.disabledModels)
+    // 版本号同理：老配置文件（或首次安装）没有该字段 → 按 0 处理，
+    // 即「迁移尚未执行」。
+    const version = value?.schemaVersion
+    this.versionCache = typeof version === 'number' && Number.isFinite(version) ? version : 0
   }
 
   /** 读取账号列表（进程内权威副本）。 */
@@ -182,10 +211,65 @@ export class AccountPool {
   }
 
   /**
+   * 数据版本号（0 = 旧命名尚未迁移，见 {@link JET_HUB_SCHEMA_VERSION}）。
+   *
+   * 一次性迁移用它做 short-circuit；普通读取路径不关心它。
+   */
+  get schemaVersion(): number {
+    this.ensureLoaded()
+    return this.versionCache
+  }
+
+  /**
+   * 列出**全部** provider 的模型黑名单（含从未改过开关的 provider）。
+   *
+   * 与 {@link listDisabledModels} 的区别：后者按 provider 取单个子表，
+   * 满足设置页渲染；一次性迁移需要整体搬运键名（`buddy` ↔ `workbuddy`），
+   * 因此需要一份完整快照。返回的是浅拷贝，改它不会影响进程内副本。
+   */
+  allDisabledModels(): ModelDisableMap {
+    this.ensureLoaded()
+    const snapshot: ModelDisableMap = {}
+    for (const [provider, models] of Object.entries(this.modelCache)) {
+      snapshot[provider] = { ...models }
+    }
+    return snapshot
+  }
+
+  /**
+   * 一次性整体写入账号列表与模型黑名单（外加版本号）。
+   *
+   * 为什么需要它：{@link writeAccounts} / {@link writeModels} 各自只接受
+   * 自己那一半，调用方要先写一半再写另一半，中间崩溃会留下半迁移状态。
+   * 一次性迁移必须**原子**地落盘「账号 + 黑名单 + 版本号」三件套，
+   * 故这里直接构造完整的 replace 载荷，只发一次写。
+   *
+   * @param accounts - 新的账号列表。
+   * @param disabledModels - 新的模型黑名单。
+   * @param schemaVersion - 迁移完成后的版本号。
+   */
+  async replaceAll(
+    accounts: ProviderAccountEntry[],
+    disabledModels: ModelDisableMap,
+    schemaVersion: number = JET_HUB_SCHEMA_VERSION,
+  ): Promise<void> {
+    this.cache = accounts
+    this.modelCache = disabledModels
+    this.versionCache = schemaVersion
+    this.loaded = true
+    if (!this.scope) {
+      this.ctx.logger?.warn?.('[jet-hub] 无 settings scope，数据迁移结果未持久化')
+      return
+    }
+    await this.scope.replace({ accounts, disabledModels, schemaVersion })
+  }
+
+  /**
    * 持久化账号列表（同时更新进程内权威副本）。
    *
-   * **必须连同黑名单一起写回**：settings 的 `replace()` 是整体替换，
-   * 只写 `{ accounts }` 会把同一 namespace 下的 `disabledModels` 抹掉。
+   * **必须连同黑名单与版本号一起写回**：settings 的 `replace()` 是整体替换，
+   * 只写 `{ accounts }` 会把同一 namespace 下的 `disabledModels` 抹掉，
+   * `schemaVersion` 同理会被重置为 0（于是改名迁移会在每次启动时重跑）。
    */
   private async writeAccounts(accounts: ProviderAccountEntry[]): Promise<void> {
     this.cache = accounts
@@ -194,7 +278,11 @@ export class AccountPool {
       this.ctx.logger?.warn?.('[jet-hub] 无 settings scope，账号变更未持久化')
       return
     }
-    await this.scope.replace({ accounts, disabledModels: this.modelCache })
+    await this.scope.replace({
+      accounts,
+      disabledModels: this.modelCache,
+      schemaVersion: this.versionCache,
+    })
   }
 
   /**
@@ -230,6 +318,12 @@ export class AccountPool {
    * "键存在且为 true 即隐藏"，配置文件也不会随开关操作无限膨胀。
    */
   async setModelDisabled(provider: string, modelId: string, disabled: boolean): Promise<void> {
+    // 必须先 ensureLoaded()：`writeModels` 会把 `loaded` 置 true 并整表写回，
+    // 若此时 `modelCache` / `versionCache` 还是构造初值，这次写入会**把它们
+    // 覆盖成空**——已有的黑名单与数据版本号一起丢（版本号丢失会让改名迁移在
+    // 每次启动重跑）。`writeAccounts` 的调用方都先读列表因而躲过了这一坑，
+    // 这里是唯一不经过读路径的直接写入入口。
+    this.ensureLoaded()
     const next: ModelDisableMap = { ...this.modelCache }
     const perProvider = { ...(next[provider] ?? {}) }
     if (disabled) perProvider[modelId] = true
@@ -247,8 +341,12 @@ export class AccountPool {
       this.ctx.logger?.warn?.('[jet-hub] 无 settings scope，模型黑名单变更未持久化')
       return
     }
-    // 与 writeAccounts 对称：整体 replace 必须携带账号列表，否则会被清空。
-    await this.scope.replace({ accounts: this.cache, disabledModels })
+    // 与 writeAccounts 对称：整体 replace 必须携带账号列表与版本号，否则会被清空。
+    await this.scope.replace({
+      accounts: this.cache,
+      disabledModels,
+      schemaVersion: this.versionCache,
+    })
   }
 
   /** 列出某个 provider 的所有账号（含状态信息） */
@@ -276,8 +374,8 @@ export class AccountPool {
   /**
    * 清理「凭据域名与当前产品配置不符」的账号。
    *
-   * 用途：WorkBuddy provider 从中国版（copilot.tencent.com）改造为国际版
-   * （www.workbuddy.ai）后，旧账号存的仍是中国版凭据 —— 它们的
+   * 用途：国际版 provider（`buddy`，www.workbuddy.ai）早年是中国版实现
+   * （copilot.tencent.com），改造后旧账号存的仍是中国版凭据 —— 它们的
    * `token.domain` 指向旧端点，用新 endpoint 发请求必然失败（且会一直续期失败）。
    * 这类条目已无修复价值，直接删除，让用户在 Account Hub 重新登录。
    *
@@ -345,13 +443,13 @@ export class AccountPool {
    *
    * 适配器不持有 ctx，也不该直接访问本类的私有凭据存储，
    * 因此这里集中做「遍历已启用账号 → 解析凭据 → 比对标识字段」。
-   * @param provider - provider 名称（'buddy' | 'workbuddy' | 'codearts'）。
-   * @param identity - 比对用的标识值：CodeBuddy 系传 access_token，CodeArts 传 access_key_id。
+   * @param provider - provider 名称（'buddy-cn' | 'buddy' | 'codearts'）。
+   * @param identity - 比对用的标识值：Buddy 系传 access_token，CodeArts 传 access_key_id。
    * @returns 匹配到的账号 id；无匹配返回空串。
    */
   async findAccountIdByCredential(provider: string, identity: string): Promise<string> {
     if (identity.length === 0) return ''
-    // 凭据中的唯一标识字段：CodeBuddy 系（buddy / workbuddy）用 access_token，
+    // 凭据中的唯一标识字段：Buddy 系（buddy-cn / buddy）用 access_token，
     // CodeArts 用 access_key_id。选错字段会导致匹配恒失败，限流记录无法归属账号。
     const identifierKey = provider === 'codearts' ? 'access_key_id' : 'access_token'
     for (const entry of this.readAccounts()) {

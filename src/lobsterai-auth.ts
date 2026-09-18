@@ -101,7 +101,7 @@ declare module '@deepseek-ai/cordis' {
     /**
      * LobsterAI 的认证服务实例。
      *
-     * 与 `buddyAuth` / `workbuddyAuth` / `codeartsAuth` 并列：
+     * 与 `buddyCnAuth` / `buddyAuth` / `codeartsAuth` 并列：
      * cordis 的 `Service` 构造时按名称注册，同名第二次注册会抛
      * `service "..." has been registered`，故每个 provider 各占一个服务名。
      */
@@ -143,7 +143,7 @@ export class LobsteraiAuth extends Service {
   /**
    * 本实例默认读写的凭据 ref 名称（`LOBSTERAI_ACCESS_TOKEN`）。
    *
-   * 由产品配置派生，与 CodeBuddy 系的两个 ref 完全隔离。
+   * 由产品配置派生，与 Buddy 系的两个 ref 完全隔离。
    */
   readonly credentialRefName: string
 

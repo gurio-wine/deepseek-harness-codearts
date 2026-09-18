@@ -11,8 +11,9 @@ import { BUDDY_CREDENTIAL_REF, BuddyAuth } from './buddy-auth.js'
 import { LobsteraiAuth } from './lobsterai-auth.js'
 import { TraeCnAuth } from './trae-cn-auth.js'
 import { AccountPool } from './account-pool.js'
+import { migrateProviderNames } from './provider-rename-migration.js'
 import { registerJetHubRpc } from './jet-hub-rpc.js'
-import { CODEBUDDY, WORKBUDDY } from './product.js'
+import { BUDDY_CN, BUDDY } from './product.js'
 import { LOBSTERAI } from './lobsterai-product.js'
 import { TRAE_CN } from './trae-cn-product.js'
 import type { CodeArtsCredential, BuddyCredential } from './types.js'
@@ -92,8 +93,8 @@ function registerProviderSettings(ctx: Context, ...namespaces: string[]): void {
  * 图片附件桥接：把持久化图片读成原始字节供适配器内联。
  *
  * 用 `ctx.get` 而非 `inject` —— 附件服务缺失时 provider 仍可正常加载，
- * 只是收到图片时报 UNSUPPORTED_CONTENT。两个 CodeBuddy 系产品（CodeBuddy /
- * WorkBuddy）共用同一后端与协议，图片能力相同，故共用本实现。
+ * 只是收到图片时报 UNSUPPORTED_CONTENT。两个 Buddy 系产品（Buddy CN /
+ * Buddy）共用同一后端与协议，图片能力相同，故共用本实现。
  */
 function makeReadImage(ctx: Context) {
   return async (attachment: unknown): Promise<{ data: Uint8Array; mediaType: string } | undefined> => {
@@ -197,29 +198,47 @@ export function makeCredentialResolver<T>(
 /** 注册 codeartsAuth 服务、命令以及 codearts LLM 路由。 */
 export function apply(ctx: Context): void {
   // provider 的 settingsNs 必须已注册，否则模型设置页会因未注册 namespace 崩溃。
-  // 五个 namespace 分别对应：codearts 路由、CodeBuddy（buddy）路由、
-  // WorkBuddy（workbuddy）路由、LobsterAI（lobsterai）路由、Trae CN（trae-cn）路由
+  // 五个 namespace 分别对应：codearts 路由、Buddy CN（buddy-cn）路由、
+  // Buddy（buddy）路由、LobsterAI（lobsterai）路由、Trae CN（trae-cn）路由
   // —— 后四者由 registerXxxLlm 以 `llm-${product.id}` 派生，漏注册会让模型设置页在
   // `refFor → deriveKeyRef(provider)` 处以
   // `provider.toUpperCase is not a function` 崩溃。
-  // 注意 `llm-trae-cn` 里的连字符是**正确**的：namespace 是字符串键而非标识符，
-  // 与 cordis 服务名（`traeCnAuth`）走的是两套命名规则。
-  registerProviderSettings(ctx, 'llm-buddy', 'llm-workbuddy', 'llm-codearts', 'llm-lobsterai', 'llm-trae-cn')
+  // 注意 `llm-trae-cn` / `llm-buddy-cn` 里的连字符是**正确**的：namespace 是
+  // 字符串键而非标识符，与 cordis 服务名（`traeCnAuth` / `buddyCnAuth`）
+  // 走的是两套命名规则。
+  registerProviderSettings(ctx, 'llm-buddy-cn', 'llm-buddy', 'llm-codearts', 'llm-lobsterai', 'llm-trae-cn')
   const service = new CodeArtsAuth(ctx)
   const pool = new AccountPool(ctx)
 
-  // WorkBuddy provider 已从中国版（copilot.tencent.com）改造为国际版
-  // （www.workbuddy.ai）。旧账号存的是中国版凭据，其 token.domain 指向旧端点，
-  // 用新 endpoint 发请求必然失败且会一直续期失败，故启动时清理掉。
-  // 判据是「凭据 domain ≠ 产品 apiDomain」，只清真正失配的条目。
-  void pool.pruneAccountsWithForeignDomain(WORKBUDDY).then((removed) => {
-    if (removed.length > 0) {
-      ctx.logger.info(
-        `[jet-hub] 已清理 ${removed.length} 个 WorkBuddy 旧版（中国版）账号，请重新登录：${removed.join(', ')}`,
-      )
+  // 一次性数据迁移：把历史 provider 名（buddy = 中国版 / workbuddy = 国际版）、
+  // 旧凭据 ref（BUDDY_* / WORKBUDDY_*）与旧 disabledModels 键搬到新命名
+  // （buddy-cn / buddy）。**必须早于下面所有池查询** —— 池的每次读取都按
+  // provider 过滤，带着旧 id 的账号在新体系里等同于不存在。
+  //
+  // ⚠️ **下面的域名清理必须挂在本 Promise 之后，不能与它并行**：
+  // `pruneAccountsWithForeignDomain(BUDDY)` 按 `entry.provider === 'buddy'` 选账号，
+  // 而迁移**之前**的 `buddy` 正是中国版（域名 copilot.tencent.com）。若两者
+  // 并行，清理会把这批中国版账号判成「域名失配」并连凭据一起删掉 —— 迁移还
+  // 没来得及给它们改成 `buddy-cn`。迁移自身是 fire-and-forget（内部自吞异常
+  // 并打日志，绝不阻断启动），故这里用 `.then()` 串联而不是 `await`。
+  void migrateProviderNames(pool, ctx).then(() => {
+    // Buddy（国际版）provider 早年是中国版（copilot.tencent.com）实现，
+    // 后来改造为国际版（www.workbuddy.ai）。期间登录的账号其 token.domain
+    // 仍指向中国版端点，用新 endpoint 发请求必然失败且会一直续期失败，故启动时清理。
+    // 判据是「凭据 domain ≠ 产品 apiDomain」，只清真正失配的条目。
+    // 两个产品各清一次：中国版（buddy-cn）历史上也踩过同类坑（凭据里写着国际版域名），
+    // 只清一边会漏掉另一半。
+    for (const product of [BUDDY_CN, BUDDY]) {
+      void pool.pruneAccountsWithForeignDomain(product).then((removed) => {
+        if (removed.length > 0) {
+          ctx.logger.info(
+            `[jet-hub] 已清理 ${removed.length} 个 ${product.displayName} 域名失配账号，请重新登录：${removed.join(', ')}`,
+          )
+        }
+      }).catch((error: unknown) => {
+        ctx.logger.warn(`[jet-hub] 清理 ${product.displayName} 域名失配账号失败：${String(error)}`)
+      })
     }
-  }).catch((error: unknown) => {
-    ctx.logger.warn(`[jet-hub] 清理 WorkBuddy 旧版账号失败：${String(error)}`)
   })
 
   ctx.commands.register({
@@ -281,41 +300,41 @@ export function apply(ctx: Context): void {
     accountPool: pool,
   })
 
-  // ===== Buddy (腾讯 CodeBuddy) 服务 =====
+  // ===== Buddy CN (腾讯 CodeBuddy 中国版) 服务 =====
   // 不注册斜杠命令：登录/状态/续期都在 Account Hub 设置页完成（多账号 + 账号池），
   // 命令式的单凭据入口已无必要。
-  const buddy = new BuddyAuth(ctx)
+  const buddyCn = new BuddyAuth(ctx)
   registerBuddyLlm(ctx, {
     credentialRef: credentialRef(BUDDY_CREDENTIAL_REF),
     // 池中账号按 `product.id` 归属；provider 实参必须与产品一致，否则查不到账号。
     resolveCredential: makeCredentialResolver<BuddyCredential>(
-      ctx, pool, CODEBUDDY.id, BUDDY_CREDENTIAL_REF,
+      ctx, pool, BUDDY_CN.id, BUDDY_CREDENTIAL_REF,
+    ),
+    refresh: () => buddyCn.refresh(),
+    fetchRemoteModels: () => buddyCn.fetchModels(pool),
+    readImage: makeReadImage(ctx),
+    accountPool: pool,
+    product: BUDDY_CN,
+  })
+
+  // ===== Buddy (腾讯 WorkBuddy 国际版) 服务 =====
+  // 与 Buddy CN 同源（同后端、同协议），差异全部由 product 配置承载。
+  // 服务名由产品配置的 serviceName 显式给出，故两个产品分别注册为
+  // ctx.buddyCnAuth / ctx.buddyAuth，互不覆盖。
+  // 同样不注册斜杠命令：入口在 Account Hub 的 Buddy 面板。
+  const buddy = new BuddyAuth(ctx, { product: BUDDY })
+  registerBuddyLlm(ctx, {
+    credentialRef: credentialRef(BUDDY.defaultCredentialRef),
+    // 只从 buddy 的账号池取账号，回退到 Buddy 自己的单凭据 ref，
+    // 保证不会串用 Buddy CN 的凭据。
+    resolveCredential: makeCredentialResolver<BuddyCredential>(
+      ctx, pool, BUDDY.id, BUDDY.defaultCredentialRef,
     ),
     refresh: () => buddy.refresh(),
     fetchRemoteModels: () => buddy.fetchModels(pool),
     readImage: makeReadImage(ctx),
     accountPool: pool,
-    product: CODEBUDDY,
-  })
-
-  // ===== WorkBuddy (腾讯 WorkBuddy) 服务 =====
-  // 与 CodeBuddy 同源（同后端、同协议），差异全部由 product 配置承载。
-  // 服务名由 BuddyAuth 依 product.id 派生，故两个产品分别注册为
-  // ctx.buddyAuth / ctx.workbuddyAuth，互不覆盖。
-  // 同样不注册斜杠命令：入口在 Account Hub 的 WorkBuddy 面板。
-  const workbuddy = new BuddyAuth(ctx, { product: WORKBUDDY })
-  registerBuddyLlm(ctx, {
-    credentialRef: credentialRef(WORKBUDDY.defaultCredentialRef),
-    // 只从 workbuddy 的账号池取账号，回退到 WorkBuddy 自己的单凭据 ref，
-    // 保证不会串用 CodeBuddy 的凭据。
-    resolveCredential: makeCredentialResolver<BuddyCredential>(
-      ctx, pool, WORKBUDDY.id, WORKBUDDY.defaultCredentialRef,
-    ),
-    refresh: () => workbuddy.refresh(),
-    fetchRemoteModels: () => workbuddy.fetchModels(pool),
-    readImage: makeReadImage(ctx),
-    accountPool: pool,
-    product: WORKBUDDY,
+    product: BUDDY,
   })
 
   // ===== LobsterAI (有道龙虾) 服务 =====
@@ -415,10 +434,10 @@ export function apply(ctx: Context): void {
       await service.refreshAll(pool)
     } catch { /* 静默 */ }
     try {
-      await buddy.refreshAll(pool)
+      await buddyCn.refreshAll(pool)
     } catch { /* 静默 */ }
     try {
-      await workbuddy.refreshAll(pool)
+      await buddy.refreshAll(pool)
     } catch { /* 静默 */ }
     try {
       await lobsterai.refreshAll(pool)
@@ -437,8 +456,8 @@ export function apply(ctx: Context): void {
       ctx.effect(() => () => {
         clearInterval(refreshTimer)
         service.stop()
+        buddyCn.stop()
         buddy.stop()
-        workbuddy.stop()
         lobsterai.stop()
         traeCn.stop()
       }, 'jet-hub: multi-account refresh scheduler')
@@ -448,13 +467,13 @@ export function apply(ctx: Context): void {
   // 保留旧的 stop scheduler（兼容旧命令）
   ctx.effect(() => () => {
     service.stop()
+    buddyCn.stop()
     buddy.stop()
-    workbuddy.stop()
     lobsterai.stop()
     traeCn.stop()
   }, 'codearts-auth.scheduler (legacy)')
 
   // ===== Account Hub RPC 注册 =====
-  registerJetHubRpc(ctx, pool, service, buddy, workbuddy, lobsterai, traeCn)
+  registerJetHubRpc(ctx, pool, service, buddyCn, buddy, lobsterai, traeCn)
   ctx.provide('accountPool', pool)
 }
