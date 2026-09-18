@@ -38,6 +38,7 @@ import {
   fetchLobsteraiCreditBalance,
 } from './lobsterai-credits.js'
 import { TRAE_CN } from './trae-cn-product.js'
+import { TRAE_CN_WORK } from './trae-cn-work-product.js'
 import type { TraeCnCredential, TraeCnPendingLogin } from './trae-cn-oauth.js'
 import type { TraeCnProduct } from './trae-cn-product.js'
 import {
@@ -123,6 +124,44 @@ function shortId(): string {
  */
 export function accountCredentialRefName(provider: string, suffix: string): string {
   return `${provider.toUpperCase().replace(/-/g, '_')}_ACCOUNT_${suffix}`
+}
+
+/**
+ * provider id → **账号池的 provider 键**（未映射的 provider 原样返回）。
+ *
+ * ## 为什么需要它
+ *
+ * 绝大多数 provider 的路由名与账号池键是同一个字符串，但 **`trae-cn-work`
+ * 不是**：Work 没有独立登录，账号、凭据（`TRAE_CN_ACCOUNT_*`）与限流切换全部
+ * 复用 `trae-cn`（详见 `src/trae-cn-work-product.ts` 的 `poolProviderId`）。
+ * Account Hub 的 Work 面板必须列出 `provider === 'trae-cn'` 的那批账号，
+ * 否则面板是空的；积分余额也必须查同一批账号的同一个端点。
+ *
+ * ## 为什么收敛在这里（客户端不映射）
+ *
+ * 三个理由，缺一不可：
+ *
+ * 1. **它取代的正是宿主侧既有的字面量分支**。积分三端点原先硬编码
+ *    `req.provider === TRAE_CN.id`，账号列表走 `pool.listAccounts(req.provider)`。
+ *    若把映射放在客户端，宿主这三个分支**必须一起改**（否则积分端点仍会以
+ *    `productById('trae-cn-work')` 判成 unsupported），等于同一件事写两遍；
+ * 2. **这是同一个概念的宿主侧落点**。池键的真相源是 `TraeCnWorkProduct.poolProviderId`，
+ *    把映射写成引用该常量、而不是再抄一遍 `'trae-cn'` 字面量，两个方向就永远同步；
+ * 3. **它让「面板 id 与池键不同」这件事只在一个函数里可见**。将来再加
+ *    「复用别人账号」的 provider，只需在这里加一行，而不是把 if 撒进客户端
+ *    六处调用点（账号列表 / 余额 / 签到状态 / 领取 / 重测 / 重置）。
+ *
+ * ## 刻意**不**映射的两个入口
+ *
+ * - **`account.create`**：`trae-cn-work` 没有独立登录，面板也不渲染「+ 新建账号」。
+ *    这里若把它映射成 `trae-cn`，两次点击会派生出两个 `trae-cn-<shortId>` 占位
+ *    账号，而它们背后是同一份凭据体系 —— 一个账号被建两次。故该入口对未知
+ *    provider 的拒绝行为**保持不变**（宁可拒绝，不可静默重复建号）。
+ * - **`login.poll`**：轮询的键是 accountId + 该账号自己的 provider，与面板 id 无关。
+ */
+export function poolProviderFor(provider: string): string {
+  if (provider === TRAE_CN_WORK.id) return TRAE_CN_WORK.poolProviderId
+  return provider
 }
 
 /** 解析 Buddy 凭据 JSON；解析失败返回 undefined。 */
@@ -538,7 +577,9 @@ function registerJetHubEndpoints(
     switch (method) {
       case 'account.list': {
         const req = payload as RpcListAccountsRequest
-        const accounts = await pool.listAccounts(req.provider)
+        // 面板 id → 池键的映射：`trae-cn-work` 面板列出的是 `trae-cn` 的账号
+        //（它们就是能跑 Work 路径的账号）。见 {@link poolProviderFor}。
+        const accounts = await pool.listAccounts(poolProviderFor(req.provider))
         return { ok: true, value: { accounts } }
       }
 
@@ -761,6 +802,10 @@ function registerJetHubEndpoints(
           })
           return { ok: true, value: { accountId: id, loginUrl: loginSession.loginUrl } }
         } else {
+          // 刻意**不做** `poolProviderFor()` 映射：`trae-cn-work` 没有独立登录，
+          // 面板也不渲染「+ 新建账号」。若这里把它映射成 `trae-cn`，多出来的
+          // 二次点击会派生第二个 `trae-cn-<shortId>` 占位账号，而两者背后是
+          // 同一份凭据体系 —— 等于把一个账号建两遍。宁可拒绝，不可静默重复建号。
           return { ok: false, error: { code: 'bad-request', message: `unknown provider: ${provider}` } }
         }
       }
@@ -893,7 +938,7 @@ function registerJetHubEndpoints(
       // 停用账号也能重测（停用只影响自动选择，不影响手动排查）。
       case 'account.retestAll': {
         const req = payload as RpcRetestAllRequest
-        const value = await retestAllAccounts(pool, req.provider)
+        const value = await retestAllAccounts(pool, poolProviderFor(req.provider))
         return { ok: true, value }
       }
 
@@ -906,7 +951,7 @@ function registerJetHubEndpoints(
 
       case 'account.resetAll': {
         const req = payload as RpcResetAllRequest
-        const value = await resetAllAccounts(pool, req.provider)
+        const value = await resetAllAccounts(pool, poolProviderFor(req.provider))
         return { ok: true, value }
       }
 
@@ -923,12 +968,15 @@ function registerJetHubEndpoints(
       // 此处的拒绝是兜底与契约声明，不是常规路径。
       case 'credits.status': {
         const req = payload as RpcCreditsStatusRequest
-        if (req.provider === LOBSTERAI.id) {
+        // provider → 池键：`trae-cn-work` 与 `trae-cn` 是同一批账号，
+        // 签到状态自然也是同一份（见 {@link poolProviderFor}）。
+        const provider = poolProviderFor(req.provider)
+        if (provider === LOBSTERAI.id) {
           // LobsterAI 没有独立的「签到状态」端点：活动状态要经
           // slot → context 两步才能得到，且语义与 Buddy 的
           // CheckinStatus 不同构（无 streak/dailyCredit 等概念）。
           // 故这里如实返回 null，而不是臆造一份状态对象。
-          const accounts = await pool.listAccounts(req.provider)
+          const accounts = await pool.listAccounts(provider)
           return {
             ok: true,
             value: {
@@ -936,12 +984,16 @@ function registerJetHubEndpoints(
             } satisfies RpcCreditsStatusResponse,
           }
         }
-        if (req.provider === TRAE_CN.id) {
+        if (provider === TRAE_CN.id) {
           // Trae CN **有**独立的状态端点（`checkin_credits/status`），但它只给出
           // 「今天领了没」与 `enable` 两项，其余字段（连续天数 / 每日积分 /
           // 活动名…）协议里没有已确认的对应字段，故由 fetchTraeCnCheckinStatus
           // 如实补零。与 LobsterAI 的「压根没有状态端点」不是同一种情况。
-          const accounts = await pool.listAccounts(req.provider)
+          //
+          // `trae-cn-work` 也会落到这里（poolProviderFor 把它映射成 `trae-cn`）：
+          // Work 面板不渲染签到按钮，但**端点仍如实工作** —— 客户端不渲染只是
+          // UI 便利，不是安全边界，这与 `credits.balances` 的既有约定一致。
+          const accounts = await pool.listAccounts(provider)
           const results = await collectCreditsStatus<TraeCnCredential, TraeCnProduct>(accounts, TRAE_CN, {
             resolve: (ref) => ctx.credentials.resolve(ref),
             fetchStatus: (credential, product) =>
@@ -950,11 +1002,11 @@ function registerJetHubEndpoints(
           })
           return { ok: true, value: { accounts: results } satisfies RpcCreditsStatusResponse }
         }
-        const product = productById(req.provider)
+        const product = productById(provider)
         if (product === undefined) {
           return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
         }
-        const accounts = await pool.listAccounts(req.provider)
+        const accounts = await pool.listAccounts(provider)
         const results = await collectCreditsStatus(accounts, product, {
           resolve: (ref) => ctx.credentials.resolve(ref),
           warn: (msg) => ctx.logger?.warn?.(msg),
@@ -965,8 +1017,10 @@ function registerJetHubEndpoints(
       // 一键领取：逐账号顺序执行（并发易触发风控），单个账号失败不中断整体。
       case 'credits.claimAll': {
         const req = payload as RpcCreditsClaimAllRequest
-        const accounts = await pool.listAccounts(req.provider)
-        if (req.provider === LOBSTERAI.id) {
+        // 与 status 同源：`trae-cn-work` 走 trae-cn 的同一批账号。
+        const provider = poolProviderFor(req.provider)
+        const accounts = await pool.listAccounts(provider)
+        if (provider === LOBSTERAI.id) {
           // LobsterAI 的 clientVersion 是签到必填参数，需动态解析
           //（带缓存，通常无额外网络开销）。
           const clientVersion = await lobsterai.resolveClientVersion()
@@ -980,7 +1034,7 @@ function registerJetHubEndpoints(
           })
           return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
         }
-        if (req.provider === TRAE_CN.id) {
+        if (provider === TRAE_CN.id) {
           // Trae CN 的领取流程**自身**就是两步（status → 未领则 claim），
           // 内部已按 `checked_in` 幂等预检 —— 外部再查一次纯属重复请求，
           // 故与其他多步流程（LobsterAI）一样传 precheckStatus: false。
@@ -993,7 +1047,7 @@ function registerJetHubEndpoints(
           })
           return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
         }
-        const product = productById(req.provider)
+        const product = productById(provider)
         if (product === undefined) {
           return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
         }
@@ -1011,8 +1065,12 @@ function registerJetHubEndpoints(
       // 网络耗时拖慢，且一次查询失败会让整份列表都取不到。
       case 'credits.balances': {
         const req = payload as RpcCreditsBalancesRequest
-        const accounts = await pool.listAccounts(req.provider)
-        if (req.provider === LOBSTERAI.id) {
+        // **Account Hub 的 Work 面板就靠这一行拿到余额**：`trae-cn-work` →
+        // `trae-cn`，同一批账号、同一个端点、同一份双池返回。刻意不新写一套
+        // Work 专用逻辑 —— 余额是账号属性，不是路径属性。
+        const provider = poolProviderFor(req.provider)
+        const accounts = await pool.listAccounts(provider)
+        if (provider === LOBSTERAI.id) {
           const values = await collectCreditBalances(accounts, LOBSTERAI, {
             resolve: (ref) => ctx.credentials.resolve(ref),
             fetchBalance: (credential, product) => fetchLobsteraiCreditBalance(credential, product),
@@ -1020,7 +1078,7 @@ function registerJetHubEndpoints(
           })
           return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
         }
-        if (req.provider === TRAE_CN.id) {
+        if (provider === TRAE_CN.id) {
           const values = await collectCreditBalances<TraeCnCredential, TraeCnProduct>(accounts, TRAE_CN, {
             resolve: (ref) => ctx.credentials.resolve(ref),
             // 双池拆分（通用 / Work）由 fetchTraeCnCreditBalance 完成：它的
@@ -1031,7 +1089,7 @@ function registerJetHubEndpoints(
           })
           return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
         }
-        const product = productById(req.provider)
+        const product = productById(provider)
         if (product === undefined) {
           return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
         }

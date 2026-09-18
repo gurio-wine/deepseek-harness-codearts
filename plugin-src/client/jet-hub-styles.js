@@ -31,6 +31,13 @@ const STYLES = `
 /* Trae CN 的品牌标识自带深色圆角底（#1A1B1D），自带底色的图标不该再靠容器配色，
    故与其余图标一致保持 white：容器只负责留白与投影，深色方块居中显示。 */
 .dim-jh-providerIcon.trae-cn { background: white; }
+/* Trae CN Work 与 Trae CN 用**同一个**图标本体（同一产品的两条路径），容器配色
+   自然也一致 —— 但类名必须单独存在：logoClass 与条目逐字对齐由
+   tests/unit/credits-capabilities.spec.ts 的集合相等断言守住，缺了它面板图标
+   就只是少了白底，肉眼几乎看不出来。
+   ⚠️ 本文件整体是一段模板字面量，注释里**不能出现反引号**（会提前结束字符串，
+   esbuild 直接在构建期报 "Expected ; but found …"）。 */
+.dim-jh-providerIcon.trae-cn-work { background: white; }
 
 /* provider 文案：align dsh-im .dim-channelCopy */
 .dim-jh-providerLabel { min-width: 0; display: grid; }
@@ -106,6 +113,10 @@ const STYLES = `
    允许换行：按钮数量随 provider 变化（Buddy CN 有「一键领取积分」，其他没有），
    固定单行在窄面板下必然放不下。 */
 .dim-jh-headerActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 100%; }
+
+/* 共用账号的 provider（Trae CN Work）没有「+ 新建账号」，改为这行常驻说明。
+   用中性信息色而不是警示色：这不是错误状态，只是「登录入口在隔壁面板」。 */
+.dim-jh-loginHint { margin: 0 0 12px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l2, #eef0f3); background: var(--dsw-alias-bg-layer-2, #f7f8fa); font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #646a73); }
 
 /* 上一次「重测 / 重置」的结果提示 */
 .dim-jh-probeNotice { margin-bottom: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l2, #eef0f3); background: var(--dsw-alias-bg-layer-2, #f7f8fa); font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #646a73); }

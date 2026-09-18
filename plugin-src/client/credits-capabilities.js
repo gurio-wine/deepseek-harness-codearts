@@ -19,30 +19,38 @@
  *
  * 两个能力**彼此独立，不能互相推断**：
  *
- * | provider    | balance（积分余额） | dailyCheckin（每日签到领取） |
- * |-------------|---------------------|------------------------------|
- * | `codearts`  | ✗ 华为云账号体系     | ✗                            |
- * | `buddy-cn`  | ✓                   | ✓ Buddy CN 有签到接口         |
- * | `buddy`     | ✓                   | ✗ 国际版后端无签到接口        |
- * | `lobsterai` | ✓                   | ✓ `client-activities` 三步流程 |
- * | `trae-cn`   | ✓ 双池（通用 / Work） | ✓ `checkin_credits` 两步 + 设备头 |
+ * | provider        | balance（积分余额） | dailyCheckin（每日签到领取） |
+ * |-----------------|---------------------|------------------------------|
+ * | `codearts`      | ✗ 华为云账号体系     | ✗                            |
+ * | `buddy-cn`      | ✓                   | ✓ Buddy CN 有签到接口         |
+ * | `buddy`         | ✓                   | ✗ 国际版后端无签到接口        |
+ * | `lobsterai`     | ✓                   | ✓ `client-activities` 三步流程 |
+ * | `trae-cn`       | ✓ 双池（通用 / Work） | ✓ `checkin_credits` 两步 + 设备头 |
+ * | `trae-cn-work`  | ✓ 双池（同上）       | ✗ 签到留在 Trae CN 面板       |
  *
  * - `balance`：Buddy 系走 `POST /v2/billing/meter/get-user-resource`，该端点
  *   在 Buddy CN 与 Buddy（国际版）**通用**（仅 baseURL 随 `product.endpoint`
  *   切换）；LobsterAI 走 `GET /api/user/profile-summary`；Trae CN 走
  *   `POST /trae/api/v2/pay/web_user_ent_usage`，并按 `available_endpoint`
- *   **分池**（通用池是主数字、Work 池单独一项，见下）。见 README「积分余额」。
+ *   **分池**（通用池是主数字、Work 池单独一项，见下）；`trae-cn-work` 是同一个
+ *   端点的**同一个实现**（同批账号、同一份凭据），故余额口径与 `trae-cn`
+ *   逐字相同 —— 宿主侧由 `poolProviderId` 映射承载，客户端不为此写第二套逻辑。
  * - `dailyCheckin`：Buddy 系是 `checkin-activity-status` + `daily-checkin`，
  *   **仅 Buddy CN（中国版）**有；Buddy（国际版）内核里只有 `get-dosage-notify`
  *   （用量通知），没有签到接口，故其面板不渲染「一键领取积分」。LobsterAI 是
  *   `client-activities` 三步流程（`src/lobsterai-credits.ts`）；Trae CN 是
  *   `checkin_credits/status` → `claim` 两步（`src/trae-cn-credits.ts`，claim 必须
  *   带设备四件套），故两者都支持。
+ * - `trae-cn-work` 的 `dailyCheckin` 是 **false**（尽管它属于 Trae CN 账号体系）：
+ *   签到是**账号级、当日一次**的操作，与走哪条路径无关。两个面板都放签到按钮
+ *   必然是同一个账号两处重复领取 —— 第二次点击只会得到「今天已签到」，
+ *   这在用户看来就是按钮坏了。故签到**只留在 Trae CN 面板**。
  *
  * `trae-cn` 的 `balance` 是**双池**：`total` 仍是通用池（chat 实际扣的就是它），
  * Work 池走超集字段 `workTotal`，两者在 UI 上**分开展示、绝不合并**
  * （`CreditBalanceRow` 见到 `workTotal` 才切双池形态；其余 provider 的余额对象
- * 没有该字段，渲染与登记前逐字节一致）。
+ * 没有该字段，渲染与登记前逐字节一致）。`trae-cn-work` 的面板因此也显示
+ * 「通用 X / Work Y」—— 这正是它被加进来要回答的问题（Work 路径还能花多少）。
  *
  * 判定一律**默认关闭**：未登记的 provider 视为不支持任何积分能力。这样将来
  * 新增 provider 时，若忘记在此登记，最坏结果是「暂时看不到积分」，而不是
@@ -67,6 +75,13 @@ export const CREDITS_CAPABILITIES = Object.freeze({
   // checkin_credits 两步流程（claim 带设备四件套），两项都支持。
   // 键名是 `trae-cn`（带连字符，与 `PROVIDERS` 的 id 及后端 provider 实参一致）。
   'trae-cn': Object.freeze({ balance: true, dailyCheckin: true }),
+  // Trae CN **Work**（TraeWork 网页协议）。同一个产品、同一个账号体系、
+  // 同一个余额端点（同一个 `fetchTraeCnCreditBalance`）—— 面板显示双池积分行，
+  // 但**不支持签到**：签到是账号级当日一次的操作，两个面板都放按钮必然重复领取。
+  // 宿主侧 `credits.balances` 收到本键时映射到 trae-cn 的余额实现，
+  // 映射收敛在 `src/jet-hub-rpc.ts` 的 `poolProviderFor()` 一处（那是账号池的
+  // 同一个 `poolProviderId` 概念的宿主侧落点），客户端不为此写第二套逻辑。
+  'trae-cn-work': Object.freeze({ balance: true, dailyCheckin: false }),
 });
 
 /**

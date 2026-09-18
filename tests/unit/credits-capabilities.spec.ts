@@ -79,13 +79,28 @@ describe('积分能力矩阵', () => {
     expect(supportsDailyCheckin('trae-cn')).toBe(true)
   })
 
+  it('Trae CN Work 支持余额但**不支持**签到（签到留在 Trae CN 面板）', () => {
+    // Work 与 Trae CN 是同一个账号体系（同一批账号、同一份凭据、同一个余额端点），
+    // 因此余额必须支持 —— 这正是加这个面板要回答的问题（Work 池还能花多少）。
+    //
+    // 但 `dailyCheckin` 刻意是 false：签到是**账号级、当日一次**的操作，与走哪条
+    // 路径无关。两个面板都放按钮必然是同一个账号在两处重复领取，第二次点击只会
+    // 得到「今天已签到」—— 用户看到的就是按钮坏了。这条断言钉死「不要顺手把
+    // Work 也登记成 ✓」：它与 `trae-cn` 只差一个字段，最容易在复制粘贴时改错。
+    expect(CREDITS_CAPABILITIES['trae-cn-work']).toEqual({ balance: true, dailyCheckin: false })
+    expect(supportsCreditBalance('trae-cn-work')).toBe(true)
+    expect(supportsDailyCheckin('trae-cn-work')).toBe(false)
+  })
+
   it('能力矩阵的键与 PROVIDERS 的 id 逐字对齐（含连字符 provider）', () => {
     // 集合相等那条断言用 PROVIDER_ENTRY_PATTERN 抓 id，而它的字符类必须是
     // `[a-z-]+`：只认小写字母的话，带连字符的 id 抓不到，于是**漏登记时那条
-    // 断言依然是绿的**（集合两边都不含它）。这里直接锁死匹配器覆盖 `trae-cn`，
-    // 免得将来有人「图省事」把连字符从字符类里去掉。
+    // 断言依然是绿的**（集合两边都不含它）。这里直接锁死匹配器覆盖两个
+    // 带连字符的 id，免得将来有人「图省事」把连字符从字符类里去掉。
     const ids = [...readClientSource().matchAll(PROVIDER_ENTRY_PATTERN)].map((m) => m[1]!)
     expect(ids).toContain('trae-cn')
+    // 两个 id 只差一个后缀，是最容易被「顺手统一」成 `traeCnWork` 的地方。
+    expect(ids).toContain('trae-cn-work')
     expect(ids).toContain('lobsterai')
     // 改名后的两组 id：中国版是 `buddy-cn`（带连字符），国际版是 `buddy`。
     // 旧的 `workbuddy` 必须彻底消失 —— 它在新体系里既不是 id 也不是 provider 实参，
@@ -93,7 +108,7 @@ describe('积分能力矩阵', () => {
     expect(ids).toContain('buddy-cn')
     expect(ids).toContain('buddy')
     expect(ids).not.toContain('workbuddy')
-    expect(ids).toHaveLength(5)
+    expect(ids).toHaveLength(6)
   })
 
   it('未登记的 provider 默认不支持任何积分能力（默认关闭）', () => {
@@ -125,7 +140,7 @@ describe('客户端 PROVIDERS 列表（新命名）', () => {
   const source = readClientSource()
 
   /**
-   * `PROVIDERS` 的五条最终形态。
+   * `PROVIDERS` 的六条最终形态。
    *
    * 顺序即面板标签页顺序，也是后端注册顺序；`label` 是面板标题与按钮文案里的
    * 显示名，`logoClass` 必须与 `jet-hub-styles.js` 的
@@ -137,13 +152,31 @@ describe('客户端 PROVIDERS 列表（新命名）', () => {
     { id: 'buddy', label: 'Buddy', logoClass: 'buddy' },
     { id: 'lobsterai', label: 'LobsterAI', logoClass: 'lobsterai' },
     { id: 'trae-cn', label: 'Trae CN', logoClass: 'trae-cn' },
+    { id: 'trae-cn-work', label: 'Trae CN Work', logoClass: 'trae-cn-work' },
   ] as const
 
-  it('五条 provider 的 id / label / logoClass 与定稿一致', () => {
+  it('六条 provider 的 id / label / logoClass 与定稿一致', () => {
     const entries = [...source.matchAll(PROVIDER_FULL_ENTRY_PATTERN)].map((m) => ({
       id: m[1]!, label: m[2]!, logoClass: m[4]!,
     }))
     expect(entries).toEqual(EXPECTED)
+  })
+
+  it('只有 trae-cn-work 声明 loginHint（面板不渲染「+ 新建账号」）', () => {
+    // Work 没有独立登录：它的账号与凭据完全复用 Trae CN。若两个面板各放一个
+    // 登录按钮，用户会在「到底该在哪个面板登录」上反复试错，而两条入口写的是
+    // 同一份 TRAE_CN_ACCOUNT_* 数据。
+    //
+    // 判据是「有没有 loginHint」而不是某个显式的布尔标志：新增 provider 忘记
+    // 声明时，最坏结果是多一个本来就能用的按钮，而不是把面板变成没有入口的死面板。
+    const entries = [...source.matchAll(PROVIDER_FULL_ENTRY_PATTERN)]
+    // 先钉死匹配器本身抓全了六条：漏抓的条目 `entry[5]` 恒为 undefined，
+    // 会让下面那条「只有 Work 有」的断言在条目整个消失时反而是绿的。
+    expect(entries).toHaveLength(EXPECTED.length)
+    for (const entry of entries) {
+      expect(entry[5] !== undefined, entry[1]).toBe(entry[1] === 'trae-cn-work')
+    }
+    expect(source).toContain('与 Trae CN 共用账号')
   })
 
   it('显示名不带公司注记', () => {
@@ -160,11 +193,19 @@ describe('客户端 PROVIDERS 列表（新命名）', () => {
     const entries = new Map(
       [...source.matchAll(PROVIDER_FULL_ENTRY_PATTERN)].map((m) => [m[1]!, m[3]!]),
     )
+    expect(entries.size).toBe(EXPECTED.length)
     expect(entries.get('buddy-cn')).toBe('BUDDY_CN_ICON')
     expect(entries.get('buddy')).toBe('BUDDY_ICON')
+    // 两个 Trae CN 条目各自引用自己的常量：Work 的图标本体与 IDE 路径相同
+    //（同一产品），但常量名分开，将来换图只改一处。
+    expect(entries.get('trae-cn')).toBe('TRAE_CN_ICON')
+    expect(entries.get('trae-cn-work')).toBe('TRAE_CN_WORK_ICON')
     // 旧常量名不得残留（它们现在指向不存在的符号，客户端会直接崩）。
     expect(source).not.toContain('CODEBUDDY_ICON')
     expect(source).not.toContain('WORKBUDDY_ICON')
+    // `TRAE_CN_WORK_ICON` 必须是**别名**而不是另一份 base64 字面量：
+    // 两个面板显示不同图标会让人以为它们连的是不同产品。
+    expect(source).toMatch(/const TRAE_CN_WORK_ICON = TRAE_CN_ICON\b/)
   })
 
   it('logoClass 与 jet-hub-styles.js 的图标容器类逐字对齐', () => {
@@ -186,17 +227,60 @@ describe('客户端 PROVIDERS 列表（新命名）', () => {
 })
 
 /**
+ * 面板结构：登录入口与积分按钮。
+ *
+ * 这里只断言**面板的渲染条件**，不渲染组件 —— 本仓库把 react 排除在依赖之外
+ * （`jet-hub-credit-balance-row.spec.ts` 的文件头有完整说明）。金额/双池那类
+ * 「分支输出差异」已经由那个文件用整树深比较守住，本组只管辖「谁渲染、谁不渲染」。
+ */
+describe('Trae CN Work 面板的结构（源码级回归）', () => {
+  const source = readClientSource()
+
+  it('「+ 新建账号」按 provider 渲染，且判定来自 loginHint 而不是散落的字面量比较', () => {
+    // 面板里**不得**出现 `provider === 'trae-cn-work'` 这类判断：新增共用账号的
+    // provider 时，散落的条件会被漏改一处，而漏改的表现是「按钮还在，点了报
+    // unknown provider」—— 用户只会觉得功能坏了。
+    const start = source.indexOf('const all = models || [];')
+    expect(start).toBeGreaterThan(-1)
+    const panel = source.slice(start)
+    expect(panel).toContain('canCreateAccount')
+    expect(panel).toContain('loginHint')
+    // 判定函数把「有没有 loginHint」翻译成「能不能建账号」，且**默认能**。
+    expect(source).toMatch(/const canCreateAccount = loginHint === null;/)
+    expect(source).toMatch(/function providerLoginHint\(provider\)/)
+  })
+
+  it('积分能力仍然只在宿主判定的两处消费，面板不新增 provider 字面量分支', () => {
+    // 能力矩阵是唯一真相源（见 credits-capabilities.js 的文件头）。
+    // Work 面板的积分行与「刷新积分」按钮都走 `canLoadCredits`，
+    // 不因为它是 Work 而另写一条路径。
+    expect(source).toContain('supportsCreditBalance(provider)')
+    expect(source).toContain('showCredits: canLoadCredits')
+    // 签到按钮仍按能力渲染 —— Work 面板没有它（矩阵里 dailyCheckin 为 false）。
+    expect(source).toContain('supportsDailyCheckin(provider)')
+    expect(source).toContain('if (!supportsCredits) return;')
+  })
+
+  it('账号列表请求发的是**面板 id**，映射不在客户端做', () => {
+    // 映射收敛在宿主 `poolProviderFor()`。客户端若也映射一次，宿主那几个按池
+    // 过滤的分支就必须跟着改，同一件事写两遍且可能分叉。
+    expect(source).toContain("rpcCall('account.list', { provider })")
+    expect(source).not.toContain("rpcCall('account.list', { provider: 'trae-cn' })")
+  })
+})
+
+/**
  * `PROVIDERS` 条目的匹配器。
  *
- * `[a-z-]+` 而不是 `[a-z]+`：provider id 允许带连字符（`trae-cn` 就是），
- * 而只认小写字母的正则会让**带连字符的条目在 `PROVIDERS` 里隐形** ——
+ * `[a-z-]+` 而不是 `[a-z]+`：provider id 允许带连字符（`trae-cn` / `trae-cn-work`
+ * 都是），而只认小写字母的正则会让**带连字符的条目在 `PROVIDERS` 里隐形** ——
  * 匹配不进 `providerIds`，于是「集合相等」这条断言在漏登记时反而是绿的。
  */
 const PROVIDER_ENTRY_PATTERN = /\{\s*id:\s*'([a-z-]+)',\s*label:/g
 
-/** 同上，但连 `label` / `icon` / `logoClass` 一起抓，供显示名与类名的断言使用。 */
+/** 同上，但连 `label` / `icon` / `logoClass`（及可选的 `loginHint`）一起抓，供显示名与类名的断言使用。 */
 const PROVIDER_FULL_ENTRY_PATTERN =
-  /\{\s*id:\s*'([a-z-]+)',\s*label:\s*'([^']*)',\s*icon:\s*([A-Z0-9_]+),\s*logoClass:\s*'([a-z-]+)'\s*\}/g
+  /\{\s*id:\s*'([a-z-]+)',\s*label:\s*'([^']*)',\s*icon:\s*([A-Z0-9_]+),\s*logoClass:\s*'([a-z-]+)'(?:,\s*loginHint:\s*'([^']*)')?,?\s*\}/g
 
 /** 读取客户端 bundle 的源码（未打包的 plugin-src 版本）。 */
 function readClientSource(): string {
@@ -253,8 +337,7 @@ describe('客户端积分请求门控（源码级回归）', () => {
     expect(guardIndex).toBeLessThan(callIndex)
   })
 
-  it('「刷新积分」按钮与账号卡片的「积分」行都按能力渲染', () => {
-    // 归一化 CRLF：本仓库源码在 Windows 上是 CRLF，直接比对多行字面量会假失败。
+  it('「刷新积分」按钮与账号卡片的「积分」行都按能力渲染', () => {    // 归一化 CRLF：本仓库源码在 Windows 上是 CRLF，直接比对多行字面量会假失败。
     const normalized = source.replace(/\r\n/g, '\n')
     expect(normalized).toMatch(/canLoadCredits\s*\n\s*\? React\.createElement\('button'/)
     expect(normalized).toContain('showCredits: canLoadCredits')

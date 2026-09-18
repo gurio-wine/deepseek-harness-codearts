@@ -16,8 +16,12 @@ deepseek-harness 插件：执行 CodeArts（华为云）登录流程，默认走
 - **trae-cn（Trae CN）** — 见
   [Trae CN provider](#trae-cn-provider字节跳动-trae-国内版)；
   后端已实现签到与积分余额（双池），前端能力矩阵登记见该节说明。
+- **trae-cn-work（Trae CN Work）** — Trae CN 的第二条路径（TraeWork 网页协议，
+  扣 Work 专属积分池），见
+  [Trae CN Work provider](#trae-cn-work-providertraework-网页协议)；Account Hub
+  面板**共用 Trae CN 的账号**，只提供双池积分行与模型开关。
 
-五个 provider 的 Account Hub 面板都提供「**显示列表**」按钮，可逐个开关模型以控制其
+六个 provider 的 Account Hub 面板都提供「**显示列表**」按钮，可逐个开关模型以控制其
 是否出现在对话框的模型选择里（黑名单制，默认全部显示）——
 见 [模型列表开关](#模型列表开关黑名单)。
 
@@ -244,6 +248,10 @@ Tokens 福利）。
 `trae-cn-work`（见 [Trae CN Work provider](#trae-cn-work-providertraework-网页协议)）。
 六者互不覆盖，可同时使用。
 
+> `trae-cn-work` 与 `trae-cn` 是**同一批账号**（Work 无独立登录，见
+> [Account Hub 里的 Trae CN Work 面板](#account-hub-里的-trae-cn-work-面板)），
+> 但它们注册成**两个路由**：协议不同源、模型池不重合、扣的是两个互不通用的积分池。
+
 ## 凭证
 
 - Ref：`CODEARTS_ACCESS_TOKEN`（POSIX 标识符格式的凭证 ref）。
@@ -452,9 +460,12 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 - **只影响目录播报，不改变路由能力**：被关闭的模型仍可被 `resolveModel` 解析、
   仍能正常收发请求。这是 DSH 对 `listModels` 的约定（目录是建议性的，缺省不构成
   请求拒绝）。好处是已有会话若正用着某个被关闭的模型，不会被强制中断。
-- 开关按 provider 隔离，Codearts / Buddy CN / Buddy / LobsterAI / Trae CN
-  五份黑名单互不影响。改名迁移会把这五份的 provider 键一并搬到新命名，见
-  「provider 改名与数据迁移」。
+- 开关按 provider 隔离，Codearts / Buddy CN / Buddy / LobsterAI / Trae CN /
+  Trae CN Work **六份黑名单互不影响**。改名迁移会把这六份的 provider 键一并搬到
+  新命名，见「provider 改名与数据迁移」。
+- Trae CN Work 是独立的第六份：两个池的模型 id 完全不重合，共用一份黑名单会让
+  关闭 IDE 的某个模型连带影响 Work 路径（`TraeCnWorkAdapter.listModels` 读的正是
+  `trae-cn-work` 这个键）。
 - 相关 RPC 端点：`model.list`（列出模型并回填 `disabled`）、`model.setDisabled`
   （打开/关闭单个模型），实现见 `src/jet-hub-rpc.ts`。
 
@@ -524,13 +535,25 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 > 「查询失败」。修法是不发起该请求——后端 `productById()` 的拒绝是正确的
 > 契约行为，不该被当作运行时故障展示。
 
+**Trae CN Work 面板显示同一份双池余额**：`credits.balances` 收到 `trae-cn-work`
+时由 `src/jet-hub-rpc.ts` 的 `poolProviderFor()` 映射到 `trae-cn` 的**同一个实现**
+（同批账号、同端点、同 `workTotal` 拆分）。刻意不新写一套 Work 专用逻辑——
+余额是**账号属性**，不是路径属性。Work 面板因此能直接回答它存在的那个问题：
+Work 池还剩多少。
+
+**但 Work 面板不显示签到按钮**（矩阵里 `dailyCheckin: false`）：签到是账号级、
+当日一次的操作，两个面板都放按钮必然导致同一账号重复领取。详见
+[Account Hub 里的 Trae CN Work 面板](#account-hub-里的-trae-cn-work-面板)。
+
 ### 一键领取积分（每日签到）
 
 **当前由 Buddy CN、LobsterAI 与 Trae CN 三个面板提供**该按钮。签到在本插件里
 共有**三套互不相通的实现**（Buddy CN / LobsterAI / Trae CN，协议、端点、幂等
 判据全不同，各自独立成文件）；三者的客户端能力登记均已落地，故三个面板都显示
 该按钮。Codearts 是华为云账号体系不参与；Buddy（国际版）后端没有签到接口，
-故其面板不显示。详见「积分余额」一节末尾的说明。
+故其面板不显示；**Trae CN Work 与 Trae CN 是同一批账号**，签到已在 Trae CN
+面板提供，故本面板刻意不显示（否则同一账号两处领取）。详见「积分余额」
+一节末尾的说明。
 
 在 Account Hub 对应面板标题栏点击「**一键领取积分**」，插件会对该面板下
 **全部账号**顺序执行每日签到领取：
@@ -1325,4 +1348,38 @@ Work 的码表**没有任何实测样本**（真机两轮全绿，一帧错误�
 
 三轮实测的 Work 池扣费分别为 **0.0616 / 0.0652 / 0.0572 / 0.0568**
 （前两轮为裸协议探针，后两轮走适配器），通用池**全程 0.0000**。
+
+### Account Hub 里的 Trae CN Work 面板
+
+`PROVIDERS` 含 **Trae CN Work** 一栏（排在 Trae CN 之后），能力矩阵登记为
+`balance ✓ / dailyCheckin ✗`。它与 Trae CN 面板的关系是**同一批账号的两个视图**：
+
+| 项 | Trae CN Work 面板 |
+|---|---|
+| 账号列表 | **与 Trae CN 完全相同**（同批 `TRAE_CN_ACCOUNT_*`、同一套限流切换） |
+| 积分行 | ✓ 双池「通用 X / Work Y」（同一个端点、同一份返回） |
+| 「刷新积分」 | ✓ |
+| 「一键领取积分」 | ✗ **刻意不渲染** —— 签到留在 Trae CN 面板 |
+| 「+ 新建账号」 | ✗ **刻意不渲染** —— 改为一行提示「与 Trae CN 共用账号，请在 Trae CN 面板登录」 |
+| 卡片操作（刷新 / 删除 / 启停 / 重测 / 重置） | ✓ 照常（按 accountId / credentialRef 操作，与面板无关）|
+| 「显示列表」（模型开关） | ✓ 作用于 **`trae-cn-work` 这个键**（两个池的模型不重合，黑名单必须分开） |
+
+**为什么签到不在本面板**：签到是**账号级、当日一次**的操作，与走哪条路径无关。
+两个面板都放按钮，必然导致同一个账号在两处重复领取 —— 第二次点击只会得到
+「今天已签到」，在用户看来就是按钮坏了。
+
+**为什么没有登录入口**：Work 没有独立登录协议，它的账号与凭据完全复用 Trae CN。
+两个面板各放一个登录按钮，用户会在「到底该在哪个面板登录」上反复试错，而两条
+入口写的是同一份数据。
+
+**面板 id → 账号池键的映射收敛在一处**：`src/jet-hub-rpc.ts` 的 `poolProviderFor()`
+把 `trae-cn-work` 映射成 `TraeCnWorkProduct.poolProviderId`（`trae-cn`），
+取代了积分三端点里原本硬编码的 `req.provider === TRAE_CN.id`。客户端**发的是面板
+id**、不做任何映射 —— 若在客户端映射，宿主那几个按池过滤的分支就必须跟着改，
+同一件事写两遍且可能分叉。
+
+刻意**不**映射的两个入口：`account.create`（映射会让二次点击给同一份凭据建出
+第二个占位账号）与 `model.list` / `model.setDisabled`（黑名单按 provider id 存，
+映射过去会把 Work 的开关写进 IDE 路径的黑名单）。锁死这些语义的是
+`tests/unit/trae-cn-work-hub-panel.spec.ts`。
 

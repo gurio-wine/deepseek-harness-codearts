@@ -34,7 +34,7 @@
 
 `trae-cn`（字节跳动 **Trae 国内版**）同样完全不同源，独立一套 `src/trae-cn*.ts`。**登录协议已用真机校准（2026-09-17）**：本地回调 + **PKCE(S256)**，回调投递 `authCodeInfo`（双重编码 JSON）→ `POST /trae/api/v3/oauth/ExchangeToken`（body 五字段 `{ClientID, AuthCode, CodeVerifier, DeviceInfo, IDEVersion}`）；续期走**另一个**端点 `POST /cloudide/api/v3/trae/oauth/ExchangeToken`（body 四字段），鉴权用 `Cloud-IDE-JWT`。**登录 URL 的 `client_id` 是 snake_case**（写成 `clientID` 会让授权页停在「认证中」，是曾经的报障根因），且必须带 `auth_type=local` / `login_channel=native_ide` / `login_version=1` 与 PKCE 参数。**产品配置 + 认证 + 模型路由（`src/trae-cn-adapter.ts`）+ 签到与积分余额（`src/trae-cn-credits.ts`）均已实现**。三个关键事实决定了它的适配器与其它 provider 结构不同：**SSE 是具名事件流**（`event:output`，不是 OpenAI 的 `data:{choices}`）、**业务失败发生在 HTTP 200 的 `event:error` 帧里**（故换号循环必须接住流内失败，错误分类按业务码而非状态码，见 `src/trae-cn-errors.ts`）、**签到必须带设备四件套**（见「积分领取」）。**T5 / T6 / T7 / T9 均已真机校准**（2026-09-18）：T6 的真实病因是 **host** 而非路径（`/api/ide/*` 不在 `api.trae.cn`，在 IDE 网关 `TRAE_CN_IDE_API_BASE`；路径 `/api/ide/v1/chat` 本来就对，且必须带齐 `x-app-id` / **纯数字** `x-ide-version-code` 等全套网关头）；T7 余额端点**无 code 信封**、礼包在根层 `user_entitlement_pack_list`、额度嵌在 `entitlement_base_info...quota.credits_limit` 减 `usage.credits_amount`；T9 签到**不校验设备号形态**（只认设备头是否存在）。**模型目录刻意走真机 16 项静态表、不接远端**（三端点实测只回旧池/seed，新池任何 HTTP 端点都拿不到，详见 README 的「Trae CN provider」章节）。**思考档位已接线**：13/16 项声明 `reasoning`（档位取自真机 vscdb 的 `reasoning_effort_config`，**`chat_v3` 那套、不是 `solo_agent`** ——两者默认档不同），id 逐字符照抄 `light`/`high`/`extra_high`，**下发字段名是 `reasoning_effort_level`**（`reasoning_effort` 是字节内网账号那套，已由官方 bundle + `ai_agent.dll` 三方互证；真机 A/B 因账号回 4008 配额而无法区分字段名，「档位是否真生效」仍未验证）。
 
-Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**由 Buddy CN、LobsterAI 与 Trae CN 三个面板提供** —— Buddy（国际版）后端没有签到接口，Codearts 是华为云账号体系不参与。Trae CN 的签到与余额**前后端及宿主接线均已就绪**（`src/trae-cn-credits.ts` + 客户端能力矩阵 + `jet-hub-rpc.ts` 三处分支与 `traeCn` 实例传参）。T5 / T7 / T9 均已真机校准，见「积分能力必须在请求前判定」与 README 的「Trae CN provider」章节。
+Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**由 Buddy CN、LobsterAI 与 Trae CN 三个面板提供** —— Buddy（国际版）后端没有签到接口，Codearts 是华为云账号体系不参与，Trae CN Work **与 Trae CN 是同一批账号**故签到只在后者提供。Trae CN 的签到与余额**前后端及宿主接线均已就绪**（`src/trae-cn-credits.ts` + 客户端能力矩阵 + `jet-hub-rpc.ts` 三处分支与 `traeCn` 实例传参）。T5 / T7 / T9 均已真机校准，见「积分能力必须在请求前判定」与 README 的「Trae CN provider」章节。**六个 provider 都有 Account Hub 面板**（Trae CN Work 那条见下节）。
 
 ### Trae CN Work（`trae-cn-work`）—— 第二条 Trae CN 路径
 
@@ -63,7 +63,25 @@ Work **没有独立登录**：账号、凭据（`TRAE_CN_ACCOUNT_*`）、限流�
 - **错误分类以 HTTP 状态码为主**：Work 码表**未标定**（真机两轮全绿、一帧错误未遇），未知业务码**一律直报并带原文**，不猜动作；`fail` 不映射 `CONTEXT_WINDOW_EXCEEDED`（会误触发 DSH 的上下文压缩，真实改写用户会话）；
 - **思考档 v1 不声明**：真机目录里唯一的 `reasoning_effort_config` 是 `support_thinking:false`。
 
-**Account Hub 刻意不加本 provider 的面板**：`PROVIDERS` 列表与 `credits-capabilities.js` 都**不含** `trae-cn-work` —— 账号管理、积分查询、签到全在 Trae CN 面板（同一批账号），加了只会产生空面板与重复积分行。
+**Account Hub 有本 provider 的面板**（`PROVIDERS` 第六条，排在 `trae-cn` 之后；能力矩阵登记 `balance: true, dailyCheckin: false`）。它与 Trae CN 面板是**同一批账号的两个视图**：
+
+| 项 | Trae CN Work 面板 |
+|---|---|
+| 账号列表 | **与 Trae CN 完全相同**（同批 `TRAE_CN_ACCOUNT_*`、同一套限流切换） |
+| 积分行 / 「刷新积分」 | ✓ 双池「通用 X / Work Y」（同一端点、同一份返回） |
+| 「一键领取积分」 | ✗ **刻意不渲染** —— 签到留在 Trae CN 面板 |
+| 「+ 新建账号」 | ✗ **刻意不渲染** —— 改为一常驻提示行（`PROVIDERS` 条目的可选字段 `loginHint`） |
+| 卡片操作（刷新 / 删除 / 启停 / 重测 / 重置） | ✓ 照常（按 accountId / credentialRef 操作，与面板 id 无关） |
+| 「显示列表」 | ✓ 作用于 **`trae-cn-work` 键**（两池模型不重合，黑名单必须分开） |
+
+**面板 id → 账号池键的映射收敛在 `src/jet-hub-rpc.ts` 的 `poolProviderFor()` 一处**（客户端不做映射，发的就是面板 id）。它取代了积分三端点原先硬编码的 `req.provider === TRAE_CN.id`，取值引用 `TraeCnWorkProduct.poolProviderId` 而**不是**再抄一份 `'trae-cn'` 字面量。应用点六处：`account.list` / `account.retestAll` / `account.resetAll` / `credits.status` / `credits.claimAll` / `credits.balances`。
+
+⚠️ **刻意不映射的两个入口**，改错都是静默的：
+
+- **`account.create`**：映射会让面板多出的二次点击给同一份凭据建出**第二个** `trae-cn-<shortId>` 占位账号。该入口对 `trae-cn-work` 保持 `unknown provider` 拒绝。
+- **`model.list` / `model.setDisabled`**：黑名单按 provider id 存，映射过去会把 Work 的开关写进 IDE 路径的黑名单（`TraeCnWorkAdapter.listModels` 读的正是 `trae-cn-work` 键）。
+
+`tests/unit/trae-cn-work-hub-panel.spec.ts` 用真实 RPC 分派锁死上述全部语义；`credits-capabilities.spec.ts` 的「集合相等」断言已从五条同步到六条，并新增「`loginHint` 只允许出现在 Work 条目上」。
 
 - **包名**：`dsh-account-hub`
 - **入口**：`lib/index.js`（宿主侧）、`lib/client/jet-hub.js`（客户端 bundle）
@@ -181,7 +199,7 @@ Work **没有独立登录**：账号、凭据（`TRAE_CN_ACCOUNT_*`）、限流�
 
 ## LLM Provider 约定
 
-- **provider 名称**：`codearts` / `buddy-cn` / `buddy` / `lobsterai` / `trae-cn`
+- **provider 名称**：`codearts` / `buddy-cn` / `buddy` / `lobsterai` / `trae-cn` / `trae-cn-work`
 - **provider id 与 cordis 服务名是两件事**，不要机械派生。默认规则是
   `${product.id}Auth`，但**带连字符的 id 都要显式声明 `serviceName`**：
   `trae-cn` → `traeCnAuth`，`buddy-cn` → `buddyCnAuth`（`BuddyProduct` 已有
@@ -271,6 +289,7 @@ Work **没有独立登录**：账号、凭据（`TRAE_CN_ACCOUNT_*`）、限流�
 | `buddy` | ✓ | ✗（国际版后端无签到接口） |
 | `lobsterai` | ✓ | ✓（`client-activities` 三步流程） |
 | `trae-cn` | ✓（双池，见下） | ✓（`checkin_credits` 两步 + 设备头） |
+| `trae-cn-work` | ✓（双池，与 `trae-cn` 同一批账号、同一个实现） | ✗（签到留在 Trae CN 面板，避免同账号重复领取） |
 
 > ⚠️ **改名的语义翻转点就在这里**：矩阵里 `buddy` 这个键**换了主人** ——
 > 旧 `buddy`（中国版，✓✓）让位给 `buddy-cn`，旧 `workbuddy`（国际版，✓✗）

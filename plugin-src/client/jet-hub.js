@@ -35,6 +35,20 @@ const LOBSTERAI_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy
  */
 const TRAE_CN_ICON = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiByeD0iMy42OTIiIGZpbGw9IiMxQTFCMUQiLz48cGF0aCBkPSJNMTMuMjM1IDUuODI5VjQuMzMySDIuNzU4djUuOTg3aDEuNDk2djEuNDk2aDguOTgxVjUuODI4Wm0tMS40OTcgNC40OUg0LjI1NFY1LjgzaDcuNDg0djQuNDlaIiBmaWxsPSIjMzJGMDhDIi8+PHBhdGggZD0iTTYuOTM3IDYuOTkzIDUuODggOC4wNTEgNi45MzcgOS4xMSA3Ljk5NSA4LjA1IDYuOTM3IDYuOTkzWk05LjkzMSA2Ljk5MiA4Ljg3MyA4LjA1IDkuOTMxIDkuMTEgMTAuOTkgOC4wNSA5LjkzIDYuOTkyWiIgZmlsbD0iIzMyRjA4QyIvPjwvc3ZnPg=='
 
+/**
+ * Trae CN **Work** 面板图标：与 `TRAE_CN_ICON` **同一个 base64**，不新造图。
+ *
+ * 两个 provider 是同一个产品的两条路径（Work 复用 Trae CN 的账号与凭据，
+ * 见 `src/trae-cn-work-product.ts` 的 `poolProviderId`），品牌标识本就该一致；
+ * 面板标签靠 `label`（Trae CN / Trae CN Work）区分，不靠图标。
+ *
+ * 仍单独起一个常量名而不是在 `PROVIDERS` 里直接复用 `TRAE_CN_ICON`：条目与图标
+ * 一一对应，将来若拿到 TraeWork 专属标识只需改这一处，不必回头拆条目；
+ * 也让 `tests/unit/credits-capabilities.spec.ts` 的「图标常量名跟着产品走」
+ * 那组断言对六个 provider 一视同仁。
+ */
+const TRAE_CN_WORK_ICON = TRAE_CN_ICON
+
 const PROVIDERS = Object.freeze([
   { id: 'codearts', label: 'Codearts', icon: CODEARTS_ICON, logoClass: 'codearts' },
   { id: 'buddy-cn', label: 'Buddy CN', icon: BUDDY_CN_ICON, logoClass: 'buddy-cn' },
@@ -47,8 +61,35 @@ const PROVIDERS = Object.freeze([
   // 「WorkBuddy (国际版)」「LobsterAI (有道)」「Trae CN (字节跳动)」）。
   // 图标常量名同样跟着产品走：`BUDDY_CN_ICON` 是中国版那份，`BUDDY_ICON` 是
   // 国际版那份（两者在改名时**没有**换过图标本体，只换了常量名与归属）。
+  // `TRAE_CN_ICON` 归 `trae-cn`、`TRAE_CN_WORK_ICON` 归 `trae-cn-work`（两者
+  // 内容相同，见常量处说明）。
   { id: 'trae-cn', label: 'Trae CN', icon: TRAE_CN_ICON, logoClass: 'trae-cn' },
+  // Trae CN **Work**：同一个产品的第二条路径（TraeWork 网页协议、扣 Work 池）。
+  // `loginHint` 是**可选字段**，只有它带 —— 见下面对该字段的说明。
+  {
+    id: 'trae-cn-work',
+    label: 'Trae CN Work',
+    icon: TRAE_CN_WORK_ICON,
+    logoClass: 'trae-cn-work',
+    loginHint: '与 Trae CN 共用账号：请在 Trae CN 面板登录（本面板的账号、凭据、限流切换全部复用 Trae CN）。',
+  },
 ]);
+
+/**
+ * 面板自己的**登录入口提示**；`null` 表示该面板自己提供「+ 新建账号」按钮。
+ *
+ * `PROVIDERS` 条目缺省都有登录入口；只有 `trae-cn-work` 用 `loginHint` 显式
+ * 声明自己没有。理由：Work **没有独立登录协议**，它建账号会写入同一份
+ * `TRAE_CN_ACCOUNT_*` 凭据体系 —— 两个面板各放一个登录按钮，用户会在
+ * 「我到底该在哪个面板登录」上反复试错，而两条入口写的是同一份数据。
+ *
+ * 默认**显示**按钮（判据是「有没有 loginHint」而不是「有没有某个 true 标志」）：
+ * 将来新增 provider 忘记声明时，最坏结果是多一个本来就能用的按钮，
+ * 而不是把一个能登录的面板变成没有入口的死面板。
+ */
+function providerLoginHint(provider) {
+  return PROVIDERS.find(p => p.id === provider)?.loginHint || null;
+}
 
 /**
  * 积分能力判定见 `./credits-capabilities.js`。
@@ -515,6 +556,11 @@ function ProviderPanel({ provider, rpcCall }) {
     setPhase('loading');
     setError(null);
     try {
+      // 这里**发的是面板 id**（如 `trae-cn-work`），不是它背后的账号池键。
+      // 「面板 id → 池键」的映射收敛在宿主（`src/jet-hub-rpc.ts` 的
+      // `poolProviderFor()`）：共用账号的 provider 若在客户端也映射一次，
+      // 宿主那几个按池过滤的分支就必须跟着改，同一件事写两遍。
+      // 客户端只管把面板 id 原样送出去。
       const res = await rpcCall('account.list', { provider });
       if (!mounted.current) return;
       const list = res.accounts || [];
@@ -542,6 +588,9 @@ function ProviderPanel({ provider, rpcCall }) {
   const canLoadCredits = supportsCreditBalance(provider);
   // 只有支持签到能力的 provider（当前是 Buddy CN / LobsterAI / Trae CN）渲染领取按钮。
   const supportsCredits = supportsDailyCheckin(provider);
+  // 本面板是否自己提供登录入口（null = 提供；见 providerLoginHint 的说明）。
+  const loginHint = providerLoginHint(provider);
+  const canCreateAccount = loginHint === null;
 
   /**
    * 拉取本页全部账号的积分余额。
@@ -859,13 +908,23 @@ function ProviderPanel({ provider, rpcCall }) {
           disabled: probeBusy !== null || accounts.length === 0,
           onClick: () => void runLimitAction('resetAll'),
         }, '重置所有'),
-        React.createElement('button', {
-          className: 'dim-jh-btn',
-          'data-kind': 'primary',
-          title: '通过浏览器登录一个新的账号并加入账号池。',
-          onClick: () => void createAccount(),
-          disabled: creating,
-        }, creating ? '正在登录…' : '+ 新建账号'))),
+        // 「+ 新建账号」按 provider 的能力渲染：共用账号的 provider（Trae CN Work）
+        // 不渲染按钮，改为下面那行提示文案 —— 见 providerLoginHint。
+        canCreateAccount
+          ? React.createElement('button', {
+              className: 'dim-jh-btn',
+              'data-kind': 'primary',
+              title: '通过浏览器登录一个新的账号并加入账号池。',
+              onClick: () => void createAccount(),
+              disabled: creating,
+            }, creating ? '正在登录…' : '+ 新建账号')
+          : null)),
+    // 共用账号的 provider（Trae CN Work）在这里说明登录入口在哪。
+    // 刻意做成**常驻提示行**而不是「+ 新建账号」按钮的 disabled 形态：
+    // 按钮点了没反应只会让用户以为坏了，而这里要传达的是「去别处登录」。
+    loginHint
+      ? React.createElement('p', { className: 'dim-jh-loginHint' }, loginHint)
+      : null,
     probeNotice
       ? React.createElement('div', {
           className: 'dim-jh-probeNotice',
@@ -907,7 +966,12 @@ function ProviderPanel({ provider, rpcCall }) {
         : accounts.length === 0
           ? React.createElement('div', { className: 'dim-jh-empty' },
               React.createElement('p', null, '尚未配置账号'),
-              React.createElement('p', null, '点击"+ 新建账号"进行浏览器登录。'))
+              // 共用账号的 provider（Trae CN Work）账号为空时的下一步不是
+              // 「在本面板新建」，而是「回 Trae CN 面板登录」—— 否则用户点进
+              // 这里看到空白，会以为这个 provider 没接通。
+              React.createElement('p', null, canCreateAccount
+                ? '点击"+ 新建账号"进行浏览器登录。'
+                : '请先在上方提示的 Trae CN 面板登录账号。'))
           : React.createElement('div', null,
               accounts.map(account => React.createElement(AccountCard, {
                 key: account.id,
