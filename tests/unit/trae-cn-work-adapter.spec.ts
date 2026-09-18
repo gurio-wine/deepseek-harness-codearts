@@ -24,9 +24,12 @@ import {
 } from '../../src/trae-cn-work-adapter.js'
 import {
   TRAE_CN_WORK,
+  TRAE_CN_WORK_AGENT_TYPE,
   TRAE_CN_WORK_DEFAULT_MODEL,
   TRAE_CN_WORK_FALLBACK_MODELS,
+  TRAE_CN_WORK_MODELS_FUNCTIONS,
   TRAE_CN_WORK_MODELS_PATH,
+  TRAE_CN_WORK_MODELS_QUERY,
   TRAE_CN_WORK_SESSIONS_PATH,
 } from '../../src/trae-cn-work-product.js'
 import {
@@ -799,16 +802,83 @@ describe('Trae CN Work 模型目录：远端解析', () => {
     expect(parseTraeCnWorkModels({ data: [{ name: 'a' }] })).toEqual([])
   })
 
-  it('多个 function 分组的模型被合并', () => {
+  it('**只取本 agent（solo_agent_remote）那组**，不把别组拼进来', () => {
+    // 多组时只认 function === solo_agent_remote —— 别的池的模型列出来也路由不到。
     const models = parseTraeCnWorkModels({
       data: {
         list: [
-          { function: 'solo_coder', models: [{ name: 'a' }, { name: 'b' }] },
-          { function: 'other', models: [{ name: 'c' }] },
+          { function: 'solo_coder', models: [{ name: 'Doubao-Seed-2.0-Code' }] },
+          { function: 'solo_agent_remote', models: [{ name: 'glm-5.3' }, { name: 'kimi-k3' }] },
+          { function: 'solo_work_remote', models: [{ name: 'qwen3.8-max' }] },
         ],
       },
     })
-    expect(models.map((m) => m.id)).toEqual(['a', 'b', 'c'])
+    expect(models.map((m) => m.id)).toEqual(['glm-5.3', 'kimi-k3'])
+  })
+
+  it('**多组但没有本组时返回空**（宁可回退静态表，也不拼出不可路由的目录）', () => {
+    // 这是本次修复前的缺陷形态：拼接多组会把别的池的模型列给用户。
+    expect(parseTraeCnWorkModels({
+      data: {
+        list: [
+          { function: 'solo_coder', models: [{ name: 'a' }] },
+          { function: 'solo_work_remote', models: [{ name: 'b' }] },
+        ],
+      },
+    })).toEqual([])
+  })
+
+  it('只有一组时容忍（服务端忽略 functions 参数的情形）', () => {
+    const models = parseTraeCnWorkModels({
+      data: { list: [{ function: 'solo_coder', models: [{ name: 'a' }, { name: 'b' }] }] },
+    })
+    expect(models.map((m) => m.id)).toEqual(['a', 'b'])
+  })
+
+  it('本组存在但为空数组时不回退别组（返回空 → 静态表）', () => {
+    expect(parseTraeCnWorkModels({
+      data: {
+        list: [
+          { function: 'solo_agent_remote', models: [] },
+          { function: 'solo_coder', models: [{ name: 'a' }] },
+        ],
+      },
+    })).toEqual([])
+  })
+
+  it('**思考档只在 support_thinking 为 true 且 options 非空时解析**', () => {
+    const models = parseTraeCnWorkModels({
+      data: {
+        list: [{
+          function: 'solo_agent_remote',
+          models: [
+            { name: 'a', reasoning_effort_config: { support_thinking: true, options: ['light', 'high'], default_level: 'high' } },
+            { name: 'b', reasoning_effort_config: { support_thinking: false, options: null, default_level: '' } },
+            { name: 'c', reasoning_effort_config: { support_thinking: true, options: [], default_level: 'high' } },
+            { name: 'd' },
+          ],
+        }],
+      },
+    })
+    expect(models[0]?.reasoningEfforts).toEqual(['light', 'high'])
+    expect(models[0]?.defaultReasoningEffort).toBe('high')
+    // 不支持的三项都不带档位字段（不给上游发无效档位）。
+    expect(models[1]?.reasoningEfforts).toBeUndefined()
+    expect(models[2]?.reasoningEfforts).toBeUndefined()
+    expect(models[3]?.reasoningEfforts).toBeUndefined()
+  })
+
+  it('default_level 不在 options 内时**只丢默认档、保留档位列表**', () => {
+    const models = parseTraeCnWorkModels({
+      data: {
+        list: [{
+          function: 'solo_agent_remote',
+          models: [{ name: 'a', reasoning_effort_config: { support_thinking: true, options: ['light'], default_level: 'high' } }],
+        }],
+      },
+    })
+    expect(models[0]?.reasoningEfforts).toEqual(['light'])
+    expect(models[0]?.defaultReasoningEffort).toBeUndefined()
   })
 
   it('结构不符时返回空数组（调用方据此回退静态表）', () => {
@@ -823,14 +893,27 @@ describe('Trae CN Work 模型目录：远端解析', () => {
 })
 
 describe('Trae CN Work 模型目录：静态兜底表', () => {
-  it('真机 12 项，id 逐字符（与 IDE 池完全不重合）', () => {
-    expect(TRAE_CN_WORK_FALLBACK_MODELS).toHaveLength(12)
+  it('真机 **14 项**，id 逐字符（`solo_agent_remote` 组）', () => {
+    expect(TRAE_CN_WORK_FALLBACK_MODELS).toHaveLength(14)
     const ids = TRAE_CN_WORK_FALLBACK_MODELS.map((m) => m.id)
     expect(ids).toEqual([
-      'Doubao-Seed-2.0-Code', 'Doubao-Seed-Code', 'minimax-m2.7', 'glm-5.1',
-      'glm-5v-turbo', 'glm-5', 'DeepSeek-V4-Pro', 'DeepSeek-V4-Flash',
-      'kimi-k2.6', 'kimi-k2.5', 'qwen-3.6-plus', 'qwen-3.5',
+      'Doubao-Seed-Evolving', 'Doubao-Seed-2.1-Pro', 'Doubao-Seed-2.1-Turbo',
+      'Doubao-Seed-Code', 'glm-5.3', 'glm-5.2',
+      'DeepSeek-V4-Flash-Official', 'DeepSeek-V4-Pro-Official',
+      'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6', 'minimax-m3',
+      'qwen3.8-max', 'qwen-3.7-plus',
     ])
+  })
+
+  it('**旧 `solo_coder` 组的 id 全部清出**（它们在本 agent 的池里不存在）', () => {
+    const ids = new Set(TRAE_CN_WORK_FALLBACK_MODELS.map((m) => m.id))
+    // 这 11 项是修前那张表的成员，全部属于另一个池 —— 留着就是「选中即路由失败」。
+    for (const stale of [
+      'Doubao-Seed-2.0-Code', 'minimax-m2.7', 'glm-5.1', 'glm-5v-turbo', 'glm-5',
+      'DeepSeek-V4-Pro', 'DeepSeek-V4-Flash', 'kimi-k2.5', 'qwen-3.6-plus', 'qwen-3.5',
+    ]) {
+      expect(ids.has(stale)).toBe(false)
+    }
   })
 
   it('默认模型在表里且 is_default 的那一项是 Doubao-Seed-Code', () => {
@@ -841,6 +924,34 @@ describe('Trae CN Work 模型目录：静态兜底表', () => {
     for (const model of TRAE_CN_WORK_FALLBACK_MODELS) {
       expect(model.contextWindow).toBeGreaterThan(0)
       expect(model.consumptionRate).toBeGreaterThan(0)
+    }
+  })
+
+  it('**9 项声明思考档，5 项不声明**（逐字符照抄真机 options）', () => {
+    const withEfforts = TRAE_CN_WORK_FALLBACK_MODELS.filter((m) => m.reasoningEfforts !== undefined)
+    expect(withEfforts.map((m) => m.id)).toEqual([
+      'Doubao-Seed-2.1-Pro', 'Doubao-Seed-2.1-Turbo', 'Doubao-Seed-Code',
+      'glm-5.3', 'glm-5.2', 'DeepSeek-V4-Flash-Official', 'DeepSeek-V4-Pro-Official',
+      'kimi-k3', 'qwen3.8-max',
+    ])
+    // 档位取值只允许真机出现过的三个 id。
+    for (const model of withEfforts) {
+      for (const effort of model.reasoningEfforts ?? []) {
+        expect(['light', 'high', 'extra_high']).toContain(effort)
+      }
+      // 默认档必须在档位表内，否则 DSH 会判 INVALID_MODEL_REASONING。
+      expect(model.reasoningEfforts).toContain(model.defaultReasoningEffort)
+    }
+    // glm-5.2 真机只有 high/extra_high（**没有 light**）—— 别照抄其它项的档位表。
+    const glm52 = TRAE_CN_WORK_FALLBACK_MODELS.find((m) => m.id === 'glm-5.2')
+    expect(glm52?.reasoningEfforts).toEqual(['high', 'extra_high'])
+  })
+
+  it('**无思考档的 5 项不声明 reasoningEfforts**', () => {
+    for (const id of ['Doubao-Seed-Evolving', 'kimi-k2.7-code', 'kimi-k2.6', 'minimax-m3', 'qwen-3.7-plus']) {
+      const model = TRAE_CN_WORK_FALLBACK_MODELS.find((m) => m.id === id)
+      expect(model?.reasoningEfforts).toBeUndefined()
+      expect(model?.defaultReasoningEffort).toBeUndefined()
     }
   })
 })
@@ -891,6 +1002,45 @@ describe('TraeCnWorkAdapter 三段式', () => {
     // query 必须是**字符串**，且能被解析回数组。
     expect(typeof body.query).toBe('string')
     expect(Array.isArray(JSON.parse(body.query as string))).toBe(true)
+    // 未指定档位时**整个 custom_model 都不发**（零行为变更，见 buildCustomModel）。
+    expect(body.custom_model).toBeUndefined()
+  })
+
+  it('**思考档下发在 `custom_model.reasoning_effort_level`**（对象内部，不是顶层）', async () => {
+    const sse = workSse([{ event: 'plan_item', data: realPlanItem('x', 'r') }, { event: 'done', data: {} }])
+    const { adapter, calls } = makeAdapter(threeStageResponder(sse))
+    await collect(adapter, { ...generateOptions(), reasoningEffort: 'high' as never })
+
+    const body = JSON.parse(String(calls[1]!.init?.body)) as Record<string, unknown>
+    // ⚠️ 落点在 custom_model **内部** —— 与 IDE 路径（顶层字段）不同，别统一掉。
+    expect(body.reasoning_effort_level).toBeUndefined()
+    const custom = body.custom_model as Record<string, unknown>
+    expect(custom.reasoning_effort_level).toBe('high')
+    // 真机 bundle 的同一构造式里的固定字段。
+    expect(custom.model_name).toBe('Doubao-Seed-Code')
+    expect(custom.config_name).toBe('Doubao-Seed-Code')
+    expect(custom.config_source).toBe(1)
+    expect(custom.is_preset).toBe(true)
+    expect(custom.use_remote_service).toBe(true)
+    expect(custom.display_model_name).toBe('Seed-Code')
+    // 错名的 `reasoning_effort` 不发（真机 A/B 证明上游只认 _level 那个）。
+    expect(custom.reasoning_effort).toBeUndefined()
+  })
+
+  it('出站身份标识**一个字符不动**（思考档只新增字段，不改既有四件套）', async () => {
+    const sse = workSse([{ event: 'plan_item', data: realPlanItem('x', 'r') }, { event: 'done', data: {} }])
+    const { adapter, calls } = makeAdapter(threeStageResponder(sse))
+    await collect(adapter, { ...generateOptions(), reasoningEffort: 'light' as never })
+    const withEffort = JSON.parse(String(calls[1]!.init?.body)) as Record<string, unknown>
+
+    const sse2 = workSse([{ event: 'plan_item', data: realPlanItem('x', 'r') }, { event: 'done', data: {} }])
+    const second = makeAdapter(threeStageResponder(sse2))
+    await collect(second.adapter, generateOptions())
+    const without = JSON.parse(String(second.calls[1]!.init?.body)) as Record<string, unknown>
+
+    for (const key of ['agent_type', 'agent_id', 'model_selection_strategy', 'origin', 'model_name', 'query']) {
+      expect(withEffort[key]).toEqual(without[key])
+    }
   })
 
   it('请求头**只有鉴权三头 + Content-Type**，不带 IDE 网关全套', async () => {
@@ -1207,27 +1357,27 @@ describe('TraeCnWorkAdapter 模型目录与黑名单', () => {
     expect(models[0]?.inputModalities).toEqual(['text', 'image'])
   })
 
-  it('远端失败 → 回退静态 12 项', async () => {
+  it('远端失败 → 回退静态 **14 项**（solo_agent_remote 组）', async () => {
     const fetchRemoteModels = vi.fn(async () => { throw new Error('network') })
     const { adapter } = makeAdapter(() => new Response('{}'), { fetchRemoteModels })
     const models = await adapter.listModels(PROVIDER)
-    expect(models).toHaveLength(12)
+    expect(models).toHaveLength(14)
   })
 
   it('未注入远端拉取时直接用静态表', async () => {
     const { adapter } = makeAdapter(() => new Response('{}'))
-    expect(await adapter.listModels(PROVIDER)).toHaveLength(12)
+    expect(await adapter.listModels(PROVIDER)).toHaveLength(14)
   })
 
   it('黑名单按 **trae-cn-work** 过滤（不是账号池键 trae-cn）', async () => {
-    const disabledModelsFor = vi.fn(() => new Set(['glm-5.1']))
+    const disabledModelsFor = vi.fn(() => new Set(['glm-5.3']))
     const { adapter } = makeAdapter(() => new Response('{}'), {
       accountPool: { disabledModelsFor } as never,
     })
     const models = await adapter.listModels(PROVIDER)
     expect(disabledModelsFor).toHaveBeenCalledWith('trae-cn-work')
-    expect(models.some((m) => m.id === 'glm-5.1')).toBe(false)
-    expect(models).toHaveLength(11)
+    expect(models.some((m) => m.id === 'glm-5.3')).toBe(false)
+    expect(models).toHaveLength(13)
   })
 
   it('模型条目带 provider 描述（唯一能承载该文案的位置）', async () => {
@@ -1236,12 +1386,26 @@ describe('TraeCnWorkAdapter 模型目录与黑名单', () => {
     expect(models[0]?.description).toBe('TraeWork 网页协议，消耗 Work 专属积分池')
   })
 
-  it('resolveModel 给出真机 dev 档上下文窗口，且**不声明 reasoning**', async () => {
+  it('resolveModel 给出真机 dev 档上下文窗口，并**声明思考档**', async () => {
     const { adapter } = makeAdapter(() => new Response('{}'))
     const resolved = await adapter.resolveModel(PROVIDER, 'Doubao-Seed-Code')
-    expect(resolved.context).toEqual({ contextWindow: 184000 })
-    // 真机目录里唯一的 reasoning_effort_config 是 support_thinking:false → 不声明。
-    expect(resolved.reasoning).toBeUndefined()
+    // 本组（solo_agent_remote）的 dev 档是 256000 —— 旧表按 solo_coder 组写的是
+    // 184000，那正是「读错分组」留下的痕迹。
+    expect(resolved.context).toEqual({ contextWindow: 256000 })
+    // 真机 `reasoning_effort_config` = {support_thinking:true,
+    // options:["light","high"], default_level:"high"}。
+    expect(resolved.reasoning?.efforts.map((e) => String(e.id))).toEqual(['light', 'high'])
+    expect(String(resolved.reasoning?.defaultEffort)).toBe('high')
+  })
+
+  it('**无思考档的模型不声明 reasoning**（不发射上游不认的档位）', async () => {
+    const { adapter } = makeAdapter(() => new Response('{}'))
+    // kimi-k2.6 真机连 reasoning_effort_config 字段都没有。
+    const kimi = await adapter.resolveModel(PROVIDER, 'kimi-k2.6')
+    expect(kimi.reasoning).toBeUndefined()
+    // minimax-m3 是 support_thinking:false。
+    const minimax = await adapter.resolveModel(PROVIDER, 'minimax-m3')
+    expect(minimax.reasoning).toBeUndefined()
   })
 
   it('resolveModel 对未知模型回退为 id 本身，不伪造上下文', async () => {
@@ -1300,6 +1464,15 @@ describe('Trae CN Work 产品配置', () => {
   it('models 路径与真机一致', () => {
     expect(TRAE_CN_WORK_MODELS_PATH).toBe('/api/remote/v1/models')
   })
+
+  it('**目录 query 钉死本 agent 的 function**（不带它拿到的是另一个池）', () => {
+    // 这条断言锁死本次缺陷的根因：query 必须带 functions=solo_agent_remote。
+    expect(TRAE_CN_WORK_MODELS_QUERY).toContain('functions=solo_agent_remote')
+    // 与出站 agent 同名 —— 目录分组必须与请求 agent 一致。
+    expect(TRAE_CN_WORK_MODELS_FUNCTIONS).toBe(TRAE_CN_WORK_AGENT_TYPE)
+    // 账号私有自定义模型也一起要（它们只在远端出现，不进静态表）。
+    expect(TRAE_CN_WORK_MODELS_QUERY).toContain('show_custom_model=true')
+  })
 })
 
 describe('fetchTraeCnWorkModels', () => {
@@ -1309,12 +1482,15 @@ describe('fetchTraeCnWorkModels', () => {
       calls.push({ url: String(url), init })
       return new Response(JSON.stringify({
         code: 0,
-        data: { list: [{ function: 'solo_coder', models: [{ name: 'm1', display_name: 'M1', multimodal: false, context_window_tokens: { dev: 100 } }] }] },
+        data: { list: [{ function: 'solo_agent_remote', models: [{ name: 'm1', display_name: 'M1', multimodal: false, context_window_tokens: { dev: 100 } }] }] },
       }), { status: 200 })
     }) as unknown as typeof fetch
     const models = await fetchTraeCnWorkModels(makeCredential(), fetcher)
     expect(models).toHaveLength(1)
-    expect(calls[0]!.url).toBe('https://work.trae.cn/api/remote/v1/models')
+    // ⚠️ 带 query：裸打端点会回 solo_coder 组（**另一个池**）—— 见常量注释。
+    expect(calls[0]!.url).toBe(
+      'https://work.trae.cn/api/remote/v1/models?functions=solo_agent_remote&show_custom_model=true',
+    )
     const headers = calls[0]!.init?.headers as Record<string, string>
     expect(headers.Authorization).toBe('Cloud-IDE-JWT AT-1')
   })

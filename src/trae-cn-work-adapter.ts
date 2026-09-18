@@ -10,8 +10,10 @@
  * |---|---|---|
  * | 请求 | 一次 `POST /api/ide/v1/chat` | 建会话 → 发消息 → 订阅 SSE（**三次调用**） |
  * | 鉴权头 | 鉴权三头 + **IDE 网关全套** | **仅鉴权三头**（无 x-app-id 等） |
- * | 模型池 | 16 项静态表（远端拿不到） | **12 项，远端可拉**（本文件已接线） |
+ * | 模型池 | 16 项静态表（远端拿不到） | **14 项，远端可拉**（本文件已接线） |
+ * | 模型目录分组 | 单一池 | **按 `function` 分池，只列 `solo_agent_remote`** |
  * | 扣费池 | 通用积分（`available_endpoint=0`） | **Work 专属（`available_endpoint=1`）** |
+ * | 思考档落点 | 请求体**顶层** `reasoning_effort_level` | **`custom_model` 对象内部**（见 `buildCustomModel`） |
  * | 会话清理 | 无状态，无需清理 | **每轮必须 DELETE**（见下） |
  * | 错误判据 | 业务码（已标定） | 状态码为主（Work 码表未标定） |
  *
@@ -55,7 +57,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
-import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk,
 } from '@deepseek-ai/dsh-llm'
@@ -68,7 +70,9 @@ import {
   TRAE_CN_WORK_AGENT_TYPE,
   TRAE_CN_WORK_FALLBACK_MODELS,
   TRAE_CN_WORK_MODEL_SELECTION_STRATEGY,
+  TRAE_CN_WORK_MODELS_FUNCTIONS,
   TRAE_CN_WORK_MODELS_PATH,
+  TRAE_CN_WORK_MODELS_QUERY,
   TRAE_CN_WORK_ORIGIN,
   TRAE_CN_WORK_SESSION_MODE,
   TRAE_CN_WORK_SESSIONS_PATH,
@@ -102,6 +106,24 @@ const TRAE_CN_WORK_MAX_ROTATE = 3
 /** 限流/额度类冷却时长（毫秒，1 小时）。 */
 const TRAE_CN_WORK_COOLDOWN_MS = 3_600_000
 
+/**
+ * 思考档位的展示名（档位 id 取自真机 `reasoning_effort_config.options`）。
+ *
+ * 与 IDE 路径（`src/trae-cn-adapter.ts` 的 `TRAE_CN_EFFORT_NAMES`）**同一套
+ * 文案**：档位 id 是同一套枚举，用户在两个 provider 之间切换时看到的档位名
+ * 应当一致。未登记的 id 直接回退成 id 本身（真机将来加档位不会显示成空白）。
+ */
+const TRAE_CN_WORK_EFFORT_NAMES: Readonly<Record<string, string>> = {
+  light: '轻 Light',
+  high: '高 High',
+  extra_high: '极高 Extra high',
+}
+
+/** 档位 id 的展示名；未登记的 id 回退为 id 本身。 */
+function effortDisplayName(id: string): string {
+  return TRAE_CN_WORK_EFFORT_NAMES[id] ?? id
+}
+
 /** 远端模型条目（`GET /api/remote/v1/models` 的一项）。 */
 export interface TraeCnWorkRemoteModel {
   id: string
@@ -109,6 +131,15 @@ export interface TraeCnWorkRemoteModel {
   supportsImages?: boolean
   contextWindow?: number
   consumptionRate?: number
+  /**
+   * 可选思考档位（真机 `reasoning_effort_config.options`，逐字符照抄）。
+   *
+   * 缺省 = 不暴露选择器。**只有 `support_thinking: true` 时才带** ——
+   * 真机里 `support_thinking: false` 的项 `options` 恒为 `null`，两者本就同进退。
+   */
+  reasoningEfforts?: readonly string[]
+  /** 默认档位（真机 `reasoning_effort_config.default_level`）。 */
+  defaultReasoningEffort?: string
 }
 
 /** 安全读取 Error.message。 */
@@ -259,6 +290,10 @@ export class TraeCnWorkAdapter extends LlmAdapter {
       supportsImages: model.supportsImages,
       contextWindow: model.contextWindow,
       consumptionRate: model.consumptionRate,
+      ...model.reasoningEfforts === undefined ? {} : { reasoningEfforts: model.reasoningEfforts },
+      ...model.defaultReasoningEffort === undefined
+        ? {}
+        : { defaultReasoningEffort: model.defaultReasoningEffort },
     }))
   }
 
@@ -318,11 +353,36 @@ export class TraeCnWorkAdapter extends LlmAdapter {
     if (contextWindow !== undefined && contextWindow > 0) {
       resolved.context = { contextWindow }
     }
-    // 思考档：**v1 刻意不声明**。真机目录里只有 `Doubao-Seed-Code` 一项带
-    // `reasoning_effort_config`，且其内容是 `{support_thinking:false, options:null,
-    // default_level:""}` —— 即**明确不支持思考**。其余 11 项连该字段都没有。
-    // 故这里不声明 `reasoning`（DSH 的模型选择器显示「当前模型未提供推理等级」，
-    // 那是诚实的）。若将来实测出 Work 的档位配置，在此补 `reasoning` 即可。
+    // 思考档位：DSH 的「思考程度」选择器**唯一**的数据源就是本字段
+    // （`resolveModel().reasoning`）——不声明时模型选择器里整行不渲染，
+    // 用户只能看到「当前模型未提供推理等级」。
+    //
+    // ## v1 的「刻意不声明」已被真机取证推翻（2026-09-19）
+    //
+    // v1 的理由是「目录里唯一的 `reasoning_effort_config` 是
+    // `support_thinking:false`」。那个结论建立在**读错分组**之上：裸打目录端点
+    // 回的是 `solo_coder` 组，而本适配器出站用的是 `solo_agent_remote`。
+    // 改按本组查询后，**9/14 项**真机带 `support_thinking: true` 与完整档位表
+    // （见 `TRAE_CN_WORK_FALLBACK_MODELS`）。
+    //
+    // 没有档位的项（`kimi-k2.7-code` / `kimi-k2.6` 无该字段，
+    // `Doubao-Seed-Evolving` / `minimax-m3` / `qwen-3.7-plus` 是
+    // `support_thinking:false`）**保持不声明** —— 给一个上游不认的档位会让每次
+    // 请求都带上无效字段。
+    const efforts = remote?.reasoningEfforts ?? entry?.reasoningEfforts ?? []
+    if (efforts.length > 0) {
+      const defaultEffort = remote?.defaultReasoningEffort ?? entry?.defaultReasoningEffort
+      resolved.reasoning = {
+        // id **逐字符照抄**真机值：它会原样进请求体，规整化会让上游认不出档位。
+        efforts: efforts.map((id) => ({ id: ReasoningEffortId(id), name: effortDisplayName(id) })),
+        // 默认档必须在 efforts 内：声明了却不在里面会被 DSH 判为
+        // `INVALID_MODEL_REASONING` 直接抛错（真机的 default_level 恒在 options 内，
+        // 这里再挡一道，避免上游将来发出不自洽的组合时把请求打死）。
+        ...defaultEffort !== undefined && efforts.includes(defaultEffort)
+          ? { defaultEffort: ReasoningEffortId(defaultEffort) }
+          : {},
+      }
+    }
     return resolved
   }
 
@@ -505,6 +565,70 @@ export class TraeCnWorkAdapter extends LlmAdapter {
   }
 
   /**
+   * 构造 `custom_model` 块（**思考档位的唯一落点**）。
+   *
+   * ## ⚠️ 档位字段在 `custom_model` **对象内部**，不是顶层
+   *
+   * **这与 IDE 路径（`src/trae-cn-adapter.ts`）不同** —— 那边 `buildBody` 把
+   * `reasoning_effort_level` 放在**请求体顶层**。两条路径的落点差异是**真机
+   * 取证结论**，不要「统一」掉：
+   *
+   * 网页版 bundle `1626.b49a23c3.js` 的 `getModelRequestSelection()` 把档位
+   * 塞进 `custom_model` 的构造式里：
+   * ```js
+   * r = {provider, is_preset, config_name, config_source, model_name,
+   *      display_model_name, ak, base_url, custom_model_id,
+   *      use_remote_service, multimodal, prompt_max_tokens};
+   * "reasoning_effort_level" === t.field && void 0 !== t.value
+   *   && (r.reasoning_effort_level = t.value);
+   * ```
+   * 而 `resolveReasoningEffortRequestField` 默认返回
+   * `{field:"reasoning_effort_level", value}`（只有字节内网账号走
+   * `reasoning_effort`）—— 即**字段名与 IDE 路径同名，落点不同**。
+   *
+   * ## 真机 A/B（2026-09-19，同 prompt、模型 `Doubao-Seed-Code`）
+   *
+   * | 请求体 | `token_usage.reasoning_tokens` | `plan_item.reasoning_content` |
+   * |---|---|---|
+   * | 不带本字段 | 131 | 344 字（15 帧） |
+   * | `custom_model.reasoning_effort_level="light"` | 13 / 17（两次） | 56 / 71 字 |
+   * | `custom_model.reasoning_effort="light"` | 28 | 66 字 |
+   *
+   * 「不带」与带 `reasoning_effort_level` 差一个数量级，而带错名的
+   * `reasoning_effort` 与「不带」同量级 —— 即**上游只认 `reasoning_effort_level`**，
+   * 且它确实改变了思考量（不是被静默忽略的无效字段）。
+   *
+   * ## 只在调用方显式给了档位时才构造
+   *
+   * 与 IDE 路径同约定：**不主动补档**。DSH 已按 `reasoning.defaultEffort`
+   * 在调用方省略时补好，适配器再补一次会与 DSH 的口径分叉。故
+   * `options.reasoningEffort === undefined` 时**整个 `custom_model` 都不发**
+   * （真机「不带」那一档就是当前线上行为，维持零行为变更）。
+   *
+   * 构造式里的常量字段取自网页版同一个函数：`is_preset` / `config_source` 由
+   * 真机目录的 `is_preset` / `config_source` 推出，其余为真机观察到的固定值。
+   */
+  private buildCustomModel(options: GenerateOptions): Record<string, unknown> | undefined {
+    if (options.reasoningEffort === undefined) return undefined
+    return {
+      provider: '',
+      is_preset: true,
+      config_name: options.model,
+      config_source: 1,
+      model_name: options.model,
+      display_model_name: this.remoteModels?.find((entry) => entry.id === options.model)?.name
+        ?? this.fallbackIndex.get(options.model)?.name
+        ?? options.model,
+      ak: '',
+      base_url: '',
+      use_remote_service: true,
+      multimodal: true,
+      // 字段名逐字符照抄真机；它会原样进请求体，改写会让上游认不出档位。
+      reasoning_effort_level: options.reasoningEffort,
+    }
+  }
+
+  /**
    * 执行一次完整尝试：建会话 → 发消息 → 订阅 SSE。
    *
    * 返回的 `sessionId` **只要建成功就一定有值**，调用方必须在 `finally` 里
@@ -550,8 +674,11 @@ export class TraeCnWorkAdapter extends LlmAdapter {
     // `query` 是 **JSON 字符串**（不是数组！），元素形态
     // `{type:"text",data:{content}}` —— 注意是 `data.content`，
     // 与 IDE 路径的 `text_content` 不同。
+    //
+    // `custom_model` 只在**需要下发音档位**时才构造（见 buildCustomModel）。
     let messageResponse: Response
     try {
+      const customModel = this.buildCustomModel(options)
       messageResponse = await this.fetchImpl(`${base}${TRAE_CN_WORK_SESSIONS_PATH}/${sessionId}/messages`, {
         method: 'POST',
         headers,
@@ -564,6 +691,7 @@ export class TraeCnWorkAdapter extends LlmAdapter {
           agent_id: TRAE_CN_WORK_AGENT_ID,
           model_selection_strategy: TRAE_CN_WORK_MODEL_SELECTION_STRATEGY,
           origin: TRAE_CN_WORK_ORIGIN,
+          ...customModel === undefined ? {} : { custom_model: customModel },
         }),
         signal: options.signal,
       })
@@ -757,18 +885,24 @@ export function registerTraeCnWorkLlm(ctx: Context, options: TraeCnWorkAdapterOp
 }
 
 /**
- * 拉取远端模型目录（`GET /api/remote/v1/models`）。
+ * 拉取远端模型目录（`GET /api/remote/v1/models?functions=…&show_custom_model=true`）。
  *
  * ## 与 IDE 路径相反：这个端点**真的可用**
  *
  * IDE 路径的模型目录刻意不接线（任何 HTTP 端点都拿不到新池，见
- * `TRAE_CN_MODELS_PATH` 的说明）；Work 的目录端点**真机实测 200 且回全 12 项**，
- * 故这里**已接线**，远端是权威来源，静态表只在整体失败时顶替。
+ * `TRAE_CN_MODELS_PATH` 的说明）；Work 的目录端点**真机实测 200 且回全本组 14 项**
+ * （带自定义项时 16 项），故这里**已接线**，远端是权威来源，静态表只在整体失败时顶替。
+ *
+ * ## ⚠️ query 不是可选的：不带它拿到的是**另一个池**
+ *
+ * 见 {@link TRAE_CN_WORK_MODELS_FUNCTIONS} 与 {@link TRAE_CN_WORK_MODELS_QUERY}。
+ * 这个函数必须原样带上 {@link TRAE_CN_WORK_MODELS_QUERY}：裸打端点会回
+ * `solo_coder` 组，而本适配器出站用的是 `solo_agent_remote`。
  *
  * ## 响应结构（真机实测，注意分组）
  *
  * ```json
- * {"code":0,"data":{"list":[{"function":"solo_coder","models":[ ...12 项... ]}]}}
+ * {"code":0,"data":{"list":[{"function":"solo_agent_remote","models":[ ...14 项... ]}]}}
  * ```
  *
  * `list` 是**按 function 分组**的数组，模型在 `models` 里 —— 不是顶层平铺数组
@@ -776,7 +910,8 @@ export function registerTraeCnWorkLlm(ctx: Context, options: TraeCnWorkAdapterOp
  *
  * 每项字段：`name` / `multimodal` / `is_default` / `display_name` / `is_new` /
  * `is_beta` / `icon` / `features`（**JSON 字符串**）/ `config_source` /
- * `is_preset` / `max_mode` / `context_window_tokens`（`{dev,max}`）。
+ * `is_preset` / `max_mode` / `context_window_tokens`（`{dev,max}`），
+ * 部分项带 `reasoning_effort_config`。
  * 倍率在 `features.consumption_rate.data.rate`（故 `features` 要**再解析一次**）。
  */
 export function parseTraeCnWorkModels(body: unknown): TraeCnWorkRemoteModel[] {
@@ -791,19 +926,73 @@ export function parseTraeCnWorkModels(body: unknown): TraeCnWorkRemoteModel[] {
     const display = firstString(record, ['display_name', 'displayName'])
     const contextWindow = readDevContextWindow(record)
     const rate = readConsumptionRate(record)
+    const reasoning = readReasoningConfig(record)
     models.push({
       id,
       name: display ?? id,
       ...typeof record.multimodal === 'boolean' ? { supportsImages: record.multimodal } : {},
       ...contextWindow === undefined ? {} : { contextWindow },
       ...rate === undefined ? {} : { consumptionRate: rate },
+      ...reasoning,
     })
   }
   return models
 }
 
 /**
- * 在 `{data:{list:[{models:[...]}]}}` 里找出模型数组。
+ * 读取 `reasoning_effort_config`（真机形态 `{support_thinking, options, default_level}`）。
+ *
+ * ## 判据：`support_thinking === true` 是**必要条件**
+ *
+ * 真机里两种形态互斥且干净：支持的项是
+ * `{support_thinking:true, options:["light","high"], default_level:"high"}`，
+ * 不支持的项是 `{support_thinking:false, options:null, default_level:""}`。
+ * 故只在 `true` **且** `options` 是非空字符串数组时才声明档位 ——
+ * 网页版 bundle 的校验函数（`5483` 模块的 `i()`）用的也是同一组条件
+ * （`support_thinking` 为真 + `options` 为数组 + `default_level` 非空
+ * 且**必须**在 `options` 内），本函数与它保持一致。
+ *
+ * 档位 id **逐字符照抄**，不做规整化（会原样进请求体）。
+ * `default_level` 不在 `options` 内时**只丢默认档、保留档位列表** ——
+ * 上游发出不自洽的组合时，用户仍能手动选档，而不是整个选择器消失。
+ */
+function readReasoningConfig(record: Record<string, unknown>): {
+  reasoningEfforts?: readonly string[]
+  defaultReasoningEffort?: string
+} {
+  const holder = record.reasoning_effort_config
+  if (typeof holder !== 'object' || holder === null) return {}
+  const config = holder as Record<string, unknown>
+  if (config.support_thinking !== true) return {}
+  const options = config.options
+  if (!Array.isArray(options)) return {}
+  const efforts = options.filter(
+    (value): value is string => typeof value === 'string' && value.trim().length > 0,
+  )
+  if (efforts.length === 0) return {}
+  const defaultLevel = typeof config.default_level === 'string' ? config.default_level.trim() : ''
+  return {
+    reasoningEfforts: efforts,
+    ...efforts.includes(defaultLevel) ? { defaultReasoningEffort: defaultLevel } : {},
+  }
+}
+
+/**
+ * 在 `{data:{list:[{function,models:[...]}]}}` 里找出**本 agent 那组**的模型数组。
+ *
+ * ## 取组规则：优先取 `function === solo_agent_remote`，否则回退「唯一那组」
+ *
+ * 目录响应是按 `function` 分组的，而**不同组是不同的池**（同名 id 的窗口、
+ * 甚至默认项都不同，见 `TRAE_CN_WORK_MODELS_FUNCTIONS`）。本适配器出站只发
+ * `solo_agent_remote`，故只该列这一组。
+ *
+ * 两条分支的理由：
+ * 1. **命中本组** → 直接用（正常路径，query 带 `functions` 时服务端只回这一组）；
+ * 2. **没命中但只有一组** → 也用（服务端将来忽略 `functions` 参数、只回默认组时，
+ *    仍让目录可用；此时至少不是「拼了三组」那种必然产生不可路由条目的形态）；
+ * 3. **没命中且有多组** → 返回 undefined（→ 空目录 → 回退静态表）。
+ *    ⚠️ 这条**刻意不做「全拼起来」**：多组拼接正是本次缺陷的形态 ——
+ *    会把别的池的模型列给用户，选中即路由失败。宁可回退到已知正确的静态表。
  *
  * ## 只认**实测形态**，不做形态猜测
  *
@@ -822,14 +1011,27 @@ function locateWorkModelArray(body: unknown): readonly unknown[] | undefined {
   if (typeof data !== 'object' || data === null) return undefined
   const list = (data as Record<string, unknown>).list
   if (!Array.isArray(list)) return undefined
-  // 分组形态（真机）：把所有分组的 models 拼起来。
-  const collected: unknown[] = []
+
+  const groups: { fn: string; models: readonly unknown[] }[] = []
   for (const group of list) {
     if (typeof group !== 'object' || group === null) continue
-    const models = (group as Record<string, unknown>).models
-    if (Array.isArray(models)) collected.push(...models)
+    const record = group as Record<string, unknown>
+    const models = record.models
+    if (!Array.isArray(models)) continue
+    groups.push({
+      fn: typeof record.function === 'string' ? record.function : '',
+      models,
+    })
   }
-  return collected.length > 0 ? collected : undefined
+  if (groups.length === 0) return undefined
+
+  // 1) 本 agent 那组（正常路径）。
+  const own = groups.find((group) => group.fn === TRAE_CN_WORK_MODELS_FUNCTIONS)
+  if (own !== undefined) return own.models.length > 0 ? own.models : undefined
+  // 2) 只有一组时容忍（服务端忽略 functions 参数的情形）。
+  if (groups.length === 1) return groups[0]!.models.length > 0 ? groups[0]!.models : undefined
+  // 3) 多组且都不是本组：拒绝拼接（见上）。
+  return undefined
 }
 
 /**
@@ -881,16 +1083,23 @@ function firstString(source: Record<string, unknown>, keys: readonly string[]): 
  *
  * 用**同一个凭据**（`traeCnAccessHeaders`，与对话完全一致）——
  * 真机实测该端点带鉴权可 200，且不额外消耗积分。
+ *
+ * ⚠️ **必须带 {@link TRAE_CN_WORK_MODELS_QUERY}**：`function` 分组由 query 决定，
+ * 裸打端点回的是 `solo_coder` 组（另一个池）。这是「选择器模型比网页版少、
+ * 且列出的多半路由不到」的根因，见 {@link TRAE_CN_WORK_MODELS_FUNCTIONS}。
  */
 export async function fetchTraeCnWorkModels(
   credential: TraeCnCredential,
   fetchImpl: typeof fetch = fetch,
   apiBase: string = TRAE_CN_WORK.apiBase,
 ): Promise<TraeCnWorkRemoteModel[]> {
-  const response = await fetchImpl(`${apiBase}${TRAE_CN_WORK_MODELS_PATH}`, {
-    method: 'GET',
-    headers: traeCnAccessHeaders(credential, 'application/json'),
-  })
+  const response = await fetchImpl(
+    `${apiBase}${TRAE_CN_WORK_MODELS_PATH}${TRAE_CN_WORK_MODELS_QUERY}`,
+    {
+      method: 'GET',
+      headers: traeCnAccessHeaders(credential, 'application/json'),
+    },
+  )
   if (!response.ok) throw new Error(`trae-cn-work: models HTTP ${response.status}`)
   const body = await response.json()
   return parseTraeCnWorkModels(body)

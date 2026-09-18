@@ -33,7 +33,7 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 `trae-cn-work`（显示名 **Trae CN Work**）走 **TraeWork（`work.trae.cn`）网页 RPC**，消耗 **Work 专属积分池**（`available_endpoint=1`）。它与 `trae-cn`（IDE 路径）是**两个 provider**，因为：
 
 - **扣的池不同**：IDE 路径只扣通用池，本 provider 只扣 Work 池。通用池耗尽而 Work 池有额度时，两条路径的可用性**互相独立**；
-- **模型池完全不重合**：IDE 是 16 项 `chat_v3` 代际，Work 是 **12 项 SOLO 代际**（只有 `Doubao-Seed-Code` 同名且窗口不同），合并目录会产生无法路由的条目。
+- **模型池完全不重合**：IDE 是 16 项 `chat_v3` 代际，Work 是 **14 项 `solo_agent_remote` 代际**（只有 `Doubao-Seed-Code` 同名且窗口不同），合并目录会产生无法路由的条目。
 
 ⚠️ **唯一的非常规接线（改错会静默失效，两个方向都不报错）**：
 
@@ -44,16 +44,18 @@ Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理�
 
 Work **没有独立登录**：账号、凭据（`TRAE_CN_ACCOUNT_*`）、限流切换全部复用 `trae-cn`，故**不注册独立 auth 服务**。池查询若传 `trae-cn-work`，账号条目的 `provider` 字段（`trae-cn`）一个都匹配不到 → 适配器每次都抛 `MISSING_CREDENTIAL`（「请先登录」）而账号明明在列表里；路由名若传 `trae-cn`，本 provider 根本不会出现在模型选择器里。该值由 `TraeCnWorkProduct.poolProviderId` 显式承载（与 `id` 并列命名，防「顺手统一」）。
 
-**协议要点**（全部真机实测 2026-09-18，详见 README 的「Trae CN Work provider」）：
+**协议要点**（全部真机实测；目录与思考档于 2026-09-19 重新取证，详见 README 的「Trae CN Work provider」）：
 
 - **三段式有状态会话**：`POST chat_sessions` → `POST …/messages` → `GET …/events`（SSE），**每轮 `finally` 里 DELETE**（会话会拉起云端沙箱并出现在用户 TraeWork 列表里）。删除覆盖**整次尝试**而不只是成功路径 —— 建会话成功而发消息/订阅失败时同样要删，否则会话全部泄漏；
 - **`query` 是 JSON 字符串**，元素形态 `{type:"text",data:{content}}`（是 **`data.content`**，不是 IDE 的 `text_content`）；`agent_type` / `agent_id` / `model_selection_strategy` / `origin` 是出站身份标识，一字符不能动；
 - **`plan_item` 是累计快照不是增量**（`thought` / `reasoning_content` 每帧都是「到目前为止的全文」）。直接当增量拼接会让文本重复，必须按 `plan_item.id` 差分只发后缀；
 - **正文有两条通道**，两条都要认：`plan_item.thought`（流式）与 `plan_item.tool_call_info.params.summary`（`name === "finish"`，真机第 2 轮 `thought` 全程为空）。合流时去重，否则同一段文字发两次；
 - **`model_config` 的 `model_name` 带 `__dev` 后缀**（请求发的是无后缀的），比对静态表前必须归一；
-- **模型目录远端可用**（`GET /api/remote/v1/models`，与 IDE 路径相反）：响应是 `{data:{list:[{models:[…]}]}}` **分组**结构，倍率在 `features` 这个 **JSON 字符串**里二次解析；
+- **模型目录远端可用**（`GET /api/remote/v1/models`，与 IDE 路径相反）：响应是 `{data:{list:[{function,models:[…]}]}}` **按 agent 分组**的结构，倍率在 `features` 这个 **JSON 字符串**里二次解析；
+- ⚠️ **目录必须带 `?functions=solo_agent_remote&show_custom_model=true`（`TRAE_CN_WORK_MODELS_QUERY`），且解析只取本 agent 那组**：`function` 分组**由 query 决定**，裸打端点回的是 **`solo_coder` 组（另一个池）**。这是「选择器模型比网页版少」的已修复根因 —— 两个池只有 `Doubao-Seed-Code` 一个同名 id，拿错组会同时「少列本池 13 项」+「列出 11 项路由不到的条目」。多组且无本组时返回空目录（回退静态表），**刻意不拼接**三组（网页版一次要三组是因为它有三种会话形态，本适配器只发一种）；
 - **错误分类以 HTTP 状态码为主**：Work 码表**未标定**（真机两轮全绿、一帧错误未遇），未知业务码**一律直报并带原文**，不猜动作；`fail` 不映射 `CONTEXT_WINDOW_EXCEEDED`（会误触发 DSH 的上下文压缩，真实改写用户会话）；
-- **思考档 v1 不声明**：真机目录里唯一的 `reasoning_effort_config` 是 `support_thinking:false`。
+- **思考档已接线**：`solo_agent_remote` 组 **9/14 项**声明 `reasoning`（档位逐字符照抄真机 `light`/`high`/`extra_high`，默认档取 `default_level`；`glm-5.2` 只有 `high`/`extra_high`），其余 5 项不声明。⚠️ **下发落点是 `custom_model` 对象内部的 `reasoning_effort_level`，与 IDE 路径（顶层字段）不同** —— 字段名同名、落点不同，**不要「统一」掉**（真机 A/B：不带 131 reasoning tokens、`light` 档 13/17、错名字段 28）。未指定档位时**整个 `custom_model` 都不发**；
+- **2 项账号私有自定义模型只在远端出现**（`deepseek-chat` / `deepseek-reasoner`，`config_source:3`，三方 key 存服务端），**不进静态表**（静态表要能被所有账号共用）。真机实测其三方 key 已失效（SSE `code:4028`）。
 
 **Account Hub 有本 provider 的面板**（`PROVIDERS` 第六条，排在 `trae-cn` 之后；能力矩阵登记 `balance: true, dailyCheckin: false`）。它与 Trae CN 面板是**同一批账号的两个视图**：
 

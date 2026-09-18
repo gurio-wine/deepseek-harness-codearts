@@ -54,6 +54,18 @@
 export const TRAE_CN_WORK_API_BASE = 'https://work.trae.cn'
 
 /**
+ * 发消息请求体的固定字段（**官方 `buildSendMessageRequest` 逐字**）。
+ *
+ * 这几个值是**出站身份标识**：服务端按它们把请求归因到 SOLO Code agent。
+ * 一个字符都不能动 —— 改动会让服务端认不出 agent 形态（表现为会话建起来
+ * 但永远不产生回复，或直接 4xx）。
+ */
+export const TRAE_CN_WORK_AGENT_TYPE = 'solo_agent_remote'
+export const TRAE_CN_WORK_AGENT_ID = 'solo_agent_remote'
+export const TRAE_CN_WORK_MODEL_SELECTION_STRATEGY = 'manual'
+export const TRAE_CN_WORK_ORIGIN = 'web'
+
+/**
  * 第一段：创建会话（`POST`）。
  *
  * body 为 `{"mode":"code"}`，响应 `{"code":0,"data":{"chat_session_id":"...","status":1}}`。
@@ -65,27 +77,79 @@ export const TRAE_CN_WORK_SESSIONS_PATH = '/api/remote/v1/chat_sessions'
  *
  * 响应结构（真机实测）：
  * ```
- * {"code":0,"data":{"list":[{"function":"solo_coder","models":[ ...12 项... ]}]}}
+ * {"code":0,"data":{"list":[{"function":"solo_agent_remote","models":[ ...14 项... ]}]}}
  * ```
  * 注意 `list` 是**按 function 分组**的数组，模型在 `models` 里 ——
  * 不是顶层平铺数组（照抄「`data` 即数组」的猜测会一项都读不到）。
+ *
+ * ⚠️ 单独打这个路径**不够**：`function` 分组由 query 决定，不带 query 时
+ * 服务端回的是 **`solo_coder` 组**，与本适配器出站的 agent 不是同一个池 ——
+ * 见 {@link TRAE_CN_WORK_MODELS_QUERY}。
  */
 export const TRAE_CN_WORK_MODELS_PATH = '/api/remote/v1/models'
+/**
+ * 目录查询的 `functions` 参数值 —— **必须与本适配器出站的 agent 同名**。
+ *
+ * 目录端点是**按 agent（`function`）分池**的，而 `function` 由 query 决定。
+ * 2026-09-19 真机实测（同一凭据，仅 query 不同）：
+ *
+ * | 请求 | 返回分组 |
+ * |---|---|
+ * | `GET …/models`（无 query） | `solo_coder` **12 项** |
+ * | `GET …/models?functions=solo_agent_remote` | `solo_agent_remote` **14 项** |
+ * | `…&show_custom_model=true` | `solo_agent_remote` **16 项**（多 2 项自定义） |
+ *
+ * 而本适配器出站请求体的 `agent_type` / `agent_id` 是
+ * {@link TRAE_CN_WORK_AGENT_TYPE} = **`solo_agent_remote`**。旧实现裸打端点，
+ * 于是拿 **`solo_coder` 的目录去驱动 `solo_agent_remote` 的请求** ——
+ * 两个池只有 `Doubao-Seed-Code` 一个同名 id，其余 11 项在出站 agent 的池里
+ * **根本不存在**（列出来也路由不到），同时漏掉了本池真正的 13 项。
+ *
+ * ## 为什么只请求这一个 function（而不是照抄网页版的三个）
+ *
+ * 网页版（TraeWork）一次请求三个 agent 的目录，因为它同时提供
+ * Work/Design/Agent 三种会话形态。本适配器只发 `solo_agent_remote` 一种，
+ * 故只该列它的池。三组**不是同一批模型的三个视图**，真机证据：
+ *
+ * - 同名 id 的上下文窗口不同：`Doubao-Seed-Code` 在 `solo_agent_remote` 是
+ *   `256000`，在 `solo_coder` 是 `184000`；
+ * - 组内默认模型不同：`solo_agent_remote` 是 `Doubao-Seed-Code`，
+ *   `solo_design_remote` 是 `kimi-k2.7-code`；
+ * - 组间成员大面积不重合（`glm-5.3` 只在 `solo_work_remote` / `solo_agent_remote`，
+ *   不在 `solo_design_remote`）。
+ *
+ * 合并三组会产出**无法路由的条目**（选中即 4xx），故刻意不合并。
+ */
+export const TRAE_CN_WORK_MODELS_FUNCTIONS = TRAE_CN_WORK_AGENT_TYPE
+
+/**
+ * 目录查询串（**逐字**取自网页版 bundle 的调用形态）。
+ *
+ * 网页版 `1626.b49a23c3.js` 的 `fetchModels()`：
+ * ```js
+ * this.traeApiPort.model.listModels({functions:"solo_agent_remote,solo_work_remote,solo_design_remote",
+ *                                    show_custom_model:!0})
+ * ```
+ * 本适配器只取自己的 function（见 {@link TRAE_CN_WORK_MODELS_FUNCTIONS}），
+ * 但保留 `show_custom_model=true`：它多回的是**账号自建的三方模型**
+ * （真机 `deepseek-chat` / `deepseek-reasoner`，`config_source:3` /
+ * `is_preset:false` / 带 `custom_model_id`）。那类条目是**账号私有**的
+ * （凭据与三方 key 存在服务端，按 `custom_model_id` 取用），故**只出现在远端
+ * 目录里、不进静态表** —— 静态表要能被所有账号共用，塞进别人的私有模型
+ * 会让每个账号都看到不属于自己的条目。
+ *
+ * ⚠️ 真机实测这两项**当前路由不通**：带 `custom_model_id` 发出后收到
+ * SSE `error` 帧 `code:4028`「Authentication Fails, Your api key: ****b192 is
+ * invalid」（`4028` 在网页版错误码表里正是 `custom_model_origin_error`）——
+ * 即服务端确实按 id 取到了该账号存的三方 key，但**那把 key 已失效**。
+ * 这是账号侧的三方配置问题而非适配器能力缺失（`ak` 由服务端持有，网页版
+ * 请求体里的 `ak` 也只是可选覆盖），故**如实列出**、把上游真实报错透给用户，
+ * 与「不猜动作、直报原文」的既有约定一致。
+ */
+export const TRAE_CN_WORK_MODELS_QUERY = `?functions=${encodeURIComponent(TRAE_CN_WORK_MODELS_FUNCTIONS)}&show_custom_model=true`
 
 /** 建会话请求体的 `mode`（真机 `code`）。 */
 export const TRAE_CN_WORK_SESSION_MODE = 'code'
-
-/**
- * 发消息请求体的固定字段（**官方 `buildSendMessageRequest` 逐字**）。
- *
- * 这几个值是**出站身份标识**：服务端按它们把请求归因到 SOLO Code agent。
- * 一个字符都不能动 —— 改动会让服务端认不出 agent 形态（表现为会话建起来
- * 但永远不产生回复，或直接 4xx）。
- */
-export const TRAE_CN_WORK_AGENT_TYPE = 'solo_agent_remote'
-export const TRAE_CN_WORK_AGENT_ID = 'solo_agent_remote'
-export const TRAE_CN_WORK_MODEL_SELECTION_STRATEGY = 'manual'
-export const TRAE_CN_WORK_ORIGIN = 'web'
 
 /**
  * 控制面请求超时（毫秒）；流式对话请求不适用。
@@ -134,50 +198,95 @@ export interface TraeCnWorkFallbackModel {
    * 非描述性文字）。与 IDE 路径的 `TraeCnRemoteModel.consumptionRate` 同处置。
    */
   consumptionRate: number
+  /**
+   * 可选思考档位（真机 `reasoning_effort_config.options`，逐字符照抄）。
+   *
+   * 空/缺省 = **不暴露选择器**：DSH 的模型选择器只读 `resolveModel().reasoning`，
+   * 不声明时显示「当前模型未提供推理等级」，这是诚实的（同
+   * `src/buddy-adapter.ts` 的 `reasoningEfforts` 约定）。
+   *
+   * id 逐字符照抄真机值（`light` / `high` / `extra_high`），**不做规整化** ——
+   * 它会原样进请求体，改写会让上游认不出档位。
+   */
+  reasoningEfforts?: readonly string[]
+  /**
+   * 默认档位（真机 `reasoning_effort_config.default_level`），**必须**在
+   * {@link reasoningEfforts} 内。
+   *
+   * DSH 的 `resolveCallInfo` 会在调用方省略 `reasoningEffort` 时把它
+   * materialize 进请求，故它同时是「用户没选档位时实际下发的值」。声明了却不在
+   * efforts 里会被 DSH 判为 `INVALID_MODEL_REASONING` 直接抛错。
+   */
+  defaultReasoningEffort?: string
 }
 
 /**
- * 静态模型目录 —— **真机 12 项**（2026-09-18）。
+ * 静态模型目录 —— **真机 14 项，`solo_agent_remote` 组**（2026-09-19 重新取证）。
  *
- * ## 与 IDE 池的关系：**完全不重合**
+ * ## 为什么换掉了原来的 12 项表
  *
- * IDE 池是 16 项 `chat_v3` 代际（`Doubao-Seed-Evolving` / `glm-5.3` /
- * `kimi-k3` / `qwen3.8-max` …），Work 池是 12 项 SOLO 代际
- * （`glm-5.1` / `kimi-k2.6` / `DeepSeek-V4-Pro` …）。**两池只有
- * `Doubao-Seed-Code` 一个同名 id**，且它在两边的展示名与倍率都不同
- * （IDE 展示 `Seed-Code`，Work 同样 `Seed-Code` 但上下文窗口不同）。
- * 这直接印证了「两个池是不同代际的目录」这条判断。
+ * 原表取自**裸打** `GET /api/remote/v1/models` 的响应，那是服务端的
+ * **`solo_coder` 默认组** —— 与本适配器出站的 `agent_type`
+ * （{@link TRAE_CN_WORK_AGENT_TYPE} = `solo_agent_remote`）**不是同一个池**，
+ * 详见 {@link TRAE_CN_WORK_MODELS_FUNCTIONS}。后果是双向的：
+ *
+ * | 现象 | 原因 |
+ * |---|---|
+ * | 选择器里的模型比 TraeWork 网页版少 | 漏掉本组 13 项 |
+ * | 11 项选中后**路由不到** | 它们只存在于 `solo_coder` 组 |
+ *
+ * 两个组**只有 `Doubao-Seed-Code` 一个同名 id**，且它在两组的口径都不同
+ * （本组 `context_window_tokens.dev` 是 **256000**，`solo_coder` 组是 184000），
+ * 所以「留着旧表当兜底」不是保守而是**继续错**：旧表每一条都指向另一个池。
+ *
+ * ## 字段口径
+ *
+ * 逐列照抄真机响应：`display_name` → `name`，`multimodal` → `supportsImages`，
+ * `context_window_tokens.dev` → `contextWindow`，
+ * `features.consumption_rate.data.rate` → `consumptionRate`
+ * （`features` 是 **JSON 字符串**，要再解析一次）。
+ *
+ * ## 思考档
+ *
+ * 9/14 项真机带 `reasoning_effort_config.support_thinking: true`，档位与默认档
+ * **逐字符照抄**（`light` / `high` / `extra_high`）。其余 5 项不带该配置或
+ * `support_thinking:false`（`Doubao-Seed-Evolving` / `minimax-m3` /
+ * `qwen-3.7-plus` 是后者，`kimi-k2.7-code` / `kimi-k2.6` 连字段都没有）——
+ * 那些**保持不声明**，因为给一个上游不认的档位会让请求带上无效字段。
  *
  * ## 为什么是「兜底表」而不是「权威表」
  *
- * 与 IDE 路径**相反**：Work 的目录端点**真的可用**（真机 200，12 项全回）。
+ * 与 IDE 路径**相反**：Work 的目录端点**真的可用**（真机 200，本组 14 项全回）。
  * 故 `fetchRemoteModels` **已接线**，远端是权威来源，本表只在远端整体失败时顶替。
  * 两表字段一致（都来自同一次真机响应的同一批字段），故切换不会产生口径差。
  *
- * ## 倍率实测值与任务书简报的差异（以**实测**为准）
- *
- * 简报里记的是 `DeepSeek-V4-Pro 0.72` / `DeepSeek-V4-Flash 0.16` /
- * `qwen-3.5-plus` / `qwen-3.6-plus`；真机响应里是 **0.36 / 0.08**，
- * 且 id 为 `qwen-3.5` / `qwen-3.6-plus`（展示名 `Qwen3.5-Plus` / `Qwen3.6-Plus`）。
- * 本表按**真机响应逐字**写，不以简报为准。
+ * ⚠️ **本表不含那 2 项账号私有自定义模型**（远端带
+ * `show_custom_model=true` 时会多回 `deepseek-chat` / `deepseek-reasoner`）：
+ * 它们是**按账号**存在服务端的，塞进共用静态表会让每个账号都看到别人的私有条目
+ * —— 详见 {@link TRAE_CN_WORK_MODELS_QUERY}。故**远端 16 项、静态表 14 项**，
+ * 这个差值是有意的、且只在远端不可用时才出现（届时私有项本来就无从路由）。
  */
 export const TRAE_CN_WORK_FALLBACK_MODELS: readonly TraeCnWorkFallbackModel[] = [
-  { id: 'Doubao-Seed-2.0-Code', name: 'Doubao-Seed-2.0-Code', supportsImages: true, contextWindow: 184_000, consumptionRate: 0.39 },
-  { id: 'Doubao-Seed-Code', name: 'Seed-Code', supportsImages: true, contextWindow: 184_000, consumptionRate: 0.06 },
-  { id: 'minimax-m2.7', name: 'MiniMax-M2.7', supportsImages: false, contextWindow: 200_000, consumptionRate: 0.27 },
-  { id: 'glm-5.1', name: 'GLM-5.1', supportsImages: false, contextWindow: 200_000, consumptionRate: 0.83 },
-  { id: 'glm-5v-turbo', name: 'GLM-5V-Turbo', supportsImages: true, contextWindow: 200_000, consumptionRate: 0.51 },
-  { id: 'glm-5', name: 'GLM-5', supportsImages: false, contextWindow: 200_000, consumptionRate: 0.7 },
-  { id: 'DeepSeek-V4-Pro', name: 'DeepSeek-V4-Pro', supportsImages: false, contextWindow: 200_000, consumptionRate: 0.36 },
-  { id: 'DeepSeek-V4-Flash', name: 'DeepSeek-V4-Flash', supportsImages: false, contextWindow: 200_000, consumptionRate: 0.08 },
+  { id: 'Doubao-Seed-Evolving', name: 'Seed-Evolving', supportsImages: true, contextWindow: 256_000, consumptionRate: 0.8 },
+  { id: 'Doubao-Seed-2.1-Pro', name: 'Seed-2.1-Pro-0915', supportsImages: true, contextWindow: 256_000, consumptionRate: 0.8, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
+  { id: 'Doubao-Seed-2.1-Turbo', name: 'Seed-2.1-Turbo', supportsImages: true, contextWindow: 256_000, consumptionRate: 0.2, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
+  { id: 'Doubao-Seed-Code', name: 'Seed-Code', supportsImages: true, contextWindow: 256_000, consumptionRate: 0.06, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
+  { id: 'glm-5.3', name: 'GLM-5.3', supportsImages: false, contextWindow: 200_000, consumptionRate: 0.78, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'extra_high' },
+  { id: 'glm-5.2', name: 'GLM-5.2', supportsImages: false, contextWindow: 200_000, consumptionRate: 0.78, reasoningEfforts: ['high', 'extra_high'], defaultReasoningEffort: 'high' },
+  { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash 正式版', supportsImages: false, contextWindow: 200_000, consumptionRate: 0.08, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
+  { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro 正式版', supportsImages: false, contextWindow: 200_000, consumptionRate: 0.36, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
+  { id: 'kimi-k3', name: 'Kimi-K3', supportsImages: true, contextWindow: 200_000, consumptionRate: 1.83, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'extra_high' },
+  { id: 'kimi-k2.7-code', name: 'Kimi-K2.7-Code', supportsImages: true, contextWindow: 200_000, consumptionRate: 0.83 },
   { id: 'kimi-k2.6', name: 'Kimi-K2.6', supportsImages: true, contextWindow: 200_000, consumptionRate: 0.75 },
-  { id: 'kimi-k2.5', name: 'Kimi-K2.5', supportsImages: true, contextWindow: 200_000, consumptionRate: 0.48 },
-  { id: 'qwen-3.6-plus', name: 'Qwen3.6-Plus', supportsImages: true, contextWindow: 200_000, consumptionRate: 0.26 },
-  { id: 'qwen-3.5', name: 'Qwen3.5-Plus', supportsImages: true, contextWindow: 200_000, consumptionRate: 0.26 },
+  { id: 'minimax-m3', name: 'MiniMax-M3', supportsImages: true, contextWindow: 200_000, consumptionRate: 0.26 },
+  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', supportsImages: true, contextWindow: 200_000, consumptionRate: 1.5, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
+  { id: 'qwen-3.7-plus', name: 'Qwen3.7-Plus', supportsImages: true, contextWindow: 200_000, consumptionRate: 0.25 },
 ]
 
 /**
  * 真机默认模型 id（`is_default: true` 的那一项）。
+ *
+ * `solo_agent_remote` 组的默认项（2026-09-19 复测仍是它）。
  *
  * 仅用于诊断与测试断言；请求体的 `model_name` 恒取调用方给的 `options.model`，
  * **不**在这里做默认值填充（DSH 已按模型选择器决定目标模型，适配器再兜一次

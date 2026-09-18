@@ -1131,8 +1131,9 @@ Trae CN 账号的积分**分两个互不通用的池**，而**只有 Work 池能
 | Host | `trae-api-cn.mchost.guru`（IDE 网关） | `work.trae.cn`（同源网页 RPC） |
 | 网关头 | 必须带齐 `x-app-id` / 纯数字 `x-ide-version-code` 等全套 | **不需要**，仅鉴权三头 |
 | 请求形态 | 单次 `POST /api/ide/v1/chat`（无状态） | **三段式**（建会话 → 发消息 → 订阅 SSE） |
-| 模型池 | 16 项 `chat_v3` 代际 | **12 项，id 与 IDE 池完全不重合** |
+| 模型池 | 16 项 `chat_v3` 代际 | **14 项 `solo_agent_remote`，id 与 IDE 池完全不重合** |
 | 扣费池 | 通用积分（`endpoint=0`） | **Work 专属（`endpoint=1`）** |
+| 思考档落点 | 请求体**顶层** `reasoning_effort_level` | **`custom_model` 对象内部**同名字段 |
 | 会话清理 | 无状态，无需清理 | **每轮 DELETE** |
 
 > **两个池的模型 id 完全不重合**（只有 `Doubao-Seed-Code` 同名，且上下文窗口不同），
@@ -1251,56 +1252,126 @@ Work **没有独立登录** —— 它用**同一批 Trae CN 账号**（`TRAE_CN
   `reasoning_tokens`），已接进 DSH 的用量回调；`inputTokens` 只计**未命中缓存**
   的部分（与其余 provider 同口径）。
 
-### 模型目录：**远端可用**（与 IDE 路径相反）
+### 模型目录：**远端可用**（与 IDE 路径相反），但**必须按 agent 分组取**
 
 IDE 路径的目录端点刻意不接线（任何 HTTP 端点都拿不到新池）；Work 的
-`GET /api/remote/v1/models` **真机 200 且回全 12 项**，故本 provider **已接线**，
+`GET /api/remote/v1/models` **真机 200**，故本 provider **已接线**，
 远端是权威来源，静态表（`TRAE_CN_WORK_FALLBACK_MODELS`）只在整体失败时顶替。
+
+⚠️ **这个端点按 `function`（= agent）分池，`function` 由 query 决定**。
+2026-09-19 真机实测（同一凭据，仅 query 不同）：
+
+| 请求 | 返回分组 |
+|---|---|
+| `GET …/models`（**裸打**） | `solo_coder` **12 项** |
+| `?functions=solo_agent_remote` | `solo_agent_remote` **14 项** |
+| `?functions=solo_agent_remote&show_custom_model=true` | `solo_agent_remote` **16 项** |
+
+而本适配器出站请求体的 `agent_type` / `agent_id` 是 **`solo_agent_remote`**，
+所以请求必须带 `functions=solo_agent_remote`（常量 `TRAE_CN_WORK_MODELS_QUERY`）。
+
+> **这是一处已修复的缺陷，不是可选优化**：早期实现裸打端点，于是拿
+> **`solo_coder` 的目录去驱动 `solo_agent_remote` 的请求**。两个池**只有
+> `Doubao-Seed-Code` 一个同名 id**。后果是双向的 —— 选择器里少了本池 13 项，
+> 而列出的 11 项**选中后路由不到**（它们属于另一个池）。
+
+三组**不是同一批模型的三个视图**，故也**不合并**三组：同名 id 的窗口不同
+（`Doubao-Seed-Code` 在本组是 256000，在 `solo_coder` 组是 184000）、
+组内默认项不同（`solo_design_remote` 的默认是 `kimi-k2.7-code`）、
+成员大面积不重合。解析器**只取本 agent 那组**；多组且无本组时返回空目录
+（回退静态表），**刻意不拼接**。
 
 响应结构（注意**分组**，不是顶层平铺数组）：
 
 ```json
-{"code":0,"data":{"list":[{"function":"solo_coder","models":[ …12 项… ]}]}}
+{"code":0,"data":{"list":[{"function":"solo_agent_remote","models":[ …14 项… ]}]}}
 ```
 
 每项字段：`name` / `multimodal` / `is_default` / `display_name` / `is_new` /
 `is_beta` / `icon` / `features`（**JSON 字符串**）/ `config_source` / `is_preset` /
-`max_mode` / `context_window_tokens`（`{dev,max}`）。倍率在
-`features.consumption_rate.data.rate` —— `features` 要**再解析一次**（它是字符串）。
+`max_mode` / `context_window_tokens`（`{dev,max}`），部分项带
+`reasoning_effort_config`。倍率在 `features.consumption_rate.data.rate` ——
+`features` 要**再解析一次**（它是字符串）。
 
 解析器**只认这个实测形态**，不做「`data` 直接是数组」这类容忍式回退：
 那些形态从未被观测到，写进来只是把未验证的假设固化成代码；上游真改版时，
 一个**空目录**（回退静态表，用户仍能用）比「猜对形状但字段读错」的半成品目录
 更容易诊断。
 
-**12 项**（真机逐字，倍率为实测值）：
+**静态表 14 项**（真机 `solo_agent_remote` 组逐字，倍率为实测值）：
 
-| id | 展示名 | 多模态 | 上下文 | 倍率 |
-|---|---|---|---|---|
-| `Doubao-Seed-2.0-Code` | Doubao-Seed-2.0-Code | ✓ | 184000 | 0.39 |
-| `Doubao-Seed-Code` | Seed-Code（默认） | ✓ | 184000 | 0.06 |
-| `minimax-m2.7` | MiniMax-M2.7 | ✗ | 200000 | 0.27 |
-| `glm-5.1` | GLM-5.1 | ✗ | 200000 | 0.83 |
-| `glm-5v-turbo` | GLM-5V-Turbo | ✓ | 200000 | 0.51 |
-| `glm-5` | GLM-5 | ✗ | 200000 | 0.7 |
-| `DeepSeek-V4-Pro` | DeepSeek-V4-Pro | ✗ | 200000 | 0.36 |
-| `DeepSeek-V4-Flash` | DeepSeek-V4-Flash | ✗ | 200000 | 0.08 |
-| `kimi-k2.6` | Kimi-K2.6 | ✓ | 200000 | 0.75 |
-| `kimi-k2.5` | Kimi-K2.5 | ✓ | 200000 | 0.48 |
-| `qwen-3.6-plus` | Qwen3.6-Plus | ✓ | 200000 | 0.26 |
-| `qwen-3.5` | Qwen3.5-Plus | ✓ | 200000 | 0.26 |
+| id | 展示名 | 多模态 | 上下文 | 倍率 | 思考档 |
+|---|---|---|---|---|---|
+| `Doubao-Seed-Evolving` | Seed-Evolving | ✓ | 256000 | 0.8 | — |
+| `Doubao-Seed-2.1-Pro` | Seed-2.1-Pro-0915 | ✓ | 256000 | 0.8 | light / high |
+| `Doubao-Seed-2.1-Turbo` | Seed-2.1-Turbo | ✓ | 256000 | 0.2 | light / high |
+| `Doubao-Seed-Code` | Seed-Code（默认） | ✓ | 256000 | 0.06 | light / high |
+| `glm-5.3` | GLM-5.3 | ✗ | 200000 | 0.78 | light / high / extra_high |
+| `glm-5.2` | GLM-5.2 | ✗ | 200000 | 0.78 | high / extra_high |
+| `DeepSeek-V4-Flash-Official` | DeepSeek-V4-Flash 正式版 | ✗ | 200000 | 0.08 | light / high / extra_high |
+| `DeepSeek-V4-Pro-Official` | DeepSeek-V4-Pro 正式版 | ✗ | 200000 | 0.36 | light / high / extra_high |
+| `kimi-k3` | Kimi-K3 | ✓ | 200000 | 1.83 | light / high / extra_high |
+| `kimi-k2.7-code` | Kimi-K2.7-Code | ✓ | 200000 | 0.83 | — |
+| `kimi-k2.6` | Kimi-K2.6 | ✓ | 200000 | 0.75 | — |
+| `minimax-m3` | MiniMax-M3 | ✓ | 200000 | 0.26 | — |
+| `qwen3.8-max` | Qwen3.8-Max | ✓ | 200000 | 1.5 | light / high / extra_high |
+| `qwen-3.7-plus` | Qwen3.7-Plus | ✓ | 200000 | 0.25 | — |
 
-> 调研简报里记的 `DeepSeek-V4-Pro 0.72` / `DeepSeek-V4-Flash 0.16` /
-> `qwen-3.5-plus` 与真机响应**不符**（实测 0.36 / 0.08，且 id 是 `qwen-3.5`）。
-> 静态表按**真机响应逐字**写。
+远端带 `show_custom_model=true` 时会**多回 2 项账号私有自定义模型**
+（真机 `deepseek-chat` / `deepseek-reasoner`，`config_source:3` / 非 preset /
+带 `custom_model_id`）。它们是**按账号**存在服务端的（三方 key 由服务端持有），
+故**只出现在远端目录、不进静态表** —— 塞进共用静态表会让每个账号都看到
+不属于自己的条目。真机实测这两项**当前路由不通**：发出后收到 SSE
+`error` 帧 `code:4028`「Authentication Fails, Your api key: ****b192 is invalid」
+（`4028` 在网页版错误码表里正是 `custom_model_origin_error`），即服务端确实
+按 id 取到了该账号存的三方 key、但那把 key 已失效。这是**账号侧的三方配置问题**，
+不是适配器缺能力，故如实列出并把上游原文透给用户。
 
-### 思考档：v1 **不声明**
+### 思考档：**已接线**（9/14 项声明），落点在 `custom_model` **内部**
 
-真机目录里只有 `Doubao-Seed-Code` 一项带 `reasoning_effort_config`，且内容是
-`{support_thinking:false, options:null, default_level:""}` —— 即**明确不支持思考**；
-其余 11 项连该字段都没有。故 `resolveModel` **不声明 `reasoning`**
-（模型选择器显示「当前模型未提供推理等级」，那是诚实的）。
-若将来实测出 Work 的档位配置，在 `resolveModel` 补 `reasoning` 即可。
+> ⚠️ **落点与 IDE 路径不同，不要「统一」掉**：
+> - IDE 路径（`src/trae-cn-adapter.ts`）：`reasoning_effort_level` 在请求体**顶层**；
+> - Work 路径（`src/trae-cn-work-adapter.ts`）：同名字段在 **`custom_model` 对象内部**。
+
+真机 `solo_agent_remote` 组里 **9/14 项**带
+`reasoning_effort_config{support_thinking:true, options:[…], default_level:"…"}`，
+档位 id 逐字符照抄（`light` / `high` / `extra_high`），默认档取自
+`default_level`。其余 5 项（`Doubao-Seed-Evolving` / `minimax-m3` /
+`qwen-3.7-plus` 是 `support_thinking:false`，`kimi-k2.7-code` / `kimi-k2.6`
+连该字段都没有）**保持不声明** —— 给一个上游不认的档位会让每次请求都带上
+无效字段。
+
+**下发字段名与落点的取证链**（网页版 bundle `1626.b49a23c3.js`）：
+
+```js
+// getModelRequestSelection()：档位塞进 custom_model 的构造式里
+r = {provider, is_preset, config_name, config_source, model_name,
+     display_model_name, ak, base_url, custom_model_id,
+     use_remote_service, multimodal, prompt_max_tokens};
+"reasoning_effort_level" === t.field && void 0 !== t.value
+  && (r.reasoning_effort_level = t.value);
+```
+
+而 `resolveReasoningEffortRequestField` 默认返回
+`{field:"reasoning_effort_level", value}`，只有**字节内网账号**
+（`scope===BYTEDANCE`）才走 `reasoning_effort` —— 与 IDE 路径同源结论：
+**字段名同名，落点不同**。
+
+**真机 A/B（2026-09-19）**，同 prompt、模型 `Doubao-Seed-Code`：
+
+| 请求体 | `token_usage.reasoning_tokens` | `plan_item.reasoning_content` |
+|---|---|---|
+| 不带本字段 | **131** | 344 字（15 帧） |
+| `custom_model.reasoning_effort_level="light"` | **13 / 17**（两次） | 56 / 71 字 |
+| `custom_model.reasoning_effort="light"` | 28 | 66 字 |
+
+「不带」与带 `reasoning_effort_level` 差一个数量级，而带**错名**的
+`reasoning_effort` 与「不带」同量级 —— 即上游只认 `reasoning_effort_level`，
+且它确实改变了思考量（不是被静默忽略的无效字段）。
+
+适配器**只在调用方显式给了档位时才构造 `custom_model`**（不主动补档：DSH 已按
+`reasoning.defaultEffort` 在省略时补好，适配器再补一次会与 DSH 的口径分叉）。
+未指定档位时**整个 `custom_model` 都不发** —— 即线上原有行为，零行为变更。
 
 ### 错误分类：**以 HTTP 状态码为主**（Work 码表未标定）
 
@@ -1336,7 +1407,7 @@ Work 的码表**没有任何实测样本**（真机两轮全绿，一帧错误�
 
 | 项 | 结果 |
 |---|---|
-| `GET /api/remote/v1/models` | HTTP 200，12 项，字段清单见上表 |
+| `GET /api/remote/v1/models`（裸打） | HTTP 200，**`solo_coder` 12 项**（⚠️ 不是本 agent 的池，见上） |
 | 三段式全链路 | 建会话 200 → 发消息 200 → 订阅 200（`text/event-stream`） |
 | 正文 | `"work adapter verified"`（走 `thought` 通道） |
 | 思考 | `"\n我现在需要按照用户的要求精确回复：work adapter verified"` |
@@ -1348,6 +1419,24 @@ Work 的码表**没有任何实测样本**（真机两轮全绿，一帧错误�
 
 三轮实测的 Work 池扣费分别为 **0.0616 / 0.0652 / 0.0572 / 0.0568**
 （前两轮为裸协议探针，后两轮走适配器），通用池**全程 0.0000**。
+
+### 模型目录与思考档重新取证（2026-09-19）
+
+用户报障「模型比 TraeWork 网页版少、且不能选思考程度」，重新取证后确认为
+**读错目录分组**（详见「模型目录」一节），并据此修正。取证手段与结论：
+
+| 项 | 结果 |
+|---|---|
+| 目录三组对照 | 裸打 `solo_coder` 12 项 / `?functions=solo_agent_remote` 14 项 / 再加 `show_custom_model=true` 16 项 |
+| 网页版调用形态 | bundle `1626.b49a23c3.js` 的 `fetchModels()` 明确传 `functions` 与 `show_custom_model` |
+| 思考档声明 | `solo_agent_remote` 组 **9/14 项** `support_thinking:true`（旧结论基于 `solo_coder` 组，是错的） |
+| 档位 id | `light` / `high` / `extra_high`（逐字符照抄，`glm-5.2` 只有 `high`/`extra_high`） |
+| 下发落点 | `custom_model.reasoning_effort_level`（bundle `getModelRequestSelection()` 逐字） |
+| 真机 A/B | 不带字段 `reasoning_tokens=131` / `light` 档 13·17 / 错名字段 28（见「思考档」一节的表） |
+| 私有自定义模型 | 2 项 `config_source:3`，按账号存在服务端；实测 `code:4028`（三方 key 失效） |
+
+> 本次取证共消耗 Work 池 10 轮对话（约 0.6 积分），每轮均按适配器同款路径
+> `finally DELETE` 清理会话。
 
 ### Account Hub 里的 Trae CN Work 面板
 
