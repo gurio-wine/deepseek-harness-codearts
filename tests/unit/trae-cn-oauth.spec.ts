@@ -44,6 +44,8 @@ import {
   TRAE_CN_EXCHANGE_TOKEN_PATH,
   TRAE_CN_IDE_VERSION,
   TRAE_CN_LOGIN_OS_VERSION,
+  TRAE_CN_LOGIN_REDIRECT,
+  TRAE_CN_LOGIN_REDIRECT_CALLBACK,
   TRAE_CN_PLUGIN_VERSION,
   type TraeCnProduct,
 } from '../../src/trae-cn-product.js'
@@ -195,7 +197,12 @@ function loginParam(loginUrl: string, name: string): string | null {
 
 /** 用真实 HTTP 请求模拟浏览器回调；返回响应。 */
 async function callCallbackRaw(loginUrl: string, query: string): Promise<Response> {
-  return fetch(`http://127.0.0.1:${callbackPort(loginUrl)}${TRAE_CN_CALLBACK_PATH}?${query}`)
+  // redirect: 'manual' —— 成功回调现在是 **307 回跳授权页**（对齐官方
+  // `updateLocalCredential`），不手动拦下就会真的跳到 www.trae.cn 上。
+  return fetch(
+    `http://127.0.0.1:${callbackPort(loginUrl)}${TRAE_CN_CALLBACK_PATH}?${query}`,
+    { redirect: 'manual' },
+  )
 }
 
 /** 用真实 HTTP 请求模拟浏览器回调；返回响应状态码。 */
@@ -412,6 +419,27 @@ describe('buildTraeCnLoginUrl', () => {
     )
     expect(loginParam(other, 'machine_id')).not.toBe(loginParam(url, 'machine_id'))
     expect(loginParam(other, 'device_id')).not.toBe(loginParam(url, 'device_id'))
+  })
+
+  it('redirect 可覆盖：成功回调的 307 回跳用 1，其余参数逐字不变', () => {
+    // 官方 `updateLocalCredential` 成功分支：`getLoginUrl(t, port, 1, …)`
+    // → `buildLoginUrl` 里 `redirect=${r||0}` → `writeHead(307,{Location})`。
+    const back = buildTraeCnLoginUrl(
+      51234, TRAE_CN, REAL_MACHINE_ID, REAL_DEVICE_ID, REAL_LOGIN_TRACE_ID, pkce,
+      TRAE_CN_LOGIN_REDIRECT_CALLBACK,
+    )
+    expect(TRAE_CN_LOGIN_REDIRECT_CALLBACK).toBe('1')
+    expect(loginParam(back, 'redirect')).toBe('1')
+    // 登录 URL 自身仍是 0（授权页据此进入登录流程而非直接渲染结果页）。
+    expect(loginParam(url, 'redirect')).toBe(TRAE_CN_LOGIN_REDIRECT)
+    // 除 redirect 外，两条 URL 逐参相等。
+    const before = new URLSearchParams(url.slice(url.indexOf('?') + 1))
+    const after = new URLSearchParams(back.slice(back.indexOf('?') + 1))
+    for (const [key, value] of before) {
+      if (key === 'redirect') continue
+      expect(after.get(key), `参数 ${key} 被改动`).toBe(value)
+    }
+    expect([...after.keys()].sort()).toEqual([...before.keys()].sort())
   })
 })
 
@@ -1106,9 +1134,9 @@ describe('prepareTraeCnLogin / awaitCredential（两段式）', () => {
     // 会话仍存活：互斥未释放，端口仍在监听。
     expect(hasActiveTraeCnLogin()).toBe(true)
 
-    // 真回调照常结算。
+    // 真回调照常结算，并以 307 回跳授权页结果页。
     const status = await callCallback(session.loginUrl, realCallbackQuery())
-    expect(status).toBe(200)
+    expect(status).toBe(307)
     const { value, error } = await settled
     expect(error).toBeUndefined()
     expect(value!.refreshable).toBe(true)
@@ -1133,7 +1161,7 @@ describe('prepareTraeCnLogin / awaitCredential（两段式）', () => {
     const session = await prepare({ fetcher, timeoutMs: 5000 })
     const settled = started(session.awaitCredential())
     const status = await callCallback(session.loginUrl, realCallbackQuery())
-    expect(status).toBe(200)
+    expect(status).toBe(307)
 
     const { value: result } = await settled
     expect(result).toBeDefined()
@@ -1164,6 +1192,54 @@ describe('prepareTraeCnLogin / awaitCredential（两段式）', () => {
     const response = await callCallbackRaw(session.loginUrl, realCallbackQuery())
     expect(response.headers.get('access-control-allow-origin')).toBe('*')
     await settled
+  })
+
+  it('**成功回调 307 回跳授权页结果页**（对齐官方 updateLocalCredential）', async () => {
+    // 回归点：早先回 200 + 静态 HTML「登录成功，可以关闭此窗口了」——
+    // 该页面停在 127.0.0.1 上**自身无法离开**（HTML 里没有 window.close()）。
+    // 弹窗被拦截、用户走面板内 <a target="_blank"> 手动链接时客户端没有窗口
+    // 引用，closeLoginWindow() 够不到那张标签页 —— 307 回跳是唯一出路。
+    const session = await prepare({
+      fetcher: stubFetch(() => authExchangeSuccess()),
+      timeoutMs: 5000,
+    })
+    const settled = started(session.awaitCredential())
+    const response = await callCallbackRaw(session.loginUrl, realCallbackQuery())
+    expect(response.status).toBe(307)
+    const location = response.headers.get('location')
+    expect(location).not.toBeNull()
+
+    // 回跳目标是**同一条授权页 URL，只把 redirect 换成 1** —— 与官方
+    // `getLoginUrl(…, 1, …)` → `buildLoginUrl` 里 `redirect=${r||0}` 同构。
+    const target = new URL(location!)
+    expect(target.origin + target.pathname).toBe('https://www.trae.cn/authorization')
+    expect(target.searchParams.get('redirect')).toBe('1')
+    // 其余参数逐项保留：授权页靠它们认流程分支，少一个就渲染不出结果页。
+    const original = new URL(session.loginUrl)
+    for (const key of [...original.searchParams.keys()]) {
+      if (key === 'redirect') continue
+      expect(target.searchParams.get(key), `回跳 URL 丢失参数 ${key}`).toBe(original.searchParams.get(key))
+    }
+    // 响应体为空（不是 HTML 页）—— 回跳由浏览器自己完成。
+    expect(await response.text()).toBe('')
+
+    const { value } = await settled
+    expect(value!.refreshable).toBe(true)
+  })
+
+  it('失败回调**维持 500**，不回跳（不猜测官方错误码页的渲染形态）', async () => {
+    const fetcher = stubFetch(() => new Response(JSON.stringify({
+      Code: 20324, Message: 'auth code expired',
+    }), { status: 200 }))
+    const session = await prepare({ fetcher, timeoutMs: 5000 })
+    const settled = started(session.awaitCredential())
+    const response = await callCallbackRaw(session.loginUrl, realCallbackQuery())
+    expect(response.status).toBe(500)
+    // 失败不 307：官方失败分支带 errorCode/errorMsg 回跳，而本插件的错误码
+    // 体系与官方不通用，回跳一个渲染形态无法保证的页面比明确的 500 更难查。
+    expect(response.headers.get('location')).toBeNull()
+    const { error } = await settled
+    expect(String(error)).toMatch(/auth code expired/)
   })
 
   it('OPTIONS 预检返回 204 与 CORS 头（且在路径判定之前处理）', async () => {
@@ -1277,7 +1353,7 @@ describe('prepareTraeCnLogin / awaitCredential（两段式）', () => {
     // 第一次会话未被打扰：回调照常完成并换回凭据。
     const settled = started(first.awaitCredential())
     const status = await callCallback(first.loginUrl, realCallbackQuery())
-    expect(status).toBe(200)
+    expect(status).toBe(307)
     const { value } = await settled
     expect(value!.refreshable).toBe(true)
   })
@@ -1345,7 +1421,7 @@ describe('runTraeCnLoginFlow（阻塞式便捷封装）', () => {
     // 等 openBrowser 被调用（登录 URL 已就绪）后再模拟浏览器回调。
     await vi.waitFor(() => { expect(openedUrl).not.toBe('') })
     const status = await callCallback(openedUrl, realCallbackQuery())
-    expect(status).toBe(200)
+    expect(status).toBe(307)
 
     const { value: result } = await flow
     expect(result).toBeDefined()

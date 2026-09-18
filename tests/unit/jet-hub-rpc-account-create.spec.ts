@@ -180,6 +180,14 @@ interface Harness {
   call<T = unknown>(method: string, payload: unknown): Promise<RpcResult<T>>
   /** 直接读账号池的权威条目（含 provider / expiresAt 等 UI 可见字段）。 */
   accounts(provider?: string): Promise<ProviderAccountEntry[]>
+  /**
+   * 直接往账号池写一条**任意形态**的条目（绕过 account.create）。
+   *
+   * 只给「非法 credentialRef」用例用：`account.create` 产出的 ref 一定合法
+   * （见 {@link accountCredentialRefName}），要复现历史遗留 / 未来拼写错误的
+   * 非法 ref，只能绕过它写池。
+   */
+  addRawAccount(entry: ProviderAccountEntry): Promise<void>
   credentials: FakeCredentials
   /** 切换 LobsterAI 的出网响应（默认成功）。 */
   setLobsteraiResponder(responder: () => Response): void
@@ -267,6 +275,7 @@ function createHarness(): Harness {
     call,
     accounts: (provider?: string) => pool.listAllAccounts()
       .then((all) => (provider === undefined ? all : all.filter((a) => a.provider === provider))),
+    addRawAccount: (entry) => pool.addAccount(entry),
     credentials,
     setLobsteraiResponder: (responder) => { lobsteraiResponder = responder },
     created,
@@ -442,11 +451,17 @@ describe.each(ALL_PROVIDERS)('account.create —— %s 两段式契约', (provid
 
     // 凭据确实落盘了，且 `login.poll` 现在报完成。
     expect(await harness.credentials.resolve(completed.credentialRef)).toBeDefined()
-    const poll = await harness.call<{ done: boolean; success?: boolean }>('login.poll', {
+    const poll = await harness.call<{ done: boolean; success?: boolean; error?: string }>('login.poll', {
       accountId: result.value.accountId,
       provider,
     })
     expect(poll.ok && poll.value.done).toBe(true)
+    // 成功路径**逐字节兼容**：仍是 `{done:true, success:true}`，**不带** error。
+    // 新增的失败终态只占 `error` 字段，成功语义一个字都没动。
+    if (poll.ok) {
+      expect(poll.value.success).toBe(true)
+      expect(poll.value.error).toBeUndefined()
+    }
   })
 
   it('后台失败时移除占位条目，不留幽灵账号、不落半成品凭据', async () => {
@@ -472,6 +487,51 @@ describe.each(ALL_PROVIDERS)('account.create —— %s 两段式契约', (provid
     })
     // 凭据也不该留下半成品。
     expect(harness.credentials.writes).toHaveLength(0)
+  })
+
+  /**
+   * 缺陷 2 的回归：**登录失败必须是终态**。
+   *
+   * 旧行为：第二段 catch 只 `removeAccount`，poll 随后查不到账号条目 →
+   * 永远回 `{done:false}` → 客户端白等 5 分钟且窗口不收（用户报障的
+   * 「登录后多出残留标签页」）。
+   */
+  it('后台失败后 login.poll 回报失败终态（done:true + error），而非永远 done:false', async () => {
+    const harness = createHarness()
+    if (provider === 'lobsterai') {
+      harness.setLobsteraiResponder(() => new Response(
+        JSON.stringify({ code: 40100, msg: 'token rejected' }), { status: 200 },
+      ))
+    }
+    const { result, flow } = await startCreate(harness, { exchangeFails: provider === 'codearts' })
+    if (!result.ok) throw new Error(`create 失败：${JSON.stringify(result)}`)
+    const accountId = result.value.accountId
+
+    if (provider === 'buddy' || provider === 'workbuddy') {
+      flow!.reject(new Error('登录窗口已关闭'))
+    } else {
+      await completeLogin(provider, result.value.loginUrl, flow)
+    }
+    // 等第二段失败路径跑完（登记失败 + 删占位）。
+    await vi.waitFor(async () => {
+      expect(await harness.accounts(provider)).toHaveLength(0)
+    })
+
+    const poll = await harness.call<{ done: boolean; success?: boolean; error?: string }>(
+      'login.poll', { accountId, provider },
+    )
+    expect(poll.ok, JSON.stringify(poll)).toBe(true)
+    if (!poll.ok) return
+    expect(poll.value.done).toBe(true)
+    expect(poll.value.error, '失败终态必须带可展示的原因').toBeTruthy()
+    // 失败**不是**成功：不得带 success。
+    expect(poll.value.success).toBeUndefined()
+
+    // 一次性语义：登记读到即清，第二次 poll 回到「未完成」而不是重复报同一个失败。
+    const again = await harness.call<{ done: boolean; error?: string }>(
+      'login.poll', { accountId, provider },
+    )
+    expect(again.ok && again.value.done).toBe(false)
   })
 })
 
@@ -611,6 +671,73 @@ describe('account.create —— login.poll 的完成判据是「凭据可解析�
     await vi.waitFor(() => {
       expect(harness.credentials.writes).toEqual([placeholderRef])
     })
+  })
+})
+
+describe('login.poll —— 非法 credentialRef 的预检（不抛 TypeError）', () => {
+  /**
+   * 缺陷 1 的回归：`credentialRef()` 对不合规名称抛 TypeError
+   * （`REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/`，连字符**不在**字符集内）。
+   *
+   * 旧行为：poll 裸用 `credentialRef(entry.credentialRef)` → 抛错 → 被 RPC 层
+   * 包成 `jet-hub/handler-failed` → 客户端把它当网络抖动吞掉继续轮询 →
+   * 又是一种「静默空等 5 分钟」。这正是 `1e8e285` 修掉的 ref 拼写错误的
+   * **表现形态**，本层防御覆盖「未来同类拼写错误」。
+   *
+   * 非法 ref 只能绕过 `account.create` 写进池（它产出的 ref 一定合法），
+   * 故用 `addRawAccount` 直接落一条历史遗留形态的条目。
+   */
+  it('带连字符的 ref 回失败终态而不是抛 handler-failed', async () => {
+    const harness = createHarness()
+    // `1e8e285` 之前的形态：provider id 原样拼进 ref（`TRAE-CN_ACCOUNT_XXX`）。
+    await harness.addRawAccount({
+      id: 'trae-cn-legacy1',
+      provider: 'trae-cn',
+      nickname: 'trae-cn-legacy1',
+      enabled: true,
+      credentialRef: 'TRAE-CN_ACCOUNT_DEADBEEF',
+      refreshable: false,
+      createdAt: Date.now(),
+    })
+
+    const poll = await harness.call<{ done: boolean; error?: string }>(
+      'login.poll', { accountId: 'trae-cn-legacy1', provider: 'trae-cn' },
+    )
+    // 关键：**不是** ok:false / handler-failed，而是可判别的失败终态。
+    expect(poll.ok, JSON.stringify(poll)).toBe(true)
+    if (!poll.ok) return
+    expect(poll.value).toEqual({ done: true, error: 'invalid-credential-ref' })
+  })
+
+  it('合法 ref 的既有语义不变：无凭据仍报未完成', async () => {
+    const harness = createHarness()
+    // buddy 的第一段要取 auth/state（真网已被打桩），后台流程挂住不结算 ——
+    // 于是账号停在占位形态、凭据未写，正是「未完成」的样本。
+    mockedFetchAuthState.mockResolvedValue({
+      state: 'state-1',
+      authUrl: 'https://copilot.tencent.com/login?platform=ide',
+    })
+    mockedRunBuddyLoginFlow.mockReturnValue(deferred<BuddyLoginFlowResult>().promise)
+    const created = await createAccount(harness, 'buddy')
+    if (!created.ok) throw new Error(`create 失败：${JSON.stringify(created)}`)
+
+    const poll = await harness.call<{ done: boolean; success?: boolean; error?: string }>(
+      'login.poll', { accountId: created.value.accountId, provider: 'buddy' },
+    )
+    expect(poll.ok).toBe(true)
+    if (!poll.ok) return
+    // 占位条目：凭据还没写 → 未完成，且**不带** error（不是失败）。
+    expect(poll.value.done).toBe(false)
+    expect(poll.value.error).toBeUndefined()
+    expect(poll.value.success).toBeUndefined()
+  })
+
+  it('未知 accountId 仍报未完成（不因失败登记表的存在而变语义）', async () => {
+    const harness = createHarness()
+    const poll = await harness.call<{ done: boolean; error?: string }>(
+      'login.poll', { accountId: 'nobody-00000000', provider: 'buddy' },
+    )
+    expect(poll.ok && poll.value.done).toBe(false)
   })
 })
 
@@ -812,5 +939,44 @@ describe('客户端 createAccount 的弹窗形态（源码级回归）', () => {
     expect(closeCalls.length).toBeGreaterThanOrEqual(4)
     // 轮询成功后必须先收窗、再刷新账号列表。
     expect(body).toMatch(/closeLoginWindow\(\);\s*\n\s*await loadAccounts\(\);/)
+  })
+
+  /**
+   * 缺陷 3 的回归（源码级）：**失败与超时也必须收窗**。
+   *
+   * 旧行为：轮询只在 `pollRes.done` 时 `clearInterval` + `closeLoginWindow()`；
+   * 超时分支只 `clearInterval(pollTimer)` 不收窗 → poll 全程异常时窗口残留
+   * 5 分钟后仍留着；宿主回失败终态时窗口也留着（用户报障的残留标签页）。
+   */
+  it('轮询收尾走同一个 finishPolling（停表 + 收窗 + 刷新账号列表）', () => {
+    expect(body).toContain('const finishPolling = async () => {')
+    const finishAt = body.indexOf('const finishPolling = async () => {')
+    const finishBlock = body.slice(finishAt, body.indexOf('\n      };', finishAt))
+    // 三件事都在同一个收尾函数里，三条终态路径才可能都做全。
+    expect(finishBlock).toContain('clearInterval(pollTimer)')
+    expect(finishBlock).toContain('closeLoginWindow()')
+    expect(finishBlock).toContain('await loadAccounts()')
+    // 幂等闸：成功收尾后那个 5 分钟定时器仍在，重复调用必须是 no-op。
+    expect(finishBlock).toContain('if (pollSettled) return;')
+    expect(finishBlock).toContain('pollSettled = true;')
+  })
+
+  it('失败终态（done + error）收窗并把原因显示给用户', () => {
+    // 宿主 `login.poll` 的失败终态：`done:true` 且带 `error`。
+    expect(body).toContain('pollRes.error')
+    // 复用面板既有的通知行，而不是新造 UI 组件。
+    expect(body).toMatch(/setProbeNotice\(\{ tone: 'error'[^}]*登录失败/)
+    // 失败分支与成功分支一样走 finishPolling（收窗 + 刷新）。
+    const errorAt = body.indexOf('pollRes.error')
+    expect(body.slice(errorAt)).toContain('await finishPolling()')
+  })
+
+  it('5 分钟超时也收窗（只清定时器会留下一张永远挂着的窗口）', () => {
+    const timeoutAt = body.indexOf('}, 300000);')
+    expect(timeoutAt, '未找到 5 分钟超时分支').toBeGreaterThan(-1)
+    // 超时分支所在的那一行必须是 finishPolling，而不是裸的 clearInterval。
+    const timeoutLine = body.slice(body.lastIndexOf('\n', timeoutAt) + 1, timeoutAt + 10)
+    expect(timeoutLine).toContain('finishPolling')
+    expect(timeoutLine).not.toMatch(/setTimeout\(\(\) => \{ clearInterval\(pollTimer\); \}/)
   })
 })

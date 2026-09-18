@@ -134,6 +134,18 @@ CodeBuddy 系、LobsterAI 完全一致（见 [AGENTS.md](AGENTS.md) 的「登录
    `CodeArtsAuth.persistLoginResult()` 写凭据并补全占位账号
    （`expiresAt` / `refreshable`）；失败则 `pool.removeAccount` 移除占位，
    避免留下无凭据的幽灵账号。
+3. **轮询结算**：客户端每秒调 `login.poll`，宿主按 `accountId` 回
+   `{done, error?}`。**失败是终态**：第二段失败时先登记失败原因、再删占位
+   （`jet-hub-rpc.ts` 的 `loginFailures` 表），poll 回 `{done:true, error}`
+   并**读到即清**；成功仍是 `{done:true, success:true}`，未完成是
+   `{done:false}`。三者严格区分 —— 否则「失败」会退化成「永远未完成」，
+   客户端白等 5 分钟且窗口不收（用户报障的残留标签页）。
+   `login.poll` 还会**预检 `credentialRef` 合法性**（`isCredentialRefName`，
+   与 `credentialRef()` 同一个 `REF_PATTERN`），非法时回
+   `{done:true, error:'invalid-credential-ref'}` 而不是让 `credentialRef()`
+   抛 TypeError 被包成 `handler-failed`（客户端会把它当网络抖动吞掉）。
+   客户端三条终态路径（成功 / 失败 / 5 分钟超时）共用同一个收尾动作
+   （`finishPolling`：停表 + 收窗 + 刷新账号列表）。
 
 配套约束：
 
@@ -665,7 +677,8 @@ body **不含** `ClientSecret` / `DeviceProof`）；续期用
 
 | 请求 | 响应 | 对会话的影响 |
 |---|---|---|
-| 带 `authCodeInfo` / `refreshToken` | 200 / 500 | 结算（成功 / 交换失败） |
+| 带 `authCodeInfo` / `refreshToken` 且交换成功 | **307 回跳授权页结果页**（`redirect=1`） | 结算（成功） |
+| 带 `authCodeInfo` / `refreshToken` 但交换失败 | 500 纯文本 | 结算（交换失败） |
 | `OPTIONS` 预检 | 204 + CORS 头 | 无 |
 | 路径不符 | 404 + CORS 头 | 无 |
 | 无载荷 / 畸形 | 400（不回显请求内容） | **无** —— 会话继续等真回调 |
@@ -673,6 +686,17 @@ body **不含** `ClientSecret` / `DeviceProof`）；续期用
 早先实现把「解析不出凭据」当成登录失败（reject + 关端口），实测一次 500 探测
 就终结了整个会话（端口关闭、占位账号被删），用户之后即使真的完成授权也无处回调。
 现在只有「成功」「交换失败」「超时」「cancel」四种情况终结会话。
+
+**成功回调是 307 回跳，不是静态 HTML**（对齐官方 `updateLocalCredential`）：
+回调页停在 `127.0.0.1:{port}` 上自身无法离开（HTML 里没有 `window.close()`）。
+弹窗被拦截、用户走面板内 `<a target="_blank">` 手动链接时客户端**没有窗口引用**，
+`closeLoginWindow()` 够不到那张标签页 —— 307 回跳是唯一能把它送回
+`www.trae.cn`（授权页渲染「登录成功」结果页）的机制。回跳目标是**同一条授权页
+URL、只把 `redirect` 换成 `1`**（官方 `getLoginUrl(…, 1, …)` →
+`buildLoginUrl` 里 `redirect=${r||0}` → `writeHead(307,{Location:a})` 逐字同构，
+从本机 `%LOCALAPPDATA%\Programs\Trae CN\resources\app\out\main.js` 提取）。
+**失败路径维持 500 纯文本**：官方失败分支会带 errorCode/errorMsg 回跳，而本插件
+的错误码体系与官方不通用，回跳一个渲染形态无法保证的页面比明确的 500 更难查。
 
 回调服务器**带 CORS 头**（`Access-Control-Allow-Origin: *` 与 OPTIONS 处理）：
 官方实现里回调是整页跳转、同源策略不介入，但我们的登录页由客户端开窗，

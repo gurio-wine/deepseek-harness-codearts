@@ -190,6 +190,28 @@ export const TRAE_CN_CHANNEL_NAME = 'common'
  */
 export const TRAE_CN_LOGIN_REDIRECT = '0'
 /**
+ * 登录**成功回调**回跳时用的 `redirect` 值（官方 `1`）。
+ *
+ * ## 来源（本机官方客户端逐字提取，非发明）
+ *
+ * `%LOCALAPPDATA%\Programs\Trae CN\resources\app\out\main.js` 的
+ * `updateLocalCredential` 函数里，成功分支调用
+ * `s()`（无参）→ `getLoginUrl(t, await this.server.getPort(), 1, …)` →
+ * `buildLoginUrl` 里 `redirect=${r||0}`；随后 `i.writeHead(307,{Location:a}),i.end()`
+ * —— 即**用同一条授权页 URL 构造器、把 `redirect` 换成 `1`**，再 307 回跳。
+ *
+ * 失败分支走 `s(errorCode, errorMsg)`，同样 307（本插件失败路径维持 500，
+ * 见 `trae-cn-oauth.ts` 回调处理器的说明）。
+ *
+ * ## 为什么必须有这一跳
+ *
+ * 回调页停在 `127.0.0.1:{port}`，自身无法离开（静态 HTML 没有 `window.close()`）。
+ * 弹窗被拦截、用户走面板内 `<a target="_blank">` 手动链接时，客户端**没有窗口
+ * 引用**，`closeLoginWindow()` 够不到那张标签页 —— 307 回跳是唯一能让它离开
+ * loopback 的机制（官方同款）。授权页收到 `redirect=1` 后渲染「登录成功」结果页。
+ */
+export const TRAE_CN_LOGIN_REDIRECT_CALLBACK = '1'
+/**
  * `DeviceInfo.PlatformCode` —— 真机 `IDE_PC`（官方实现按 SOLO/IDE 二分，
  * 本 provider 恒为 IDE 形态）。
  */

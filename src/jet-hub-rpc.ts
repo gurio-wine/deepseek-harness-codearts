@@ -12,7 +12,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
+import { credentialRef, isCredentialRefName, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { AccountPool } from './account-pool.js'
 import type { CodeArtsAuth } from './service.js'
 import type { BuddyAuth } from './buddy-auth.js'
@@ -205,6 +205,42 @@ const pendingCodeartsLogins = new Map<string, { accountId: string; session: Code
  * 这里不重复实现判重 —— 否则两处状态会在异常路径上失去同步。
  */
 const pendingTraeCnLogins = new Map<string, { accountId: string; session: TraeCnPendingLogin }>()
+
+/**
+ * 登录**失败终态**登记表（accountId → 失败原因）。
+ *
+ * ## 为什么需要它（用户报障的根因）
+ *
+ * 两段式登录的第二段失败时（网络错、协议变更、凭据名非法……），现有实现只做
+ * `pool.removeAccount(id)` 把占位账号删掉。而 `login.poll` 的完成判据是
+ * 「账号池里有这个 id **且** 其凭据可解析」—— 账号被删后 poll 永远落到
+ * `entry === undefined` 分支，返回 `{ done: false }`。于是：
+ *
+ * - 客户端把 5 分钟轮询白等到底，**永远等不到 `done`**；
+ * - 登录窗口一直留着（用户报障：「登录后多出残留标签页」）。
+ *
+ * 失败必须是**终态**，与「还没完成」严格区分：登记表让 poll 能如实回
+ * `{ done: true, error }`。poll 读到即清（一次性语义，避免同一 accountId
+ * 的陈旧失败污染下一次登录），故不需要过期时间。
+ *
+ * 刻意**不**按 provider 分表：accountId 本身已全局唯一（`${provider}-${shortId()}`）。
+ */
+const loginFailures = new Map<string, string>()
+
+/**
+ * 登记一次登录失败终态，并把原因整理成**可展示**的短文案。
+ *
+ * 四个 provider 的第二段失败路径共用它：先登记失败，再删占位账号。
+ * 顺序不能反 —— 虽然 poll 是异步读的，但「登记 → 删除」让窗口期内
+ * 读到的是确定的失败，而不是「账号还在但没凭据」的中间态。
+ *
+ * @param accountId - 占位账号 id（poll 的查询键）。
+ * @param error - 第二段抛出的原因（任意类型，按 Error/字符串归一化）。
+ */
+function recordLoginFailure(accountId: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error)
+  loginFailures.set(accountId, reason.length > 0 ? reason : '登录失败（宿主未提供原因）')
+}
 
 /**
  * 积分端点的可注入依赖。
@@ -554,7 +590,9 @@ function registerJetHubEndpoints(
             })
           }).catch((err) => {
             ctx.logger.warn(`[jet-hub] background ${product.id} login failed for ${id}: ${err}`)
-            // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
+            // 登录失败是**终态**：先登记失败（poll 据此收窗并提示），
+            // 再移除占位条目，避免留下无凭据的幽灵账号。
+            recordLoginFailure(id, err)
             void pool.removeAccount(id).catch(() => {})
           })
           return { ok: true, value: { accountId: id, loginUrl: authUrl } }
@@ -605,7 +643,8 @@ function registerJetHubEndpoints(
               `[jet-hub] background codearts login failed for ${id}: `
               + `${error instanceof Error ? error.message : String(error)}`,
             )
-            // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
+            // 登录失败是**终态**（见 loginFailures 的说明）：登记后再删占位。
+            recordLoginFailure(id, error)
             await pool.removeAccount(id).catch(() => {})
           }).finally(() => {
             pendingCodeartsLogins.delete(id)
@@ -659,7 +698,8 @@ function registerJetHubEndpoints(
               `[jet-hub] background ${LOBSTERAI.id} login failed for ${id}: `
               + `${error instanceof Error ? error.message : String(error)}`,
             )
-            // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
+            // 登录失败是**终态**（见 loginFailures 的说明）：登记后再删占位。
+            recordLoginFailure(id, error)
             await pool.removeAccount(id).catch(() => {})
           }).finally(() => {
             pendingLobsteraiLogins.delete(id)
@@ -708,7 +748,8 @@ function registerJetHubEndpoints(
               `[jet-hub] background ${TRAE_CN.id} login failed for ${id}: `
               + `${error instanceof Error ? error.message : String(error)}`,
             )
-            // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
+            // 登录失败是**终态**（见 loginFailures 的说明）：登记后再删占位。
+            recordLoginFailure(id, error)
             await pool.removeAccount(id).catch(() => {})
           }).finally(() => {
             pendingTraeCnLogins.delete(id)
@@ -739,6 +780,9 @@ function registerJetHubEndpoints(
         // Trae CN 同理（互斥同样是 provider 级的）。
         pendingTraeCnLogins.get(req.accountId)?.session.cancel('账号已删除，登录已取消')
         pendingTraeCnLogins.delete(req.accountId)
+        // 失败终态随账号一起清：账号已被用户主动删除，不该再有一条针对它的
+        // 失败登记等着被下一次 poll 读到（那会让新登录的窗口无端收到旧失败）。
+        loginFailures.delete(req.accountId)
         await pool.removeAccount(req.accountId)
         return { ok: true, value: undefined }
       }
@@ -801,9 +845,26 @@ function registerJetHubEndpoints(
 
       case 'login.poll': {
         const req = payload as RpcPollLoginRequest
+        // ① **失败终态优先**：第二段失败后占位账号已被删除，若先查账号条目就会
+        //    落进 `!entry → done:false`，客户端永远等不到结算（本次修的缺陷 2）。
+        //    读到即清：失败是一次性终态，避免同一 accountId 的陈旧失败污染下次登录。
+        const failure = loginFailures.get(req.accountId)
+        if (failure !== undefined) {
+          loginFailures.delete(req.accountId)
+          return { ok: true, value: { done: true, error: failure } }
+        }
         const accounts = await pool.listAllAccounts()
         const entry = accounts.find((a) => a.id === req.accountId)
         if (!entry) return { ok: true, value: { done: false } }
+        // ② **非法 ref 预检**：`credentialRef()` 对不合规名称抛 TypeError
+        //    （REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/）。裸用它会让 poll 被
+        //    RPC 层包成 handler-failed，客户端把它当网络抖动吞掉继续轮询 ——
+        //    又是一种「静默空等 5 分钟」。这里用官方导出的校验函数预检
+        //    （与 credentialRef 同一个 REF_PATTERN，不本地复制正则），
+        //    非法即回失败终态。这层防御覆盖「未来同类拼写错误」。
+        if (!isCredentialRefName(entry.credentialRef)) {
+          return { ok: true, value: { done: true, error: 'invalid-credential-ref' } }
+        }
         // 检查凭据是否已实际写入（占位条目没有凭据）
         const ref = credentialRef(entry.credentialRef)
         const resolved = await ctx.credentials.resolve(ref)

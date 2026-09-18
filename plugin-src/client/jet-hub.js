@@ -692,18 +692,47 @@ function ProviderPanel({ provider, rpcCall }) {
         // 改为在面板内渲染一个真实链接，由用户自己点击打开。
         setManualLogin({ url: loginUrl });
       }
+      /**
+       * 轮询的**收尾**动作（幂等）：停表 + 收窗 + 刷新账号列表。
+       *
+       * 三条终态路径共用它：登录成功、登录失败（宿主回 `done:true` + `error`）、
+       * 5 分钟超时。早先只有成功路径收窗 —— 另两条都留下一张孤儿标签页，
+       * 用户报障的「登录后多出残留标签页」正是它。
+       *
+       * `pollSettled` 让重复调用变成 no-op：成功收尾后那个 5 分钟定时器仍在，
+       * 不加这道闸就会在 5 分钟后白跑一次 `loadAccounts`。
+       */
+      let pollSettled = false;
+      const finishPolling = async () => {
+        if (pollSettled) return;
+        pollSettled = true;
+        clearInterval(pollTimer);
+        closeLoginWindow();
+        await loadAccounts();
+      };
       // 轮询等待登录完成
       const pollTimer = setInterval(async () => {
         try {
           const pollRes = await rpcCall('login.poll', { accountId, provider });
-          if (pollRes.done) {
-            clearInterval(pollTimer);
-            closeLoginWindow();
-            await loadAccounts();
+          if (!pollRes.done) return;
+          // **失败终态**：宿主已结算（`done:true`）但带 `error`。
+          // 必须与成功一样收窗 + 刷新，否则窗口会停在 127.0.0.1 上，
+          // 用户既看不出登录已失败、也无法从面板得知原因。
+          if (pollRes.error) {
+            console.warn('[jet-hub] login failed:', pollRes.error);
+            if (mounted.current) {
+              // 复用面板既有的通知行（probeNotice 的渲染块）而不是新造 UI：
+              // 面板的 `error` + `phase='error'` 是整页替换，会把刚刷新的
+              // 账号列表盖掉；这一行只在列表上方加一条可读原因。
+              setProbeNotice({ tone: 'error', text: `登录失败：${pollRes.error}`, details: [] });
+            }
           }
+          await finishPolling();
         } catch { /* 继续轮询 */ }
       }, 1000);
-      setTimeout(() => { clearInterval(pollTimer); }, 300000);
+      // 超时（5 分钟）：轮询期间宿主全程异常时也必须收窗，
+      // 只清定时器会留下一张永远挂着的窗口。
+      setTimeout(() => { void finishPolling(); }, 300000);
     } catch (caught) {
       console.error('[jet-hub] create account failed:', caught);
       // 所有错误路径都要收掉空窗，否则就是一张永远白屏的孤儿窗。

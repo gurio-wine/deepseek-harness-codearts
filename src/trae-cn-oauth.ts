@@ -67,6 +67,7 @@ import {
   TRAE_CN_LOGIN_OS_INFO,
   TRAE_CN_LOGIN_OS_VERSION,
   TRAE_CN_LOGIN_REDIRECT,
+  TRAE_CN_LOGIN_REDIRECT_CALLBACK,
   TRAE_CN_LOGIN_TIMEOUT_MS,
   TRAE_CN_LOGIN_VERSION,
   TRAE_CN_PLATFORM_CODE,
@@ -824,6 +825,11 @@ export async function exchangeTraeCnAuthCode(
  * ⚠️ 用 `URLSearchParams` 而非手工拼串：`auth_callback_url` 含 `://` 与 `:`
  * 必须被百分号编码，手工拼极易漏编码导致登录页校验失败。
  * 参数**顺序**与真机一致只是为了让日志能逐行对照，不承担协议语义。
+ *
+ * @param redirect - `redirect` 参数值；默认 {@link TRAE_CN_LOGIN_REDIRECT}（`0`，
+ * 授权页停在登录流程）。回调成功回跳时传
+ * {@link TRAE_CN_LOGIN_REDIRECT_CALLBACK}（`1`）——官方 `updateLocalCredential`
+ * 正是用同一构造器换 `redirect` 后 307 回跳的（见该常量的来源说明）。
  */
 export function buildTraeCnLoginUrl(
   port: number,
@@ -832,6 +838,7 @@ export function buildTraeCnLoginUrl(
   deviceId: string,
   loginTraceId: string,
   pkce: Pick<TraeCnPkce, 'codeChallenge' | 'codeChallengeMethod'>,
+  redirect: string = TRAE_CN_LOGIN_REDIRECT,
 ): string {
   const query = new URLSearchParams({
     login_version: TRAE_CN_LOGIN_VERSION,
@@ -840,7 +847,7 @@ export function buildTraeCnLoginUrl(
     plugin_version: TRAE_CN_PLUGIN_VERSION,
     auth_type: TRAE_CN_LOGIN_AUTH_TYPE,
     client_id: product.clientId,
-    redirect: TRAE_CN_LOGIN_REDIRECT,
+    redirect,
     login_trace_id: loginTraceId,
     auth_callback_url: `http://127.0.0.1:${port}${TRAE_CN_CALLBACK_PATH}`,
     machine_id: machineId,
@@ -1317,7 +1324,8 @@ async function defaultOpenBrowser(url: string): Promise<void> {
  *
  * 官方 server 同样设 `Access-Control-Allow-Origin: *` 并处理 `OPTIONS`，
  * 故这是对齐而非发明。`*` 在此**不构成越权**：回调服务只绑 `127.0.0.1`、
- * 只存活于本次登录窗口，且响应体不含任何凭据（只有一句「可以关闭此窗口了」）。
+ * 只存活于本次登录窗口，且响应体不含任何凭据（成功时只有一条 307 回跳、
+ * 失败时只有一句纯文本）。
  */
 export const TRAE_CN_CALLBACK_CORS_HEADERS: Readonly<Record<string, string>> = {
   'Access-Control-Allow-Origin': '*',
@@ -1425,6 +1433,12 @@ export async function prepareTraeCnLogin(
     // 回调服务器端口是在 `listen` 之后才知道的，先声明后赋值会让这个闭包
     // 引用一个尚未初始化的 const。
     const loginUrl = buildTraeCnLoginUrl(localPort, product, machineId, deviceId, loginTraceId, pkce)
+    // 成功回调的 307 回跳目标：**同一条授权页 URL，只把 `redirect` 换成 `1`**
+    // （官方 `updateLocalCredential` 的成功分支逐字如此，见
+    // {@link TRAE_CN_LOGIN_REDIRECT_CALLBACK} 的来源说明）。
+    const redirectBackUrl = buildTraeCnLoginUrl(
+      localPort, product, machineId, deviceId, loginTraceId, pkce, TRAE_CN_LOGIN_REDIRECT_CALLBACK,
+    )
     void completeTraeCnCallback(
       url,
       { machineId, deviceId, codeVerifier: pkce.codeVerifier, loginTraceId },
@@ -1433,11 +1447,21 @@ export async function prepareTraeCnLogin(
       options.signal,
     )
       .then((credentialValue) => {
-        response.writeHead(200, { ...TRAE_CN_CALLBACK_CORS_HEADERS, 'Content-Type': 'text/html; charset=utf-8' })
-          .end('<html><body><h2>登录成功，可以关闭此窗口了</h2></body></html>')
+        // 307 回跳而非静态 HTML：回调页停在 127.0.0.1 上自身无法离开
+        // （HTML 里没有 `window.close()`），而弹窗被拦截、用户走面板内
+        // `<a target="_blank">` 手动链接时客户端**没有窗口引用**、
+        // `closeLoginWindow()` 够不到那张标签页 —— 回跳是唯一能把它送回
+        // `www.trae.cn`（授权页渲染「登录成功」结果页）的机制。
+        response.writeHead(307, {
+          ...TRAE_CN_CALLBACK_CORS_HEADERS,
+          Location: redirectBackUrl,
+        }).end()
         resolveResult(toLoginFlowResult(credentialValue, loginUrl))
       })
       .catch((error: unknown) => {
+        // 失败路径**维持 500 纯文本**（不改 307）：官方失败分支会带
+        // errorCode/errorMsg 回跳，而本插件的错误码体系与官方不通用，
+        // 回跳一个我们无法保证渲染形态的页面比一条明确的 500 更难查。
         response.writeHead(500, { ...TRAE_CN_CALLBACK_CORS_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' })
           .end('登录换取凭据失败')
         rejectResult(error)
