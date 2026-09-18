@@ -187,7 +187,7 @@ const LOBSTERAI_FALLBACK_MODELS: readonly LobsteraiFallbackModel[] = [
  */
 export const LOBSTERAI: LobsteraiProduct = {
   id: 'lobsterai',
-  displayName: 'LobsterAI (有道)',
+  displayName: 'LobsterAI',
   portalBase: LOBSTERAI_PORTAL_BASE,
   apiBase: LOBSTERAI_API_BASE,
   clientVersionApi: LOBSTERAI_CLIENT_VERSION_API,

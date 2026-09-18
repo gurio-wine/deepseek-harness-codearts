@@ -138,7 +138,7 @@ describe('LobsteraiAdapter providerInfo', () => {
   it('返回产品 id 与展示名', () => {
     const { adapter } = makeAdapter(() => textSse('x'))
     expect(adapter.providerInfo('lobsterai')).toEqual({
-      id: 'lobsterai', name: 'LobsterAI (有道)',
+      id: 'lobsterai', name: 'LobsterAI',
     })
   })
 
@@ -673,7 +673,7 @@ describe('registerLobsteraiLlm', () => {
       refresh: async () => {},
     })
     expect(configurable).toEqual([{
-      provider: 'lobsterai', displayName: 'LobsterAI (有道)', settingsNs: 'llm-lobsterai', settingsPath: [],
+      provider: 'lobsterai', displayName: 'LobsterAI', settingsNs: 'llm-lobsterai', settingsPath: [],
     }])
     expect(adapters).toEqual(['lobsterai'])
   })

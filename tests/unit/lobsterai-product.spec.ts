@@ -14,7 +14,7 @@ describe('LobsterAI 产品配置', () => {
   it('基础字段与实测值一致', () => {
     expect(LOBSTERAI).toMatchObject({
       id: 'lobsterai',
-      displayName: 'LobsterAI (有道)',
+      displayName: 'LobsterAI',
       defaultCredentialRef: 'LOBSTERAI_ACCESS_TOKEN',
     })
   })

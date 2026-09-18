@@ -515,7 +515,7 @@ describe('Trae CN SSE 流消费', () => {
 describe('TraeCnAdapter providerInfo', () => {
   it('返回产品 id 与展示名', () => {
     const { adapter } = makeAdapter(() => sseResponse(''))
-    expect(adapter.providerInfo('trae-cn')).toEqual({ id: 'trae-cn', name: 'Trae CN (字节跳动)' })
+    expect(adapter.providerInfo('trae-cn')).toEqual({ id: 'trae-cn', name: 'Trae CN' })
   })
 
   it('provider 入参非法时回退到产品 id（避免 toUpperCase 崩溃）', () => {
@@ -1189,7 +1189,7 @@ describe('registerTraeCnLlm', () => {
     })
     expect(configurable).toEqual([{
       provider: 'trae-cn',
-      displayName: 'Trae CN (字节跳动)',
+      displayName: 'Trae CN',
       // 连字符在这里是**正确的**：namespace 是字符串键，与 cordis 服务名
       // （traeCnAuth）走两套命名规则。漏注册会让模型设置页在
       // refFor → deriveKeyRef(provider) 处崩溃。

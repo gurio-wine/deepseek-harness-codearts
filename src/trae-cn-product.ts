@@ -439,7 +439,7 @@ export interface TraeCnProduct {
  */
 export const TRAE_CN: TraeCnProduct = {
   id: 'trae-cn',
-  displayName: 'Trae CN (字节跳动)',
+  displayName: 'Trae CN',
   serviceName: 'traeCnAuth',
   portalBase: TRAE_CN_PORTAL_BASE,
   apiBase: TRAE_CN_API_BASE,
