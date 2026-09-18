@@ -9,6 +9,13 @@
 > 账号 ref `BUDDY_ACCOUNT_*`）。**协议字符串（`X-Product-Code: codebuddy` / `workbuddy`、
 > `platform: workbuddy-ai`、UA、域名）不随 provider id 改名**，仍是原字面量。
 
+> ⚠️ **凭据 ref 前缀在升级时会被自动搬迁**（这是改名的一部分，不是可选项）：
+> 旧 `BUDDY_*`（当年属于中国版）→ `BUDDY_CN_*`，旧 `WORKBUDDY_*`（国际版）→ `BUDDY_*`。
+> 也就是说 **`BUDDY_ACCOUNT_*` 这个前缀在改名前后指的是两个不同的产品**。
+> 跑本目录的探针前若刚升级过插件，先启动一次宿主让迁移跑完
+> （`src/provider-rename-migration.ts`，幂等可重入），否则探针可能读到尚未搬迁的
+> 旧 ref 而报「账号为空」。详见 README 的「provider 改名与数据迁移」。
+
 ## ⚠️ 会消耗模型积分（发真实 chat/completions 请求）
 
 | 文件 | 闸门 | 说明 |

@@ -8,12 +8,12 @@ deepseek-harness 插件：执行 CodeArts（华为云）登录流程，默认走
 
 此外插件内置另外四个 provider 路由：
 
-- **buddy（腾讯 CodeBuddy）** — 见 [buddy provider](#buddy-provider)；
+- **buddy-cn（Buddy CN）** — 见 [Buddy CN provider](#buddy-cn-provider)；
   另支持「一键领取积分」（每日签到）。
-- **workbuddy（腾讯 WorkBuddy 国际版）** — 见 [WorkBuddy provider](#workbuddy-provider)。
-- **lobsterai（有道 LobsterAI / 龙虾）** — 见 [LobsterAI provider](#lobsterai-provider)；
+- **buddy（Buddy）** — 见 [Buddy provider](#buddy-provider)。
+- **lobsterai（LobsterAI）** — 见 [LobsterAI provider](#lobsterai-provider)；
   另支持「一键领取积分」（每日签到）。
-- **trae-cn（字节跳动 Trae 国内版）** — 见
+- **trae-cn（Trae CN）** — 见
   [Trae CN provider](#trae-cn-provider字节跳动-trae-国内版)；
   后端已实现签到与积分余额（双池），前端能力矩阵登记见该节说明。
 
@@ -94,9 +94,54 @@ dsh plugin --profile <name> add "https://github.com/gurio-wine/dsh-account-hub.g
 
 > **账号与模型开关不会丢。** 账号索引与 `disabledModels` 模型开关存在 settings 的
 > `jet-hub` 命名空间里，凭据存在 `ctx.credentials` 中（ref 如
-> `CODEARTS_ACCESS_TOKEN` / `BUDDY_ACCOUNT_XXX`）。这些**都是代码标识符，改名时刻意
+> `CODEARTS_ACCESS_TOKEN` / `BUDDY_CN_ACCOUNT_XXX`）。这些**都是代码标识符，改名时刻意
 > 保持原样** —— 变的只有包名与界面文案，所以重装后账号池、登录状态与显示列表设置
 > 直接续用，无需重新登录。
+>
+> 上面这条说的是**包名**改名（`dsh-codearts-auth` → `dsh-account-hub`）。
+> 2026-09-18 的 **provider** 改名是另一回事，它是一次**破坏性变更**，落在持久化
+> 数据上，因此插件启动时**自动迁移**（见「provider 改名与数据迁移」一节）。
+
+### provider 改名与数据迁移（2026-09-18）
+
+**这是与上面那节性质完全不同的一次改名**：上面只动包名与界面文案，标识符一律
+不变；而这次动的是 **provider 的 id 与显示名**，落在 `settings.yaml` 与
+`.credentials.yaml` 里，属于**破坏性变更**。改名后的对应关系：
+
+| 新显示名 | 新 id | 原显示名 | 原 id |
+|---|---|---|---|
+| **Buddy CN** | `buddy-cn` | CodeBuddy (腾讯) | `buddy` |
+| **Buddy** | `buddy` | WorkBuddy (国际版) | `workbuddy` |
+| **Codearts** | `codearts` | CodeArts (华为云) | 不变 |
+| **LobsterAI** | `lobsterai` | LobsterAI (有道) | 不变 |
+| **Trae CN** | `trae-cn` | Trae CN (字节跳动) | 不变 |
+
+**两个腾讯系产品的 id 互换**，所以升级时数据必须跟着搬。插件启动时自动执行
+一次性迁移（`src/provider-rename-migration.ts`），覆盖三处持久化数据：
+
+- 账号条目的 `provider` / `credentialRef` / `id`（`settings.yaml` 的 `jet-hub` 命名空间）；
+- `disabledModels` 模型开关的 provider 键；
+- 凭据 ref 名（`.credentials.yaml`）：`BUDDY_*` → `BUDDY_CN_*`，
+  `WORKBUDDY_*` → `BUDDY_*`。
+
+迁移完成后写入 `schemaVersion: 1`，再次启动即整体跳过，**幂等可重入**。中途若
+出现凭据冲突（目标 ref 已存在且值不同）或写入失败，该条账号**整体保留原样**并
+记 `error` 日志，不会留下「账号指向新 ref、凭据还在旧 ref」的半迁移状态。
+
+> **从旧版本升级后若发现账号不见了，重启一次即可。** 迁移是异步
+> （fire-and-forget）执行的，不阻断插件启动；某一轮没跑完或遇到只读凭据源时，
+> 数据保持原状，下次启动重试。
+>
+> **旧会话的模型路由需要手动重选一次。** 会话里记住的 provider 名是**历史字面量**
+> —— 迁移只搬账号池与凭据，不会改写已存盘的会话记录。升级后若某个旧会话仍指向
+> 旧 provider 名（如旧 `workbuddy`，语义已翻转为 `buddy-cn`/`buddy`），
+> 在该会话里**重新选择一次模型**即可恢复。
+>
+> **出站协议值一律未改**（这是刻意的）：`X-Product-Code` 仍为
+> `codebuddy` / `workbuddy`，`platform` 仍为 `ide` / `workbuddy-ai`，
+> User-Agent 品牌字样与两个域名（`copilot.tencent.com` / `www.workbuddy.ai`）
+> 全部照旧。腾讯后台按这些值归因用量，跟着显示名改会让账单归属错乱 ——
+> **改名只发生在插件自己的 id / 显示名 / 服务名 / 设置命名空间 / 默认凭据 ref 上**。
 
 ### 通用说明
 
@@ -118,11 +163,11 @@ dsh plugin --profile <name> add "https://github.com/gurio-wine/dsh-account-hub.g
 
 ### 登录是两段式非阻塞的（2026-09 起）
 
-Account Hub 的 **CodeArts 面板**点「+ 新建账号」时，RPC **不再**在请求内等待浏览器
+Account Hub 的 **Codearts 面板**点「+ 新建账号」时，RPC **不再**在请求内等待浏览器
 登录。原实现（`account.create` 里 `await codearts.login(...)`）最长阻塞 180 秒，
 等它返回时触发点击的**用户手势早已过期** —— 客户端拿到 `loginUrl` 再开窗会被
 浏览器弹窗拦截，客户端的兜底逻辑于是自行开窗、把 DSH 页面顶掉。现在的形态与
-CodeBuddy 系、LobsterAI 完全一致（见 [AGENTS.md](AGENTS.md) 的「登录必须两段式」）：
+CodeBuddy 系（现 Buddy 系）、LobsterAI 完全一致（见 [AGENTS.md](AGENTS.md) 的「登录必须两段式」）：
 
 1. **第一段（同步返回）**：`CodeArtsAuth.prepareLogin()` → `prepareCodeartsLogin()`
    起本地回调服务器（端口 ≥10000）、生成 PKCE/DPoP，返回 `{port, loginUrl,
@@ -149,7 +194,7 @@ CodeBuddy 系、LobsterAI 完全一致（见 [AGENTS.md](AGENTS.md) 的「登录
 
 配套约束：
 
-- **provider 级互斥**：同一时间只允许一个进行中的 CodeArts 登录会话，重复点击返回
+- **provider 级互斥**：同一时间只允许一个进行中的 Codearts 登录会话，重复点击返回
   `{ok:false, error:'login-in-progress'}`（判别联合，**不抛异常** —— 抛异常会被 RPC
   统一包装成 `jet-hub/handler-failed`，客户端就拿不到可判别的错误码）。
   不复用旧会话（会让一份凭据被多个占位 accountId 共享），也不静默新建
@@ -191,9 +236,9 @@ Tokens 福利）。
 凭据来自默认的新式 IAM OAuth 流程（含 `refresh_token`）。请求发起时会解析最新
 凭据，若已过期则先静默续期，再用新 AK/SK/SecurityToken 签名，无需重新打开浏览器。
 
-除 `codearts` 外，插件另注册三个独立路由：`buddy`（见
-[buddy provider](#buddy-provider)）与 `workbuddy`（见
-[WorkBuddy provider](#workbuddy-provider)）两个腾讯系路由，以及 `lobsterai`
+除 `codearts` 外，插件另注册三个独立路由：`buddy-cn`（见
+[Buddy CN provider](#buddy-cn-provider)）与 `buddy`（见
+[Buddy provider](#buddy-provider)）两个 buddy 系路由，以及 `lobsterai`
 （见 [LobsterAI provider](#lobsterai-provider)）。四者互不覆盖，可同时使用。
 
 ## 凭证
@@ -274,12 +319,14 @@ bundle）。
 回调后轮询 snap-manager ticket 端点（120 × 1 秒）获取临时凭证；此类凭据没有
 `refresh_token`，其续期仍意味着重新运行浏览器登录流程。
 
-## buddy provider
+## Buddy CN provider
 
-独立路由 `buddy`（腾讯 CodeBuddy，OpenAI 兼容端点
+独立路由 `buddy-cn`（**Buddy CN**，原 CodeBuddy 中国版；OpenAI 兼容端点
 `https://copilot.tencent.com/v2/chat/completions`），Bearer `access_token` 鉴权。
+cordis 服务名是显式指定的 `ctx.buddyCnAuth` —— 带连字符的 id 机械派生会得到
+非标识符风格的 `buddy-cnAuth`，与 `trae-cn` 是同一先例。
 
-登录采用 external-link-v2 轮询式（与 CodeArts 的本地回调服务器不同，CodeBuddy
+登录采用 external-link-v2 轮询式（与 CodeArts 的本地回调服务器不同，Buddy CN
 不起本地端口，而是轮询后端 API）：
 
 1. `POST /v2/plugin/auth/state?platform=ide` → 取得 `state` 与 `authUrl`。
@@ -291,87 +338,95 @@ bundle）。
 5. 续期：`POST /v2/plugin/auth/token/refresh`，通过 `X-Refresh-Token` 头提交
    refresh_token。
 
-- **登录入口：Account Hub 设置页的 CodeBuddy 面板**（支持多账号与账号池自动切换）。
+- **登录入口：Account Hub 设置页的 Buddy CN 面板**（支持多账号与账号池自动切换）。
   已不再注册斜杠命令 —— 设置面板已覆盖登录、状态查看与续期，命令式入口冗余。
-- 编程式调用：`ctx.buddyAuth.login()` / `status()` / `refresh()` / `logout()` /
+- 编程式调用：`ctx.buddyCnAuth.login()` / `status()` / `refresh()` / `logout()` /
   `fetchModels()`。
 - 模型列表：以内置的产品目录为准（`src/product.ts` 的 `fallbackModels`），
   远端 `GET /v3/config` 可用时优先采用其元数据。
 - 请求头：除 `Authorization: Bearer` 外，还需 `X-Domain`、`X-Product`、
   `X-Product-Code` 以及伪装为 `CodeBuddyIDE/1.106.1` 的 `User-Agent`。
-- 凭据 ref：`BUDDY_ACCESS_TOKEN`，值为含 `access_token` / `refresh_token` /
-  `expires_at` 的 JSON 字符串。
+- 凭据 ref：单账号 `BUDDY_CN_ACCESS_TOKEN`，多账号 `BUDDY_CN_ACCOUNT_<UUID_SHORT>`；
+  值为含 `access_token` / `refresh_token` / `expires_at` 的 JSON 字符串。
 
-> **流式工具调用 id 稳定性**：CodeBuddy 仅首个工具调用分片携带真实 id
+> **流式工具调用 id 稳定性**：Buddy CN 仅首个工具调用分片携带真实 id
 > （`chatcmpl-tool-xxx`），后续参数分片只有 `index`。适配器按 index 缓存并沿用
 > 真实 id（缺失时回退 `call_{index}`），保证同一工具的所有分片 id 一致——否则
 > 跨轮次（每轮都从 `call_0` 重新编号）会把 `tool/result` 配对到错误的历史条目。
 
-## WorkBuddy provider（国际版）
+## Buddy provider
 
-独立路由 `workbuddy`（腾讯 **WorkBuddy 国际版 / WorkBuddy AI**），与
-[buddy provider](#buddy-provider) **同源**：共用同一 CLI 内核与同一认证协议
+独立路由 `buddy`（**Buddy**，原 WorkBuddy 国际版 / WorkBuddy AI），与
+[Buddy CN provider](#buddy-cn-provider) **同源**：共用同一 CLI 内核与同一认证协议
 （cli-external-link 轮询式），Bearer `access_token` 鉴权。差异收敛在
 `src/product.ts` 的产品配置里：
 
-| 项 | CodeBuddy（中国） | WorkBuddy（国际版） |
+| 项 | Buddy CN（中国版） | Buddy（国际版） |
 |---|---|---|
 | `endpoint` | `https://copilot.tencent.com` | **`https://www.workbuddy.ai`** |
 | `platform` | `ide` | **`workbuddy-ai`** |
 | 登录 URL 附加参数 | 无 | **`version` / `loginSessionId`** |
 | `pluginVersion` | — | `5.5.2` |
 
-**模型列表不能与中国版共用**：两者的路径与响应解析完全相同
+**协议值不随 id 改名**：本路由的 id 已从 `workbuddy` 改为 `buddy`，但它出站的
+`X-Product-Code` **仍是 `workbuddy`**、`X-Product` / `X-IDE-Name` / `X-IDE-Type`
+**仍是 `WorkBuddy`**、`platform` 仍是 `workbuddy-ai` —— 腾讯后台按这些值归因用量。
+
+**模型列表不能与 Buddy CN 共用**：两者的路径与响应解析完全相同
 （`GET /v3/config` → `data.data.models` / `data.data.agents`），差异只来自
 `endpoint` —— 不同区域的后端返回不同模型池（中国版含 glm / hy / deepseek 系，
 国际版含 claude / gpt / gemini / kimi 系）。因此 `endpoint` 必须随产品切换，
 不能被当成全局常量。
 
-登录流程与 CodeBuddy 一致（`auth/state` → 浏览器授权 → 轮询 `auth/token` →
-轮询 `login/account`），仅身份标识与端点按上表区分。`X-Product-Code` 为
-`workbuddy`，`X-Domain` 随 `apiDomain` 切换为 `www.workbuddy.ai`。
+登录流程与 Buddy CN 一致（`auth/state` → 浏览器授权 → 轮询 `auth/token` →
+轮询 `login/account`），仅身份标识与端点按上表区分。`X-Domain` 随 `apiDomain`
+切换为 `www.workbuddy.ai`。
 
 **没有每日签到积分**：国际版后端不提供**签到**接口（内核中只有
-`/v2/billing/meter/get-dosage-notify` 用量通知），因此 Account Hub 的 WorkBuddy
-面板**不显示「一键领取积分」按钮**；签到领取在 CodeBuddy 面板完成。
+`/v2/billing/meter/get-dosage-notify` 用量通知），因此 Account Hub 的 Buddy
+面板**不显示「一键领取积分」按钮**；签到领取在 Buddy CN 面板完成。
 
 > **但积分余额（Credits Balance）可以查。** 签到与余额是两项独立能力：国际版
 > 确实没有签到，但**有**积分余额查询接口，见下节。不要因为"没有签到"就推断
 > 也查不到余额。
 
-- **登录入口：Account Hub 设置页的 WorkBuddy 面板**（支持多账号与账号池自动切换）。
+- **登录入口：Account Hub 设置页的 Buddy 面板**（支持多账号与账号池自动切换）。
   同样不注册斜杠命令。
-- 编程式调用：`ctx.workbuddyAuth.login()` / `status()` / `refresh()` / `logout()` /
+- 编程式调用：`ctx.buddyAuth.login()` / `status()` / `refresh()` / `logout()` /
   `fetchModels()`。
 - 凭据 ref：
-  - 单账号：`WORKBUDDY_ACCESS_TOKEN`，值为含 `access_token` / `refresh_token` /
-    `expires_at` 的 JSON 字符串（与 `BUDDY_ACCESS_TOKEN` 同构）。
-  - 多账号：`WORKBUDDY_ACCOUNT_<UUID_SHORT>`，由 Account Hub 设置页「+ 新建账号」
-    登录时自动生成并登记到账号池；每条账号记录带 `provider: 'workbuddy'`，
-    与 CodeBuddy 的 `BUDDY_ACCOUNT_*` 相互隔离，不会串用凭据或限流标记。
-- **从中国版升级**：本插件早期版本把 `workbuddy` 指向中国版
-  （`copilot.tencent.com`）。启动时会自动清理凭据 `domain` 与当前
-  `apiDomain` 不符的旧账号（这类凭据在新端点必然失败），清理结果记入日志，
-  请在 Account Hub 重新登录。
-- 续期：与 CodeBuddy 共用同一套机制，插件启动后每 30 分钟对可续期账号静默刷新
+  - 单账号：`BUDDY_ACCESS_TOKEN`，值为含 `access_token` / `refresh_token` /
+    `expires_at` 的 JSON 字符串（与 `BUDDY_CN_ACCESS_TOKEN` 同构）。
+  - 多账号：`BUDDY_ACCOUNT_<UUID_SHORT>`，由 Account Hub 设置页「+ 新建账号」
+    登录时自动生成并登记到账号池；每条账号记录带 `provider: 'buddy'`，
+    与 Buddy CN 的 `BUDDY_CN_ACCOUNT_*` 相互隔离，不会串用凭据或限流标记。
+  - ⚠️ 迁移期注意：`BUDDY_ACCOUNT_*` 这个前缀**历史上属于中国版**。升级时由
+    `src/provider-rename-migration.ts` 按「中国版先让位、国际版后搬入」的两趟
+    顺序腾空并复用，见「provider 改名与数据迁移」一节。
+- **从中国版升级**：本插件**更早**的版本曾把当时名为 `workbuddy` 的这条路由指向
+  中国版端点（`copilot.tencent.com`；该路由现名 `buddy`）。启动时会自动清理凭据
+  `domain` 与当前 `apiDomain` 不符的旧账号（这类凭据在新端点必然失败），
+  清理结果记入日志，请在 Account Hub 重新登录。
+- 续期：与 Buddy CN 共用同一套机制，插件启动后每 30 分钟对可续期账号静默刷新
   （`refresh_token` 经 `X-Refresh-Token` 头提交），无需重新打开浏览器。
-- 请求头、模型列表拉取与流式工具调用 id 处理均与 CodeBuddy 一致，详见上一节。
+- 请求头、模型列表拉取与流式工具调用 id 处理均与 Buddy CN 一致，详见上一节。
 
 ### 与 Account Hub 设置页的关系
 
-Account Hub（设置页）的账号面板按 provider 分组展示，WorkBuddy 是其中一栏：
+Account Hub（设置页）的账号面板按 provider 分组展示，Buddy 是其中一栏：
 
 - 面板提供账号列表、新建账号（浏览器登录入池）、启用/停用、删除，以及「重测 /
-  重测所有 / 重置 / 重置所有」限流标记操作，行为与 CodeBuddy 面板一致，但
-  只操作 `provider: 'workbuddy'` 的账号。
+  重测所有 / 重置 / 重置所有」限流标记操作，行为与 Buddy CN 面板一致，但
+  只操作 `provider: 'buddy'` 的账号。
 - 账号卡片展示 credentialRef、有效期（含「自动续期」标记）、限流状态与**积分
-  余额**（见下节）。「一键领取积分」按钮**仅 CodeBuddy 面板提供**，结果来自
+  余额**（见下节）。「一键领取积分」按钮**仅 Buddy CN 面板提供**，结果来自
   RPC 端点 `credits.claimAll`（实现见 `src/jet-hub-rpc.ts`，签到客户端见
   `src/credits.ts`）。
 - 后端另实现了 `credits.status`（查询某 provider 下全部启用账号的签到状态），
   但**前端尚无消费者**：`plugin-src/client/jet-hub.js` 只调用 `credits.claimAll`，
   `credits.status` 目前仅供外部脚本或直接 RPC 调用使用。
-- 对应 LLM provider 的设置命名空间为 `llm-workbuddy`。
+- 对应 LLM provider 的设置命名空间为 `llm-buddy`（Buddy CN 是 `llm-buddy-cn`，
+  两者由 `llm-${product.id}` 派生）。
 
 ### 模型列表开关（黑名单）
 
@@ -383,7 +438,7 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 自动出现在选择器里，不会被静默挡在门外。
 
 - 开关状态持久化在 `jet-hub` settings 命名空间的 `disabledModels` 字段
-  （形如 `{ buddy: { 'glm-5.2': true } }`），与账号池同处一个 namespace。
+  （形如 `{ 'buddy-cn': { 'glm-5.2': true } }`），与账号池同处一个 namespace。
 - 模型列表来自 `ctx.llm.listModels()`，**即对话框模型选择器读取的同一份目录**
   （会话控制器的 `buildModelCatalog`），因此设置页展示的模型与实际可选集合始终
   一致，不会出现「设置里有、选择器里没有」的错位。
@@ -394,7 +449,9 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 - **只影响目录播报，不改变路由能力**：被关闭的模型仍可被 `resolveModel` 解析、
   仍能正常收发请求。这是 DSH 对 `listModels` 的约定（目录是建议性的，缺省不构成
   请求拒绝）。好处是已有会话若正用着某个被关闭的模型，不会被强制中断。
-- 开关按 provider 隔离，CodeArts / CodeBuddy / WorkBuddy / LobsterAI 四份黑名单互不影响。
+- 开关按 provider 隔离，Codearts / Buddy CN / Buddy / LobsterAI / Trae CN
+  五份黑名单互不影响。改名迁移会把这五份的 provider 键一并搬到新命名，见
+  「provider 改名与数据迁移」。
 - 相关 RPC 端点：`model.list`（列出模型并回填 `disabled`）、`model.setDisabled`
   （打开/关闭单个模型），实现见 `src/jet-hub-rpc.ts`。
 
@@ -405,7 +462,7 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 
 **支持范围**覆盖四个 provider、三套端点，语义一致：
 
-- **CodeBuddy 系（`buddy` / `workbuddy` 通用，仅 baseURL 随 `product.endpoint`
+- **Buddy 系（`buddy-cn` / `buddy` 通用，仅 baseURL 随 `product.endpoint`
   切换）**：
 
   ```
@@ -466,10 +523,10 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 
 ### 一键领取积分（每日签到）
 
-**当前由 CodeBuddy、LobsterAI 与 Trae CN 三个面板提供**该按钮。签到在本插件里
-共有**三套互不相通的实现**（CodeBuddy / LobsterAI / Trae CN，协议、端点、幂等
+**当前由 Buddy CN、LobsterAI 与 Trae CN 三个面板提供**该按钮。签到在本插件里
+共有**三套互不相通的实现**（Buddy CN / LobsterAI / Trae CN，协议、端点、幂等
 判据全不同，各自独立成文件）；三者的客户端能力登记均已落地，故三个面板都显示
-该按钮。CodeArts 是华为云账号体系不参与；WorkBuddy 国际版后端没有签到接口，
+该按钮。Codearts 是华为云账号体系不参与；Buddy（国际版）后端没有签到接口，
 故其面板不显示。详见「积分余额」一节末尾的说明。
 
 在 Account Hub 对应面板标题栏点击「**一键领取积分**」，插件会对该面板下
@@ -478,7 +535,7 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 > **含已停用账号。** 停用只影响账号池的自动选择与限流切换，不改变账号本身
 > 是否已签到——用户点「一键领取」时期望所有账号都尝试一遍。
 
-**CodeBuddy（两步）**：
+**Buddy CN（两步）**：
 
 1. 先查签到活动状态（`POST /v2/billing/meter/checkin-activity-status`）；
 2. 活动未开启或今日已签到则跳过领取请求，只报告状态；
@@ -526,20 +583,20 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 几点实现约定：
 
 - 领取是**顺序执行**的，避免并发触发风控；账号较多时需要等待片刻。
-- **CodeBuddy** 重复领取是幂等的：服务端返回 HTTP 400 + `code 10001`（「今天已签到，
+- **Buddy CN** 重复领取是幂等的：服务端返回 HTTP 400 + `code 10001`（「今天已签到，
   请明天再来」），插件把它识别为 `already-claimed` 而非失败。
 - **LobsterAI** 的幂等由**客户端**保证：请求带 `idempotencyKey`，且领取前先读
   `context` 的 `claimedToday` 与 `actions`；重复领取会被识别为 `already-claimed`。
-- CodeBuddy 的状态查询用 `checkin-activity-status` 而非 `checkin-status`；后者返回
+- Buddy CN 的状态查询用 `checkin-activity-status` 而非 `checkin-status`；后者返回
   占位数据（`active:false`、`checkin_dates:null`），会让人误判为活动未开启。
-- CodeBuddy 的请求**不需要** `X-Device-Token`（图灵盾）——已实测验证。
+- Buddy CN 的请求**不需要** `X-Device-Token`（图灵盾）——已实测验证。
 - LobsterAI 的签到**不需要签名**，只用 `Authorization: Bearer`；也**不发**腾讯系的
   `X-Domain` / `X-Product` / `X-Product-Code` 头。
 - Trae CN 的签到用 `Authorization: Cloud-IDE-JWT`（另带两个等值 token 头）+
   `Origin` / `Referer` = `https://www.trae.cn`；**不发**任何腾讯系或 LobsterAI 归属头。
 
 想单独验证领取闭环（会真实改动账号当日签到状态）可运行
-`pnpm test:e2e:workbuddy-claim` 或 `pnpm test:e2e:lobsterai-claim`，
+`pnpm test:e2e:buddy-claim` 或 `pnpm test:e2e:lobsterai-claim`，
 说明见 `tests/e2e/README.md`。
 
 ## LobsterAI provider（有道龙虾）
@@ -552,7 +609,7 @@ Bearer `access_token` 鉴权。
 （`src/lobsterai*.ts`），只共用架构模式（产品配置驱动、账号池、限流切换、
 模型黑名单）。关键差异：
 
-| 项 | 腾讯系（CodeBuddy / WorkBuddy） | LobsterAI |
+| 项 | Buddy 系（Buddy CN / Buddy） | LobsterAI |
 |---|---|---|
 | 登录方式 | 轮询后端 API（无本地服务器） | **本地回调服务器**收 `authCode` 后换 token |
 | 登录/API 域名 | 同一个 `endpoint` | **两个域名**（portal 与 apiBase） |
@@ -945,7 +1002,7 @@ serde 字段块里两者**并列存在**，印证这是「两套账号体系各�
 
 ### 签到与积分余额
 
-实现是独立一套 `src/trae-cn-credits.ts`（协议与 CodeBuddy 系三步都不同），
+实现是独立一套 `src/trae-cn-credits.ts`（协议与 Buddy 系、LobsterAI 都不同），
 三个 RPC 端点在同一处按 provider 分发（`src/jet-hub-rpc.ts`）。
 
 **端点与请求体**（host `https://api.trae.cn`，鉴权 `Cloud-IDE-JWT`）：
@@ -1006,7 +1063,7 @@ x-app-version: 3.3.100
 > 余额对象没有该字段，渲染逐元素不变（`tests/unit/jet-hub-credit-balance-row.spec.ts`）。
 > 改动前端后必须 `pnpm build:all` 重建客户端 bundle 才生效。
 
-**判定一律以 body `code` 为准，不看 HTTP 状态**（对齐 CodeBuddy 既有约定）：
+**判定一律以 body `code` 为准，不看 HTTP 状态**（对齐 Buddy 系既有约定）：
 无 auth 时服务端返回的是 **HTTP 200 + `code:1001` + `enable:false`**，按状态码判
 会把它当成成功。`code:1001` 在两个端点上的文案统一为「凭据已失效，请重新登录」。
 

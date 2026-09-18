@@ -8,6 +8,15 @@
 >
 > 分析基线：本插件 `feat/lobsterai` 分支（起点 `fff95bb`）。
 
+> ⚠️ **命名说明（2026-09-18 补记，不改正文）**：本文是**历史设计文档**，写于
+> provider 改名之前，正文里的 `buddy`（中国版 CodeBuddy）与 `workbuddy`
+> （国际版 WorkBuddy）是**当时的真实 id**，作为事实记录**原样保留**。
+> 改名后的对应关系是：旧 `buddy` → 现 **`buddy-cn`**（Buddy CN），
+> 旧 `workbuddy` → 现 **`buddy`**（Buddy）。凡涉及**当前状态**的引用与断言
+> （文件路径、`CREDITS_PROVIDERS`、能力矩阵、e2e 脚本名）已就地更新到新命名，
+> 需要与今日代码对照时以更新后的表述为准。详见 README 的
+> 「provider 改名与数据迁移」。
+
 ---
 
 ## 0. 结论速览
@@ -154,12 +163,13 @@ TypeScript 适配器**，而不是把 Go 二进制作为前置依赖跑起来。
 
 - `productCode`（`X-Product-Code` 头）、`attributionName`、`clientVersion`、`cliVersion`
   —— LobsterAI 不带这套归属头，只带 `X-LobsterAI-Client-*`；
-- `appendSessionParams` / `pluginVersion` —— 那是 WorkBuddy 登录 URL 的后缀参数；
+- `appendSessionParams` / `pluginVersion` —— 那是**国际版 Buddy** 登录 URL 的后缀参数；
 - `apiDomain`（`X-Domain` 头）—— LobsterAI 没有这个头；
 - `userAgentByModelFamily` —— 腾讯后台的 UA 归因机制，LobsterAI 无此概念；
 - `fallbackModels` 的字段结构（`reasoningEfforts` 等）—— 可复用但语义不同。
 
-而且 `id` 的类型是字面量联合 `'buddy' | 'workbuddy'`，加第三个值会牵动
+而且 `id` 的类型是字面量联合 `'buddy' | 'workbuddy'`（即今日的
+`'buddy-cn' | 'buddy'`；改名后另加了必填字段 `serviceName`），加第三个值会牵动
 `productById`、`registerBuddyLlm`、`reconcileWithFallback` 等一串调用点。
 
 **正确做法**：新增独立的 `src/lobsterai-product.ts`（仿 `product.ts` 的**模式**），
@@ -268,6 +278,15 @@ export const CODEBUDDY: BuddyProduct = {
 - `productById(id)`（327-329）—— 按 id 查配置；
 - `ALL_PRODUCTS`（324）—— 遍历注册用；
 - `resolveUserAgent(product, model)`（341-346）—— 按模型族分档选 UA。
+
+> **补记（2026-09-18，反映当前代码）**：上面这段是**当时的真实形态**，
+> 行号与标识符均已因改名而变，对照今日代码时以本注为准：
+> 导出常量 `CODEBUDDY` → **`BUDDY_CN`**，同文件另有 `WORKBUDDY` → **`BUDDY`**；
+> 两条 `id` 分别是 `'buddy-cn'` 与 `'buddy'`；`displayName` 为 `'Buddy CN'` /
+> `'Buddy'`（不再带公司注记）；接口另增**必填字段 `serviceName`**；
+> 行号也已右移（接口与常量块均不在原行）。**协议值那一行没变**：
+> `productCode: 'codebuddy'` / `'workbuddy'`、`userAgent: 'CodeBuddyIDE/1.106.1'`
+> 至今仍是原字面量（见 README 的「provider 改名与数据迁移」）。
 
 消费点（全部靠 `product` 驱动，不写死）：
 - `BuddyAuth` 构造时 `super(ctx, `${product.id}Auth`)`（`buddy-auth.ts:126`）
@@ -583,6 +602,9 @@ const info = await this.ctx.credentials.describe(ref)
 - **ref 命名**：单账号用固定名（`CODEARTS_ACCESS_TOKEN` / `BUDDY_ACCESS_TOKEN` /
   `WORKBUDDY_ACCESS_TOKEN`）；多账号用 `{PROVIDER}_ACCOUNT_{UUID_SHORT}`
   （`jet-hub-rpc.ts:380-381`）。
+  > 这两个 buddy 系 ref 是**改正名之前**的取值：改名后中国版让位到
+  > `BUDDY_CN_ACCESS_TOKEN`，国际版接管 `BUDDY_ACCESS_TOKEN`，
+  > 而 `WORKBUDDY_ACCESS_TOKEN` 已作废（升级时自动搬迁）。
 - **值**：JSON 字符串。
 - **解析**：每个 auth 模块自带一个 `parseCredential()`（`buddy-auth.ts:75-84`），
   失败返回 `undefined` 而不是抛错。
@@ -1298,6 +1320,9 @@ pool.listAllAccounts().then(accounts => {
 })
 ```
 
+> 上面代码块里的 `buddy` / `workbuddy` 两个实例即今日的 `buddyCn` / `buddy`
+> （改名对照见文首说明）。
+
 特点：
 - **固定 30 分钟间隔轮询**（不做整点对齐）；
 - **启动时先检查是否有可续期账号**，没有就不起定时器；
@@ -1357,6 +1382,14 @@ pool.listAllAccounts().then(accounts => {
 - `CreditBalanceRow`（113+ 行）三段状态：loading / error / 有值；
 - `ModelListPanel`（260+ 行）模型开关。
 
+> **补记（2026-09-18，反映当前代码）**：上面这段是**当时的行号与形态**。
+> `CREDITS_PROVIDERS` 这份硬编码常量**已被删除**，改为
+> `plugin-src/client/credits-capabilities.js` 的能力矩阵（`balance` /
+> `dailyCheckin` 两项**各自登记**，并在**发请求之前**判定）——
+> 原形态只约束「一键领取积分」按钮，却管不住余额查询，是当年「CodeArts 面板
+> 每次打开都报 unsupported provider」的根因。`PROVIDERS` 现在是五项：
+> `codearts` / `buddy-cn` / `buddy` / `lobsterai` / `trae-cn`。
+
 **样式**：`plugin-src/client/jet-hub-styles.js:25-29` 为每个 provider 定义
 `.dim-jh-providerIcon.{logoClass} { background: white; }`。
 
@@ -1369,6 +1402,14 @@ pool.listAllAccounts().then(accounts => {
 > （`BuddyAuth.refresh()` 用 `this.credentialRefName` = `BUDDY_ACCESS_TOKEN`），
 > **不是该账号的 `entry.credentialRef`**。所以对账号池里的多账号点刷新，
 > 刷的是另一个凭据。修法：按 `entry.credentialRef` 解析凭据后用该凭据刷新。
+
+> ✅ **两个 bug 均已修复（2026-09-18 补记）**：`account.refresh` 现在按
+> `entry.provider` 分派到**全部五个**服务（`codearts` / `BUDDY_CN.id` /
+> `BUDDY.id` / `LOBSTERAI.id` / `TRAE_CN.id`），并统一调用
+> `refreshAccountCredential(entry.credentialRef)` —— 即上面「修法」那条。
+> 注意文中那句 `BUDDY_ACCESS_TOKEN` 是**改正名之前**的默认单凭据 ref：
+> 改名后它是国际版 Buddy 的 ref，中国版 Buddy CN 已让位到
+> `BUDDY_CN_ACCESS_TOKEN`（见 README 的「provider 改名与数据迁移」）。
 
 #### C. 推荐做法
 
@@ -1393,7 +1434,7 @@ pool.listAllAccounts().then(accounts => {
    > 并保留 `LobsteraiAuth.login()` 作为阻塞式便捷封装（e2e 探针用）。
    > 详见 `AGENTS.md` 的「登录必须两段式」一节。
 2. `account.refresh` 顺带**修掉上面两个 bug**：改成按 `entry.provider` 找服务 +
-   按 `entry.credentialRef` 刷新。这会同时修好 workbuddy。
+   按 `entry.credentialRef` 刷新。这会同时修好 workbuddy（现名 `buddy`，国际版）。
 3. `credits.status` / `claimAll` / `balances` 目前签名是
    `product: BuddyProduct`（`CreditsEndpointDeps`）—— LobsterAI 协议不同。
    → **最优解：复用 `collectCreditsStatus` / `collectClaimResults` /
@@ -1411,8 +1452,14 @@ pool.listAllAccounts().then(accounts => {
    ```
 2. `CREDITS_PROVIDERS` 改为 `['buddy', 'lobsterai']` —— LobsterAI **有**签到接口
    （`sigin.py` 实测），这一步是必须的。
+
+   > **实际落地时的形态（2026-09-18 补记）**：没有改这份硬编码数组，而是**删掉它**、
+   > 改用 `plugin-src/client/credits-capabilities.js` 的能力矩阵（按 provider 逐项
+   > 登记 `balance` / `dailyCheckin`）。理由同上：一个只描述「签到」的数组管不住
+   > 「余额」，两项能力必须各自登记。
 3. 新增 `LOBSTERAI_ICON`（base64 PNG，尺寸对齐现有：AI 图标 64x64、
    CodeBuddy 70x70、WorkBuddy 72x72 —— 显示时统一缩到 20x20）。
+   （这两份图标即今日的 Buddy CN 与 Buddy；改名时**没有**换过图标本体。）
 4. `plugin-src/client/jet-hub-styles.js` 加
    `.dim-jh-providerIcon.lobsterai { background: white; }`。
 
@@ -1456,7 +1503,8 @@ curl 命令（55-71 行）。
 2. **E2E**：新增 `tests/e2e/lobsterai-*.e2e.spec.ts`，闸门 `DSH_LOBSTERAI_E2E=1`，
    在 `tests/e2e/README.md` 的表里**明确标注是否消耗积分**
    （签到会改动当日签到状态，但不消耗模型额度 —— 参照
-   `workbuddy-claim-probe.e2e.spec.ts` 的标注方式）。
+   `buddy-claim-probe.e2e.spec.ts` 的标注方式；该文件当年叫
+   `workbuddy-claim-probe.e2e.spec.ts`，改名后才成为现在的名字）。
 3. `package.json` 加 `test:e2e:lobsterai` / `test:e2e:lobsterai-claim` 脚本。
 
 ---
@@ -1556,7 +1604,7 @@ curl 命令（55-71 行）。
 | `src/types.ts` | `resolveCredentialForAccount` 返回类型加 `LobsteraiCredential`；`CreditsEndpointDeps` / `collect*` 的 product 参数放宽 | 低 |
 | `src/account-pool.ts` | **几乎不用改**（provider 已是 `string`）。仅 `resolveCredentialForAccount` 的返回类型联合需要放宽 | 低 |
 | `src/account-probe.ts` | **必须改**：`probeWithAdapter` 现在是 `productById(...) ? BuddyAdapter : CodeArtsAdapter`（122-134 行）—— lobsterai 会落进 **CodeArtsAdapter** 分支，用华为云 HMAC 签名去发 LobsterAI 请求，**必然失败**。加第三个分支 | **高**（正是 `account-probe.ts:118-121` 注释里记录过的同一类 bug） |
-| `plugin-src/client/jet-hub.js` | `PROVIDERS` 加项 + 图标；`CREDITS_PROVIDERS` 加 `'lobsterai'` | 低 |
+| `plugin-src/client/jet-hub.js` | `PROVIDERS` 加项 + 图标；`CREDITS_PROVIDERS` 加 `'lobsterai'`（**实际改为能力矩阵登记**，见 §3.11 补记） | 低 |
 | `plugin-src/client/jet-hub-styles.js` | 加 `.dim-jh-providerIcon.lobsterai` | 低 |
 | `package.json` | 加 `test:e2e:lobsterai*` 脚本 | 低 |
 | `tests/e2e/README.md` | 加 LobsterAI 用例的消耗标注 | 低 |
