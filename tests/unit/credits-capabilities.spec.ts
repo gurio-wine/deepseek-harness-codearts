@@ -20,7 +20,7 @@ import {
  * BuddyProduct，必定返回 bad-request。
  *
  * 修法是「请求前按能力门控」。因此这里守两件事：
- * 1. 能力矩阵本身正确（尤其 CodeArts 两项全假、WorkBuddy 余额真/签到假）；
+ * 1. 能力矩阵本身正确（尤其 CodeArts 两项全假、Buddy 国际版余额真/签到假）；
  * 2. 客户端源码里**不存在绕过门控的调用点** —— UI 组件无法在单测里渲染
  *    （react 不在本仓库依赖内），故用源码级断言锁死守卫存在。
  */
@@ -31,20 +31,37 @@ describe('积分能力矩阵', () => {
     expect(supportsDailyCheckin('codearts')).toBe(false)
   })
 
-  it('CodeBuddy 余额与签到都支持', () => {
-    expect(supportsCreditBalance('buddy')).toBe(true)
-    expect(supportsDailyCheckin('buddy')).toBe(true)
+  it('Buddy CN 余额与签到都支持', () => {
+    expect(supportsCreditBalance('buddy-cn')).toBe(true)
+    expect(supportsDailyCheckin('buddy-cn')).toBe(true)
   })
 
-  it('WorkBuddy 国际版支持余额但不支持签到（余额与签到是彼此独立的能力）', () => {
+  it('Buddy（国际版）支持余额但不支持签到（余额与签到是彼此独立的能力）', () => {
     // 这条断言专治「因为国际版没有签到，就推断也查不到余额」的错误推断。
-    expect(supportsCreditBalance('workbuddy')).toBe(true)
-    expect(supportsDailyCheckin('workbuddy')).toBe(false)
+    expect(supportsCreditBalance('buddy')).toBe(true)
+    expect(supportsDailyCheckin('buddy')).toBe(false)
+  })
+
+  it('签到能力跟产品走、不跟键名走（buddy-cn 为 true，buddy 为 false）', () => {
+    // ⚠️ 这条是改名时最容易改错的地方，故单独钉死。
+    //
+    // 改名是**对调式**的：中国版的 id 从 `buddy` 变成 `buddy-cn`，国际版的 id 从
+    // `workbuddy` 变成 `buddy`。于是能力矩阵里 `buddy` 这个键**换了主人**。
+    // 「有签到接口」是**中国版**的属性（国际版内核里只有 `get-dosage-notify`），
+    // 所以 `dailyCheckin: true` 必须跟着中国版搬到 `buddy-cn`，绝不能照旧键名
+    // 留在 `buddy` 上 —— 那会把「一键领取积分」按钮挂到国际版面板，每次点击都
+    // 必然失败，而中国版反而没了按钮。
+    expect(CREDITS_CAPABILITIES['buddy-cn']?.dailyCheckin).toBe(true)
+    expect(CREDITS_CAPABILITIES.buddy?.dailyCheckin).toBe(false)
+    // 余额是两产品共有能力（同一端点、仅 baseURL 随 endpoint 切换），一并锁死，
+    // 免得上面那条被「顺手改对称」时把余额也改坏。
+    expect(CREDITS_CAPABILITIES['buddy-cn']?.balance).toBe(true)
+    expect(CREDITS_CAPABILITIES.buddy?.balance).toBe(true)
   })
 
   it('LobsterAI 余额与签到都支持（两套端点彼此独立）', () => {
     // 余额走 GET /api/user/profile-summary，签到走 client-activities 三步流程，
-    // 与 CodeBuddy 系协议完全不同源，但两项能力都具备。
+    // 与 Buddy 系协议完全不同源，但两项能力都具备。
     expect(CREDITS_CAPABILITIES.lobsterai).toEqual({ balance: true, dailyCheckin: true })
     expect(supportsCreditBalance('lobsterai')).toBe(true)
     expect(supportsDailyCheckin('lobsterai')).toBe(true)
@@ -70,12 +87,22 @@ describe('积分能力矩阵', () => {
     const ids = [...readClientSource().matchAll(PROVIDER_ENTRY_PATTERN)].map((m) => m[1]!)
     expect(ids).toContain('trae-cn')
     expect(ids).toContain('lobsterai')
+    // 改名后的两组 id：中国版是 `buddy-cn`（带连字符），国际版是 `buddy`。
+    // 旧的 `workbuddy` 必须彻底消失 —— 它在新体系里既不是 id 也不是 provider 实参，
+    // 留在 PROVIDERS 里会让面板渲染出一个后端永远不认的标签页。
+    expect(ids).toContain('buddy-cn')
+    expect(ids).toContain('buddy')
+    expect(ids).not.toContain('workbuddy')
+    expect(ids).toHaveLength(5)
   })
 
   it('未登记的 provider 默认不支持任何积分能力（默认关闭）', () => {
     // 新增 provider 时若忘记登记，最坏结果是暂时看不到积分，
     // 而不是每次打开面板都发一个必然失败的请求。
-    for (const unknown of ['', 'newprovider', 'CODEARTS', '__proto__']) {
+    //
+    // `workbuddy` 一并列在这里：它**曾经是**合法 id，现在是历史名 —— 把它留在
+    // 表里做「兼容」等于给一个后端已经不认的 provider 发积分请求。
+    for (const unknown of ['', 'newprovider', 'CODEARTS', '__proto__', 'workbuddy']) {
       expect(supportsCreditBalance(unknown), unknown).toBe(false)
       expect(supportsDailyCheckin(unknown), unknown).toBe(false)
     }
@@ -94,6 +121,70 @@ describe('积分能力矩阵', () => {
   })
 })
 
+describe('客户端 PROVIDERS 列表（新命名）', () => {
+  const source = readClientSource()
+
+  /**
+   * `PROVIDERS` 的五条最终形态。
+   *
+   * 顺序即面板标签页顺序，也是后端注册顺序；`label` 是面板标题与按钮文案里的
+   * 显示名，`logoClass` 必须与 `jet-hub-styles.js` 的
+   * `.dim-jh-providerIcon.<class>` 逐字对齐（下面一条断言守这件事）。
+   */
+  const EXPECTED = [
+    { id: 'codearts', label: 'Codearts', logoClass: 'codearts' },
+    { id: 'buddy-cn', label: 'Buddy CN', logoClass: 'buddy-cn' },
+    { id: 'buddy', label: 'Buddy', logoClass: 'buddy' },
+    { id: 'lobsterai', label: 'LobsterAI', logoClass: 'lobsterai' },
+    { id: 'trae-cn', label: 'Trae CN', logoClass: 'trae-cn' },
+  ] as const
+
+  it('五条 provider 的 id / label / logoClass 与定稿一致', () => {
+    const entries = [...source.matchAll(PROVIDER_FULL_ENTRY_PATTERN)].map((m) => ({
+      id: m[1]!, label: m[2]!, logoClass: m[4]!,
+    }))
+    expect(entries).toEqual(EXPECTED)
+  })
+
+  it('显示名不带公司注记', () => {
+    // 用户明确要求：显示名只留产品名，不要「（腾讯）」「（有道）」「（字节跳动）」
+    // 「（华为云）」这类注记。注释里叙述历史命名是允许的，故只查条目本身。
+    for (const entry of [...source.matchAll(PROVIDER_FULL_ENTRY_PATTERN)]) {
+      expect(entry[2], entry[1]).not.toMatch(/[（(]/)
+    }
+  })
+
+  it('图标常量名跟着产品走：BUDDY_CN_ICON 是中国版、BUDDY_ICON 是国际版', () => {
+    // 改名时图标本体不动，只换常量名与归属。这条断言钉死「哪个常量挂在哪个条目上」，
+    // 免得将来有人看见两个名字相似就顺手对调，导致中国版面板显示国际版图标。
+    const entries = new Map(
+      [...source.matchAll(PROVIDER_FULL_ENTRY_PATTERN)].map((m) => [m[1]!, m[3]!]),
+    )
+    expect(entries.get('buddy-cn')).toBe('BUDDY_CN_ICON')
+    expect(entries.get('buddy')).toBe('BUDDY_ICON')
+    // 旧常量名不得残留（它们现在指向不存在的符号，客户端会直接崩）。
+    expect(source).not.toContain('CODEBUDDY_ICON')
+    expect(source).not.toContain('WORKBUDDY_ICON')
+  })
+
+  it('logoClass 与 jet-hub-styles.js 的图标容器类逐字对齐', () => {
+    // 类名对不上不会报错：图标只是**没有白底**，肉眼几乎看不出来，
+    // 是那种「改完看着正常、实际已经坏了」的隐性缺陷。
+    const styles = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), '../../plugin-src/client/jet-hub-styles.js'),
+      'utf8',
+    )
+    const styled = new Set(
+      [...styles.matchAll(/\.dim-jh-providerIcon\.([a-z-]+)\s*\{/g)].map((m) => m[1]!),
+    )
+    for (const { logoClass } of EXPECTED) {
+      expect(styled, `jet-hub-styles.js 缺少 .dim-jh-providerIcon.${logoClass}`).toContain(logoClass)
+    }
+    // 反向：样式表里不该留下没有条目引用的死类（`workbuddy` 就是改名后的残留）。
+    expect([...styled].sort()).toEqual(EXPECTED.map((e) => e.logoClass).sort())
+  })
+})
+
 /**
  * `PROVIDERS` 条目的匹配器。
  *
@@ -102,6 +193,10 @@ describe('积分能力矩阵', () => {
  * 匹配不进 `providerIds`，于是「集合相等」这条断言在漏登记时反而是绿的。
  */
 const PROVIDER_ENTRY_PATTERN = /\{\s*id:\s*'([a-z-]+)',\s*label:/g
+
+/** 同上，但连 `label` / `icon` / `logoClass` 一起抓，供显示名与类名的断言使用。 */
+const PROVIDER_FULL_ENTRY_PATTERN =
+  /\{\s*id:\s*'([a-z-]+)',\s*label:\s*'([^']*)',\s*icon:\s*([A-Z0-9_]+),\s*logoClass:\s*'([a-z-]+)'\s*\}/g
 
 /** 读取客户端 bundle 的源码（未打包的 plugin-src 版本）。 */
 function readClientSource(): string {

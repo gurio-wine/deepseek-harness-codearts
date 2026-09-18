@@ -842,7 +842,7 @@ describe('model.list / model.setDisabled 端点', () => {
  * 此用例锁住后端这一侧，防止两种「好心改坏」：
  * - 把拒绝改成「返回空结果」→ 前端会以为 CodeArts 真没有积分可查，永远查不出问题；
  * - 让它抛异常 → 退化成 `jet-hub/handler-failed`，丢失「provider 不支持」这一原因。
- * 同时也验证拒绝是**按 provider 精确生效**的，没有连 CodeBuddy 系一起误拒。
+ * 同时也验证拒绝是**按 provider 精确生效**的，没有连 Buddy 系一起误拒。
  */
 describe('积分端点的 provider 能力边界', () => {
   /** 从 connection.fetch.register 捕获到的处理器。 */
@@ -894,7 +894,7 @@ describe('积分端点的 provider 能力边界', () => {
     expect(result.error?.message).toBe('unsupported provider: codearts')
   })
 
-  it.each(CREDITS_METHODS)('%s 不会把 CodeBuddy 系一并误拒', async (method) => {
+  it.each(CREDITS_METHODS)('%s 不会把 Buddy 系一并误拒', async (method) => {
     const call = registerCreditsEndpoints()
     // 两个 Buddy 系产品都能通过 provider 校验，走到 listAccounts（替身返回空）。
     for (const provider of ['buddy-cn', 'buddy']) {

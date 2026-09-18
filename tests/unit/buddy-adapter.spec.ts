@@ -97,9 +97,9 @@ function makeAdapter(overrides: {
 
 describe('BuddyAdapter', () => {
   it('providerInfo identifies the buddy route', () => {
-    // 展示名改由产品配置驱动（this.product.displayName）。CodeBuddy 的
-    // displayName 在 Task 1 定稿为 'CodeBuddy (腾讯)'（与 Account Hub 前端
-    // PROVIDERS 的 label 一致），故不再断言旧字面量 'CodeBuddy (Tencent)'。
+    // 展示名改由产品配置驱动（this.product.displayName）。Buddy CN 的
+    // displayName 定稿为 'Buddy CN'（与 Account Hub 前端 PROVIDERS 的 label
+    // 一致），故不再断言历史字面量 'CodeBuddy (腾讯)' / 'CodeBuddy (Tencent)'。
     expect(makeAdapter().providerInfo('buddy-cn')).toMatchObject({ id: 'buddy-cn', name: BUDDY_CN.displayName })
   })
 

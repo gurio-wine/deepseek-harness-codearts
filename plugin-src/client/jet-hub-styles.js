@@ -25,8 +25,8 @@ const STYLES = `
 .dim-jh-providerIcon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; box-shadow: 0 1px 3px rgb(31 35 41 / 7%); overflow: hidden; }
 .dim-jh-providerIcon img { display: block; width: 20px; height: 20px; border-radius: 2px; }
 .dim-jh-providerIcon.codearts { background: white; }
+.dim-jh-providerIcon.buddy-cn { background: white; }
 .dim-jh-providerIcon.buddy { background: white; }
-.dim-jh-providerIcon.workbuddy { background: white; }
 .dim-jh-providerIcon.lobsterai { background: white; }
 /* Trae CN 的品牌标识自带深色圆角底（#1A1B1D），自带底色的图标不该再靠容器配色，
    故与其余图标一致保持 white：容器只负责留白与投影，深色方块居中显示。 */
@@ -103,7 +103,7 @@ const STYLES = `
 .dim-jh-panelTitle { margin: 0; font-size: 16px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); }
 
 /* 面板标题下方的操作按钮组（显示列表 / 刷新积分 / 一键领取积分 / 重测所有 / 重置所有 / 新建账号）。
-   允许换行：按钮数量随 provider 变化（CodeBuddy 有「一键领取积分」，其他没有），
+   允许换行：按钮数量随 provider 变化（Buddy CN 有「一键领取积分」，其他没有），
    固定单行在窄面板下必然放不下。 */
 .dim-jh-headerActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 100%; }
 

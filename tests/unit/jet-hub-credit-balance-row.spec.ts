@@ -151,7 +151,7 @@ function ddParts(balance: Record<string, unknown>): string[][] {
     .map(textOf)
 }
 
-/** 一个不带 Work 池的余额对象（CodeBuddy 系 / LobsterAI 的形态）。 */
+/** 一个不带 Work 池的余额对象（Buddy 系 / LobsterAI 的形态）。 */
 function legacyBalance(overrides: Record<string, unknown> = {}) {
   return {
     total: 247.87,

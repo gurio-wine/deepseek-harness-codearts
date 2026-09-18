@@ -5,7 +5,7 @@
  *
  * Host 侧两个积分端点（`credits.balances` / `credits.claimAll`）都以
  * `productById(provider)` 解析产品配置（见 `src/jet-hub-rpc.ts`），而
- * **CodeArts 不属于 CodeBuddy 系产品**，解析结果为 `undefined`，端点必定回
+ * **CodeArts 不属于 Buddy 系产品**，解析结果为 `undefined`，端点必定回
  * `bad-request: unsupported provider: codearts`。客户端早期在面板挂载时对所有
  * provider 无条件调用 `credits.balances`，于是每打开一次 CodeArts 面板都会：
  *   1. 在控制台留下一条必然失败的报错（`[jet-hub] load credits failed`）；
@@ -13,7 +13,7 @@
  * 这不是偶发故障，而是「请求了后端明确不支持的能力」这一设计缺陷的必然结果。
  * 修法不是在 UI 上吞掉错误，而是**不发起这个请求**。
  *
- * 之所以用一张表而不是散落的 `provider === 'buddy' || provider === 'workbuddy'`
+ * 之所以用一张表而不是散落的 `provider === 'buddy-cn' || provider === 'buddy'`
  * 判断：能力集合将来会随产品变化（新增 provider、某产品开放/下线接口），集中
  * 一处才可能与 `src/product.ts` 对齐，并由单测守住不漂移。
  *
@@ -22,18 +22,18 @@
  * | provider    | balance（积分余额） | dailyCheckin（每日签到领取） |
  * |-------------|---------------------|------------------------------|
  * | `codearts`  | ✗ 华为云账号体系     | ✗                            |
- * | `buddy`     | ✓                   | ✓                            |
- * | `workbuddy` | ✓                   | ✗ 国际版后端无签到接口        |
+ * | `buddy-cn`  | ✓                   | ✓ Buddy CN 有签到接口         |
+ * | `buddy`     | ✓                   | ✗ 国际版后端无签到接口        |
  * | `lobsterai` | ✓                   | ✓ `client-activities` 三步流程 |
  * | `trae-cn`   | ✓ 双池（通用 / Work） | ✓ `checkin_credits` 两步 + 设备头 |
  *
- * - `balance`：CodeBuddy 系走 `POST /v2/billing/meter/get-user-resource`，该端点
- *   在 CodeBuddy 与 WorkBuddy 国际版**通用**（仅 baseURL 随 `product.endpoint`
+ * - `balance`：Buddy 系走 `POST /v2/billing/meter/get-user-resource`，该端点
+ *   在 Buddy CN 与 Buddy（国际版）**通用**（仅 baseURL 随 `product.endpoint`
  *   切换）；LobsterAI 走 `GET /api/user/profile-summary`；Trae CN 走
  *   `POST /trae/api/v2/pay/web_user_ent_usage`，并按 `available_endpoint`
  *   **分池**（通用池是主数字、Work 池单独一项，见下）。见 README「积分余额」。
- * - `dailyCheckin`：CodeBuddy 系是 `checkin-activity-status` + `daily-checkin`，
- *   **仅 CodeBuddy 中国版**有；WorkBuddy 国际版内核里只有 `get-dosage-notify`
+ * - `dailyCheckin`：Buddy 系是 `checkin-activity-status` + `daily-checkin`，
+ *   **仅 Buddy CN（中国版）**有；Buddy（国际版）内核里只有 `get-dosage-notify`
  *   （用量通知），没有签到接口，故其面板不渲染「一键领取积分」。LobsterAI 是
  *   `client-activities` 三步流程（`src/lobsterai-credits.ts`）；Trae CN 是
  *   `checkin_credits/status` → `claim` 两步（`src/trae-cn-credits.ts`，claim 必须
@@ -52,8 +52,15 @@
 /** 单个 provider 的积分能力。 */
 export const CREDITS_CAPABILITIES = Object.freeze({
   codearts: Object.freeze({ balance: false, dailyCheckin: false }),
-  buddy: Object.freeze({ balance: true, dailyCheckin: true }),
-  workbuddy: Object.freeze({ balance: true, dailyCheckin: false }),
+  // ⚠️ 下面两行是**对调式搬运**，不要照键名机械对应：
+  // 签到能力**跟产品走、不跟键名走** —— 有签到接口的是中国版，而中国版改名后
+  // 占用了 `buddy-cn` 这个键；国际版拿走了 `buddy` 键，它**没有**签到接口。
+  // 换句话说：`dailyCheckin` 的真值在改名前后都属于同一个产品（原 `buddy` 中国版
+  // → 现 `buddy-cn`），只是因为国际版搬进了 `buddy` 这个名字，才看起来「翻了」。
+  // 反着搬（照旧键名把 true 留给 `buddy`）会把签到按钮挂到国际版面板上，
+  // 每次点击都必然失败。`tests/unit/credits-capabilities.spec.ts` 有断言钉死。
+  'buddy-cn': Object.freeze({ balance: true, dailyCheckin: true }),
+  buddy: Object.freeze({ balance: true, dailyCheckin: false }),
   // LobsterAI：余额走 profile-summary，签到走 client-activities 三步流程，两项都支持。
   lobsterai: Object.freeze({ balance: true, dailyCheckin: true }),
   // Trae CN：余额走 web_user_ent_usage（双池：通用 / Work），签到走
@@ -75,7 +82,7 @@ export function supportsCreditBalance(provider) {
 /**
  * 该 provider 是否能执行每日签到领取（一键领取积分）。
  *
- * 为 false 时面板不渲染该按钮（CodeArts 无此能力；WorkBuddy 国际版后端无接口）。
+ * 为 false 时面板不渲染该按钮（CodeArts 无此能力；Buddy 国际版后端无接口）。
  */
 export function supportsDailyCheckin(provider) {
   return CREDITS_CAPABILITIES[provider]?.dailyCheckin === true;

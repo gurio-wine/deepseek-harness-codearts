@@ -25,7 +25,7 @@ export function callManagementRpc(connection, channel, method, payload, signal) 
   // 使用 DSH 的标准 RPC 模式：
   // connection.rpc.call(mountPoint, endpoint, payload, signal)
   // mountPoint = '/api', endpoint = 'jet-hub'
-  // payload = { method: 'account.list', payload: { provider: 'buddy' } }
+  // payload = { method: 'account.list', payload: { provider: 'buddy-cn' } }
   return connection.rpc.call('/api', ENDPOINT, { method, payload }, signal)
 }
 
