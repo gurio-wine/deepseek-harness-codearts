@@ -1,5 +1,5 @@
 /**
- * CodeBuddy 登录流程原始响应探针。
+ * Buddy CN (腾讯 CodeBuddy 中国版) 登录流程原始响应探针。
  *
  * 目的：把 `fetchAuthState → loopGetToken → getAccount` 每一步的**原始 JSON**
  * 打印出来，用于确认：
@@ -7,7 +7,7 @@
  *  2. `scope` 是否真的含换行；
  *  3. `login/account` 返回的账户字段名。
  *
- * 默认跳过，仅在设置 DSH_BUDDY_PROBE=1 时执行（需要人工在浏览器点击授权）。
+ * 默认跳过，仅在设置 DSH_BUDDY_CN_PROBE=1 时执行（需要人工在浏览器点击授权）。
  */
 import { describe, expect, it } from 'vitest'
 import {
@@ -25,7 +25,7 @@ import {
   PLATFORM,
 } from '../../src/buddy.js'
 
-const PROBE = process.env.DSH_BUDDY_PROBE === '1'
+const PROBE = process.env.DSH_BUDDY_CN_PROBE === '1'
 const suite = PROBE ? describe : describe.skip
 
 /** 打印一段带标题的原始 JSON（长字符串截断，但完整打印键名与短值）。 */
@@ -64,7 +64,7 @@ function jwtPayload(token: string): Record<string, unknown> | undefined {
   }
 }
 
-suite('CodeBuddy 登录流程原始响应探针', () => {
+suite('Buddy CN 登录流程原始响应探针', () => {
   it('逐步打印 auth/state、auth/token、login/account 的原始返回', async () => {
     // ── 1. auth/state ──
     const stateRes = await fetch(`${API_ENDPOINT}${AUTH_STATE_PATH}?platform=${PLATFORM}`, {

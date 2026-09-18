@@ -22,10 +22,10 @@
  * 一份真相源，才不会两边各自漂移。
  *
  * 双重闸门（缺一不可，防止误跑消耗积分）：
- *   DSH_BUDDY_RATELIMIT_E2E=1             启用本探针
- *   DSH_BUDDY_RATELIMIT_E2E_CONFIRM=yes   显式确认愿意消耗积分
+ *   DSH_BUDDY_CN_RATELIMIT_E2E=1             启用本探针
+ *   DSH_BUDDY_CN_RATELIMIT_E2E_CONFIRM=yes   显式确认愿意消耗积分
  *
- * 可选：DSH_BUDDY_MODEL 覆盖被测模型（默认 deepseek-v4.1-flash）。
+ * 可选：DSH_BUDDY_CN_MODEL 覆盖被测模型（默认 deepseek-v4.1-flash）。
  */
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -35,11 +35,11 @@ import { BuddyAdapter } from '../../src/buddy-adapter.js'
 import { isRateLimited } from '../../src/llm-adapter.js'
 import type { BuddyCredential } from '../../src/buddy.js'
 
-const E2E = process.env.DSH_BUDDY_RATELIMIT_E2E === '1'
-  && process.env.DSH_BUDDY_RATELIMIT_E2E_CONFIRM === 'yes'
+const E2E = process.env.DSH_BUDDY_CN_RATELIMIT_E2E === '1'
+  && process.env.DSH_BUDDY_CN_RATELIMIT_E2E_CONFIRM === 'yes'
 const suite = E2E ? describe : describe.skip
 
-const TARGET_MODEL = process.env.DSH_BUDDY_MODEL ?? 'deepseek-v4.1-flash'
+const TARGET_MODEL = process.env.DSH_BUDDY_CN_MODEL ?? 'deepseek-v4.1-flash'
 
 /** settings.yaml 里解析出的一个 Account Hub 账号条目。 */
 interface AccountEntry {
@@ -193,9 +193,9 @@ async function directProbe(credential: BuddyCredential, model: string): Promise<
 suite('限流账号真实性探针', () => {
   it(`对记录受限的账号实发 ${TARGET_MODEL} 请求，判定是否真限流`, async () => {
     const accounts = readAccounts()
-    const buddy = accounts.filter((a) => a.provider === 'buddy')
-    console.log('\n===== Account Hub buddy 账号 =====')
-    for (const a of buddy) {
+    const buddyCn = accounts.filter((a) => a.provider === 'buddy-cn')
+    console.log('\n===== Account Hub buddy-cn 账号 =====')
+    for (const a of buddyCn) {
       const reset = a.modelRateLimits[TARGET_MODEL]
       const state = reset === undefined
         ? '(无该模型记录)'
@@ -206,9 +206,9 @@ suite('限流账号真实性探针', () => {
     }
 
     // 优先选「已启用 + 该模型有未到期记录」的账号（即卡片显示超额的那个）
-    const limited = buddy.find((a) => a.enabled && (a.modelRateLimits[TARGET_MODEL] ?? 0) > Date.now())
-      ?? buddy.find((a) => (a.modelRateLimits[TARGET_MODEL] ?? 0) > Date.now())
-    expect(limited, `没有找到 ${TARGET_MODEL} 有未到期限流记录的 buddy 账号`).toBeDefined()
+    const limited = buddyCn.find((a) => a.enabled && (a.modelRateLimits[TARGET_MODEL] ?? 0) > Date.now())
+      ?? buddyCn.find((a) => (a.modelRateLimits[TARGET_MODEL] ?? 0) > Date.now())
+    expect(limited, `没有找到 ${TARGET_MODEL} 有未到期限流记录的 buddy-cn 账号`).toBeDefined()
 
     console.log('\n===== 被测账号 =====')
     console.log(`  id            = ${limited!.id}`)

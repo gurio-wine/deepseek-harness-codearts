@@ -5,11 +5,11 @@ import type { BuddyCredential } from '../../src/buddy.js'
 
 // ═══ 默认跳过 ═══
 //
-// 本文件是 Buddy (腾讯 CodeBuddy) 的端到端用例，会**使用真实凭据访问真实后端
+// 本文件是 Buddy CN (腾讯 CodeBuddy 中国版) 的端到端用例，会**使用真实凭据访问真实后端
 // 模型**，产生真实额度消耗。因此默认整体 skip，仅在同时满足以下两个条件时
 // 才会真正执行：
 //
-//   1. 显式设置 DSH_BUDDY_E2E=1（与 codearts 的 DSH_CODEARTS_E2E 同款闸门）；
+//   1. 显式设置 DSH_BUDDY_CN_E2E=1（与 codearts 的 DSH_CODEARTS_E2E 同款闸门）；
 //   2. 仍处于 CodeBuddy 新用户 14 天免费试用期内。
 //
 // ── 14 天免费试用期（重要） ──
@@ -37,14 +37,14 @@ function withinTrial(now: Date = new Date()): boolean {
   return now >= TRIAL_START && now < TRIAL_END_EXCLUSIVE
 }
 
-const E2E = process.env.DSH_BUDDY_E2E === '1'
+const E2E = process.env.DSH_BUDDY_CN_E2E === '1'
 
 /**
- * 试用期结束后，本用例会消耗**付费额度**。因此除 DSH_BUDDY_E2E=1 外，
- * 还要求显式确认（DSH_BUDDY_E2E_CONFIRM=yes）才会真正执行。
- * 这防止 `DSH_BUDDY_E2E=1` 被顺手导出后误跑，产生真实费用。
+ * 试用期结束后，本用例会消耗**付费额度**。因此除 DSH_BUDDY_CN_E2E=1 外，
+ * 还要求显式确认（DSH_BUDDY_CN_E2E_CONFIRM=yes）才会真正执行。
+ * 这防止 `DSH_BUDDY_CN_E2E=1` 被顺手导出后误跑，产生真实费用。
  */
-const CONFIRMED = process.env.DSH_BUDDY_E2E_CONFIRM === 'yes'
+const CONFIRMED = process.env.DSH_BUDDY_CN_E2E_CONFIRM === 'yes'
 
 /** 试用期已过的说明文案，供 skip 原因复用。 */
 const TRIAL_EXPIRED_REASON = 'CodeBuddy 14 天免费试用期已过（2026-08-28 ~ 2026-09-10，含首日），跳过真实后端调用以免产生付费额度消耗'
@@ -63,23 +63,23 @@ const MODELS = [
 ] as const
 
 /**
- * 解析真实凭据：优先从 DSH_BUDDY_CREDENTIAL_JSON 环境变量读取
- * （JSON 字符串，与 BUDDY_ACCESS_TOKEN 存储值同构），其次从
- * DSH_BUDDY_ACCESS_TOKEN / DSH_BUDDY_REFRESH_TOKEN 拼装。
+ * 解析真实凭据：优先从 DSH_BUDDY_CN_CREDENTIAL_JSON 环境变量读取
+ * （JSON 字符串，与 BUDDY_CN_ACCESS_TOKEN 存储值同构），其次从
+ * DSH_BUDDY_CN_ACCESS_TOKEN / DSH_BUDDY_CN_REFRESH_TOKEN 拼装。
  * 两种方式都要求调用方先在 Account Hub 的 CodeBuddy 面板完成登录并把凭据注入环境。
  */
 function loadCredentialFromEnv(): BuddyCredential {
-  const json = process.env.DSH_BUDDY_CREDENTIAL_JSON
+  const json = process.env.DSH_BUDDY_CN_CREDENTIAL_JSON
   if (json && json.length > 0) {
     return JSON.parse(json) as BuddyCredential
   }
-  const accessToken = process.env.DSH_BUDDY_ACCESS_TOKEN
-  const refreshToken = process.env.DSH_BUDDY_REFRESH_TOKEN
+  const accessToken = process.env.DSH_BUDDY_CN_ACCESS_TOKEN
+  const refreshToken = process.env.DSH_BUDDY_CN_REFRESH_TOKEN
   if (accessToken && refreshToken) {
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
-      expires_at: process.env.DSH_BUDDY_EXPIRES_AT,
+      expires_at: process.env.DSH_BUDDY_CN_EXPIRES_AT,
       token_type: 'Bearer',
       scope: '',
       domain: 'copilot.tencent.com',
@@ -87,15 +87,15 @@ function loadCredentialFromEnv(): BuddyCredential {
   }
   throw new Error(
     'e2e 用例需要真实 CodeBuddy 凭据。请先在 Account Hub 的 CodeBuddy 面板登录，然后设置 '
-      + 'DSH_BUDDY_CREDENTIAL_JSON（推荐，与 BUDDY_ACCESS_TOKEN 存储值同构的 JSON 字符串）'
-      + '或 DSH_BUDDY_ACCESS_TOKEN / DSH_BUDDY_REFRESH_TOKEN 环境变量。',
+      + 'DSH_BUDDY_CN_CREDENTIAL_JSON（推荐，与 BUDDY_CN_ACCESS_TOKEN 存储值同构的 JSON 字符串）'
+      + '或 DSH_BUDDY_CN_ACCESS_TOKEN / DSH_BUDDY_CN_REFRESH_TOKEN 环境变量。',
   )
 }
 
 /** 构造一个直连真实后端的适配器；不支持刷新（凭据由环境变量直接注入）。 */
 function liveAdapter(credential: BuddyCredential): BuddyAdapter {
   return new BuddyAdapter({
-    credentialRef: credentialRef('BUDDY_ACCESS_TOKEN'),
+    credentialRef: credentialRef('BUDDY_CN_ACCESS_TOKEN'),
     resolveCredential: async () => credential,
     refresh: async () => {
       throw new Error('e2e: credential refresh not supported; please re-login and update env')
@@ -103,7 +103,7 @@ function liveAdapter(credential: BuddyCredential): BuddyAdapter {
   })
 }
 
-suite('buddy models e2e', () => {
+suite('buddy-cn models e2e', () => {
   for (const model of MODELS) {
     it(
       `${model} can send and receive messages`,
@@ -117,7 +117,7 @@ suite('buddy models e2e', () => {
         const reasoning: string[] = []
         let finishKind: string | undefined
         for await (const chunk of adapter.stream({
-          provider: 'buddy',
+          provider: 'buddy-cn',
           model,
           messages: [{ role: 'user', content: sentMessage }],
           signal: new AbortController().signal,
@@ -140,7 +140,7 @@ suite('buddy models e2e', () => {
   }
 })
 
-suite('buddy tool call e2e', () => {
+suite('buddy-cn tool call e2e', () => {
   // 真实后端回归：hy4-preview 以**分段流式**下发工具调用，参数续分片会带回
   // 空的 function.name（""）。适配器曾因 `!== undefined` 判断让空串覆盖了
   // 首个分片解析出的真实工具名，最终输出 name:"" 并被 harness 拒绝
@@ -155,7 +155,7 @@ suite('buddy tool call e2e', () => {
       const deltas: Array<{ name?: string }> = []
       let finishKind: string | undefined
       for await (const chunk of adapter.stream({
-        provider: 'buddy',
+        provider: 'buddy-cn',
         model: 'hy4-preview',
         messages: [{
           role: 'user',

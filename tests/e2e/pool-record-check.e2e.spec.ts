@@ -68,6 +68,15 @@ suite('AccountPool 限流记录闭环', () => {
     }
     expect(accounts.length).toBeGreaterThan(0)
 
+    // 本用例驱动的是 Buddy CN（provider id `buddy-cn`）：改名后 `buddy` 是国际版，
+    // 拿它的 id 反查会因 provider 过滤而恒为空串。
+    const PROVIDER = 'buddy-cn'
+    // 反查只遍历「已启用的同 provider 账号」（见 account-pool.findAccountIdByCredential），
+    // 故只对这类账号断言。enabled 由 readJetHubAccounts 按文本解析，是字符串 'true'/'false'。
+    const candidates = accounts.filter((a) => a.provider === PROVIDER && String(a.enabled) !== 'false')
+    console.log(`\n=== ${PROVIDER} 已启用账号 ${candidates.length} / 共 ${accounts.length} ===`)
+    expect(candidates.length, `未找到已启用的 ${PROVIDER} 账号`).toBeGreaterThan(0)
+
     // 用真实 ctx 的最小替身：只提供 credentials.resolve 与 settings.register
     const stored = new Map<string, string>()
     for (const a of accounts) {
@@ -97,12 +106,12 @@ suite('AccountPool 限流记录闭环', () => {
       logger: { warn: (m: string) => console.log('  [warn]', m), info: (m: string) => console.log('  [info]', m) },
     } as never)
 
-    // 对每个账号：用其 access_token 反查 id，应能匹配上
+    // 对每个**已启用的 Buddy CN** 账号：用其 access_token 反查 id，应能匹配上
     console.log('\n=== 反查验证 ===')
-    for (const a of accounts) {
+    for (const a of candidates) {
       const cred = readCredential(String(a.credentialRef))
       if (cred === undefined) { console.log(`  ${String(a.id)}: 凭据不可读，跳过`); continue }
-      const found = await pool.findAccountIdByCredential('buddy', String(cred.access_token))
+      const found = await pool.findAccountIdByCredential(PROVIDER, String(cred.access_token))
       const ok = found === String(a.id)
       console.log(`  ${String(a.id)}: 反查 → ${JSON.stringify(found)} ${ok ? '✅' : '❌'}`)
       expect(found, `账号 ${String(a.id)} 应能被反查到`).toBe(String(a.id))

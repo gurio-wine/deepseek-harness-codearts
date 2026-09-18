@@ -3,14 +3,20 @@
 本目录下的用例会访问**真实线上后端**。请务必按下表理解每个文件的行为，
 不要用「一把梭跑整个目录」的方式运行。
 
+> **命名约定（2026-09-18 provider 改名后）**：`buddy-cn-*` = **中国版**
+> （Buddy CN，`copilot.tencent.com`，provider id `buddy-cn`，账号 ref `BUDDY_CN_ACCOUNT_*`）；
+> `buddy-*` = **国际版**（Buddy / WorkBuddy AI，`www.workbuddy.ai`，provider id `buddy`，
+> 账号 ref `BUDDY_ACCOUNT_*`）。**协议字符串（`X-Product-Code: codebuddy` / `workbuddy`、
+> `platform: workbuddy-ai`、UA、域名）不随 provider id 改名**，仍是原字面量。
+
 ## ⚠️ 会消耗模型积分（发真实 chat/completions 请求）
 
 | 文件 | 闸门 | 说明 |
 |------|------|------|
-| `buddy-models.e2e.spec.ts` | `DSH_BUDDY_E2E=1` + `DSH_BUDDY_E2E_CONFIRM=yes` | 用适配器拉取 CodeBuddy 模型并逐个发一次对话 |
-| `buddy-cache-probe.e2e.spec.ts` | `DSH_BUDDY_E2E=1` + `DSH_BUDDY_E2E_CONFIRM=yes` | 直连 `/v2/chat/completions`，发 3 组前缀做缓存对比 |
-| `buddy-pool-probe.e2e.spec.ts` | `DSH_BUDDY_POOL_E2E=1` + `DSH_BUDDY_POOL_E2E_CONFIRM=yes` | 用账号池凭据走完整 LLM 链路 |
-| `buddy-ratelimit-probe.e2e.spec.ts` | `DSH_BUDDY_RATELIMIT_E2E=1` + `DSH_BUDDY_RATELIMIT_E2E_CONFIRM=yes` | 对记录「限额重置」的账号实发一次请求，**判定是否真限流** |
+| `buddy-cn-models.e2e.spec.ts` | `DSH_BUDDY_CN_E2E=1` + `DSH_BUDDY_CN_E2E_CONFIRM=yes` | 用适配器拉取 Buddy CN 模型并逐个发一次对话 |
+| `buddy-cn-cache-probe.e2e.spec.ts` | `DSH_BUDDY_CN_E2E=1` + `DSH_BUDDY_CN_E2E_CONFIRM=yes` | 直连 `/v2/chat/completions`，发 3 组前缀做缓存对比 |
+| `buddy-cn-pool-probe.e2e.spec.ts` | `DSH_BUDDY_CN_POOL_E2E=1` + `DSH_BUDDY_CN_POOL_E2E_CONFIRM=yes` | 用账号池凭据走完整 LLM 链路（取 `provider: buddy-cn` 的账号） |
+| `buddy-cn-ratelimit-probe.e2e.spec.ts` | `DSH_BUDDY_CN_RATELIMIT_E2E=1` + `DSH_BUDDY_CN_RATELIMIT_E2E_CONFIRM=yes` | 对记录「限额重置」的账号实发一次请求，**判定是否真限流** |
 
 > LobsterAI **没有**发 chat 请求的 e2e —— 它的对话链路可在 Account Hub 里人工验证
 > （选一个模型发一句话即可），单独写探针的边际价值低于维护成本。
@@ -23,10 +29,11 @@
 | `v4-models.e2e.spec.ts` | `DSH_CODEARTS_E2E=1` | deepseek-v4-flash / pro（**每日 1000 万免费 Tokens**） |
 | `v4-large-write.e2e.spec.ts` | `DSH_CODEARTS_E2E=1` | deepseek-v4-flash 大文件写入（同上，免费额度） |
 | `login.e2e.spec.ts` | `DSH_CODEARTS_E2E=1` | 只走 CodeArts 浏览器登录与凭据换取 |
-| `buddy-login-probe.e2e.spec.ts` | `DSH_BUDDY_PROBE=1` | 只打印登录流程原始响应，不发模型请求 |
-| `workbuddy-claim-probe.e2e.spec.ts` | `DSH_WORKBUDDY_CLAIM_E2E=1` + `DSH_WORKBUDDY_CLAIM_E2E_CONFIRM=yes` | 真实领取积分（不改模型额度，但会改动账号当日签到状态） |
+| `buddy-cn-login-probe.e2e.spec.ts` | `DSH_BUDDY_CN_PROBE=1` | 只打印 Buddy CN 登录流程原始响应，不发模型请求 |
+| `buddy-claim-probe.e2e.spec.ts` | `DSH_BUDDY_CLAIM_E2E=1` + `DSH_BUDDY_CLAIM_E2E_CONFIRM=yes` | **国际版 Buddy** 真实领取积分（不改模型额度，但会改动账号当日签到状态） |
 | `lobsterai-probe.e2e.spec.ts` | `DSH_LOBSTERAI_E2E=1` | **只读**：凭据结构、客户端版本号动态解析、签到槽位/上下文、积分余额。**不签到、不发模型请求** |
 | `lobsterai-claim-probe.e2e.spec.ts` | `DSH_LOBSTERAI_E2E=1` + `DSH_LOBSTERAI_CLAIM_E2E_CONFIRM=yes` | 真实签到（会改动当日签到状态；**不消耗模型积分**，且重复运行幂等） |
+| `pool-record-check.e2e.spec.ts` | `DSH_JETHUB_POOL_CHECK=1` | 账号池限流记录闭环（会写真实 settings.yaml），按 `buddy-cn` 反查账号 |
 
 > CodeArts deepseek-v4 系列使用华为云免费福利额度（每日 1000 万免费 Tokens），
 > 不产生额外费用，因此 `DSH_CODEARTS_E2E=1` 不需要确认变量。
@@ -40,20 +47,20 @@
 # 只做认证（安全）
 pnpm test:e2e:login
 
-# 登录流程原始响应探针（安全，不发模型请求）
-pnpm test:e2e:buddy-probe
+# Buddy CN 登录流程原始响应探针（安全，不发模型请求）
+pnpm test:e2e:buddy-cn-probe
 
-# ⚠️ 会消耗 CodeBuddy 积分
-pnpm test:e2e:buddy
+# ⚠️ 会消耗 Buddy CN（中国版）积分
+pnpm test:e2e:buddy-cn
 
 # ⚠️ 判定「限额重置」徽章是否属实（默认测 deepseek-v4.1-flash）
-pnpm test:e2e:buddy-ratelimit
+pnpm test:e2e:buddy-cn-ratelimit
 
 # ⚠️ 会消耗 CodeArts 积分
 pnpm test:e2e:codearts
 
-# ⚠️ 会真实领取积分（改动当日签到状态）
-pnpm test:e2e:workbuddy-claim
+# ⚠️ 国际版 Buddy 会真实领取积分（改动当日签到状态）
+pnpm test:e2e:buddy-claim
 
 # 安全：LobsterAI 只读探针（凭据/版本号/签到槽位/余额，不签到）
 pnpm test:e2e:lobsterai
@@ -64,7 +71,7 @@ pnpm test:e2e:lobsterai-claim
 
 ## 限流真实性判定
 
-`buddy-ratelimit-probe.e2e.spec.ts` 回答一个运维问题：Account Hub 账号卡片显示
+`buddy-cn-ratelimit-probe.e2e.spec.ts` 回答一个运维问题：Account Hub 账号卡片显示
 「限额重置」时，**该账号此刻到底还受不受限**。
 
 徽章只比较 `modelRateLimits[model] > Date.now()`，是**历史事件的快照**，
@@ -74,7 +81,7 @@ pnpm test:e2e:lobsterai-claim
 - **B. 适配器链路** → 插件实际会发生什么。
 
 判定：A 返回 200 且有正文即**未真限流**（徽章记录已失效）；A 返回
-429/6004 且含「频率限制」即**确实受限**。可设 `DSH_BUDDY_MODEL` 换被测模型。
+429/6004 且含「频率限制」即**确实受限**。可设 `DSH_BUDDY_CN_MODEL` 换被测模型。
 
 本地记录的重置时间取自信道错误体里的「将在 … UTC+8 重置」。服务端在重置
 时间到达前提前放行是常见的，因此**徽章显示超额使用、实际仍能正常回复**

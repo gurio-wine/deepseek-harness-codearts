@@ -6,7 +6,7 @@
  * 重复运行是幂等的：第二步 `context` 会返回 `claimedToday: true`，
  * 探针据此报 `already-claimed` 而不再发领取请求。
  *
- * 闸门需要**两个**环境变量（与 `workbuddy-claim-probe.e2e.spec.ts` 同款）：
+ * 闸门需要**两个**环境变量（与 `buddy-claim-probe.e2e.spec.ts` 同款）：
  * - `DSH_LOBSTERAI_E2E=1` —— 总开关；
  * - `DSH_LOBSTERAI_CLAIM_E2E_CONFIRM=yes` —— 二次确认，防止误跑改动真实状态。
  *

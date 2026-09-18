@@ -1,21 +1,21 @@
 /**
- * Buddy (腾讯 CodeBuddy) 缓存命中率探针（e2e）
+ * Buddy CN (腾讯 CodeBuddy 中国版) 缓存命中率探针（e2e）
  *
  * 目的：用**真实凭据**访问真实后端，把 SSE 流中后端返回的 `usage` 对象
  * **原样打印**出来，回答一个具体问题：
  *
  *   web 端 CodeBuddy 模型的缓存命中为什么恒为 0？
  *
- * 被测模型默认 deepseek-v4-flash，可用 DSH_BUDDY_E2E_MODEL 覆盖（如 hy4-preview）。
+ * 被测模型默认 deepseek-v4-flash，可用 DSH_BUDDY_CN_E2E_MODEL 覆盖（如 hy4-preview）。
  *
- * 与 buddy-models.e2e.spec.ts 的区别：那个文件走适配器，适配器只挑选
+ * 与 buddy-cn-models.e2e.spec.ts 的区别：那个文件走适配器，适配器只挑选
  * prompt_tokens / completion_tokens 两个字段，缓存相关字段在适配器里就被
  * 丢掉了，看不到后端到底发了什么。本探针**绕过适配器的 usage 映射**，直接
  * 用 fetch 打 /v2/chat/completions 并 dump 完整 JSON 行。
  *
- * 闸门：DSH_BUDDY_E2E=1（与既有 buddy e2e 同款），凭据来源同 buddy-models
- * （DSH_BUDDY_CREDENTIAL_JSON 或本地 ~/.dsh/.credentials.yaml 的
- * BUDDY_ACCESS_TOKEN）。
+ * 闸门：DSH_BUDDY_CN_E2E=1（与既有 buddy-cn e2e 同款），凭据来源同 buddy-cn-models
+ * （DSH_BUDDY_CN_CREDENTIAL_JSON 或本地 ~/.dsh/.credentials.yaml 的
+ * BUDDY_CN_ACCESS_TOKEN）。
  *
  * 探针做的对比实验：
  *   请求 A：同一段长前缀，**不带** prompt_cache_key
@@ -57,20 +57,20 @@ import { BuddyAdapter, CHAT_API_BASE } from '../../src/buddy-adapter.js'
 
 /**
  * 双重闸门：本探针会发 3 组真实 chat 请求，消耗账号额度。
- * 除 DSH_BUDDY_E2E=1 外还要求 DSH_BUDDY_E2E_CONFIRM=yes 显式确认，
+ * 除 DSH_BUDDY_CN_E2E=1 外还要求 DSH_BUDDY_CN_E2E_CONFIRM=yes 显式确认，
  * 避免该变量被顺手导出后误跑产生真实费用。
  */
-const E2E = process.env.DSH_BUDDY_E2E === '1'
-  && process.env.DSH_BUDDY_E2E_CONFIRM === 'yes'
+const E2E = process.env.DSH_BUDDY_CN_E2E === '1'
+  && process.env.DSH_BUDDY_CN_E2E_CONFIRM === 'yes'
 const suite = E2E ? describe : describe.skip
-/** 被测模型，可用 DSH_BUDDY_E2E_MODEL 覆盖（如 hy4-preview）。 */
-const MODEL = process.env.DSH_BUDDY_E2E_MODEL ?? 'deepseek-v4-flash'
+/** 被测模型，可用 DSH_BUDDY_CN_E2E_MODEL 覆盖（如 hy4-preview）。 */
+const MODEL = process.env.DSH_BUDDY_CN_E2E_MODEL ?? 'deepseek-v4-flash'
 
 /**
- * 从本地 ~/.dsh/.credentials.yaml 读取 BUDDY_ACCESS_TOKEN。
+ * 从本地 ~/.dsh/.credentials.yaml 读取 BUDDY_CN_ACCESS_TOKEN。
  *
  * 该文件的 refs 段形如：
- *   BUDDY_ACCESS_TOKEN: '{"access_token":"…",…,"scope":"openid
+ *   BUDDY_CN_ACCESS_TOKEN: '{"access_token":"…",…,"scope":"openid
  *     profile offline_access
  *     email",…}'
  *
@@ -84,7 +84,7 @@ function credentialFromStore(): BuddyCredential | undefined {
   const path = join(homedir(), '.dsh', '.credentials.yaml')
   if (!existsSync(path)) return undefined
   const raw = readFileSync(path, 'utf8')
-  const header = /BUDDY_ACCESS_TOKEN:\s*'/.exec(raw)
+  const header = /BUDDY_CN_ACCESS_TOKEN:\s*'/.exec(raw)
   if (header === null) return undefined
   const start = header.index + header[0].length
   // 标量结束：一个未被成对转义的 '，且其后（允许空白）是行尾。
@@ -114,13 +114,13 @@ function credentialFromStore(): BuddyCredential | undefined {
 
 /** 解析真实凭据：优先环境变量，其次本地凭据存储。 */
 function loadCredential(): BuddyCredential {
-  const json = process.env.DSH_BUDDY_CREDENTIAL_JSON
+  const json = process.env.DSH_BUDDY_CN_CREDENTIAL_JSON
   if (json !== undefined && json.length > 0) return JSON.parse(json) as BuddyCredential
   const stored = credentialFromStore()
   if (stored !== undefined && stored.access_token.length > 0) return stored
   throw new Error(
-    'e2e 探针需要真实 CodeBuddy 凭据：设置 DSH_BUDDY_CREDENTIAL_JSON，'
-      + '或先在 Account Hub 的 CodeBuddy 面板登录，使 ~/.dsh/.credentials.yaml 中存在 BUDDY_ACCESS_TOKEN。',
+    'e2e 探针需要真实 CodeBuddy 凭据：设置 DSH_BUDDY_CN_CREDENTIAL_JSON，'
+      + '或先在 Account Hub 的 CodeBuddy 面板登录，使 ~/.dsh/.credentials.yaml 中存在 BUDDY_CN_ACCESS_TOKEN。',
   )
 }
 
@@ -237,7 +237,7 @@ function report(label: string, result: ProbeResult): void {
   console.log(`usage 原始 JSON:\n${JSON.stringify(result.usages, null, 2)}`)
 }
 
-suite(`buddy ${MODEL} cache probe e2e`, () => {
+suite(`buddy-cn ${MODEL} cache probe e2e`, () => {
   it(
     'dumps raw usage and tests prompt_cache_key / prefix reuse',
     async () => {
@@ -306,7 +306,7 @@ suite(`buddy ${MODEL} cache probe e2e`, () => {
       const credential = loadCredential()
       const sessionId = `dsh-adapter-cache-${Date.now()}`
       const adapter = new BuddyAdapter({
-        credentialRef: credentialRef('BUDDY_ACCESS_TOKEN'),
+        credentialRef: credentialRef('BUDDY_CN_ACCESS_TOKEN'),
         resolveCredential: async () => credential,
         refresh: async () => { throw new Error('e2e: refresh not supported') },
         sessionId,
@@ -317,7 +317,7 @@ suite(`buddy ${MODEL} cache probe e2e`, () => {
       const run = async (): Promise<Array<Record<string, number>>> => {
         const seen: Array<Record<string, number>> = []
         for await (const chunk of adapter.stream({
-          provider: 'buddy',
+          provider: 'buddy-cn',
           model: MODEL,
           messages: [{ role: 'user', content: `${prefix}\nReply with exactly: OK` }],
           signal: new AbortController().signal,

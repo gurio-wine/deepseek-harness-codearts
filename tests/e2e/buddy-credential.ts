@@ -1,5 +1,5 @@
 /**
- * WorkBuddy 探针的凭据读取工具。
+ * Buddy（腾讯 WorkBuddy **国际版** / WorkBuddy AI）探针的凭据读取工具。
  *
  * 单独成模块（而非内联在 spec 里）的原因：这段解析逻辑需要被一次性验证脚本
  * 直接调用，而 spec 文件在顶层就会执行 vitest 的 `describe`。
@@ -28,7 +28,7 @@ import type { BuddyCredential } from '../../src/buddy.js'
 export const CREDENTIALS_PATH = join(homedir(), '.dsh', '.credentials.yaml')
 
 /** 凭据不可用时的统一提示后缀。 */
-const HINT = '请先登录该账号，或设置 DSH_WORKBUDDY_CREDENTIAL_JSON'
+const HINT = '请先登录该账号，或设置 DSH_BUDDY_CREDENTIAL_JSON'
 
 /** 取出错误消息（抛出物可能是任意值）。 */
 function reason(error: unknown): string {
@@ -127,28 +127,34 @@ export function parseCredentialJson(raw: string, source: string): BuddyCredentia
   return credential as BuddyCredential
 }
 
-/** `loadWorkBuddyCredential` 的可选覆盖项（便于一次性验证脚本注入固定输入）。 */
+/** `loadBuddyCredential` 的可选覆盖项（便于一次性验证脚本注入固定输入）。 */
 export interface LoadOptions {
   /** 直接提供凭据 JSON（优先级最高）。 */
   env?: string
-  /** 指定要读取的 ref；缺省取文件里首个 `WORKBUDDY_ACCOUNT_*`。 */
+  /** 指定要读取的 ref；缺省取文件里首个 `BUDDY_ACCOUNT_*`（国际版的账号前缀）。 */
   ref?: string
   /** 覆盖凭据文件路径。 */
   path?: string
 }
 
-/** 读取凭据：优先环境变量，其次本地 credentials.yaml 中的 WorkBuddy 账号。 */
-export function loadWorkBuddyCredential(options: LoadOptions = {}): BuddyCredential {
-  const fromEnv = options.env ?? process.env.DSH_WORKBUDDY_CREDENTIAL_JSON
+/**
+ * 读取凭据：优先环境变量，其次本地 credentials.yaml 中的 Buddy（国际版）账号。
+ *
+ * ⚠️ 只认 `BUDDY_ACCOUNT_*`：改名后中国版的账号前缀是 `BUDDY_CN_ACCOUNT_*`，
+ * 国际版才是 `BUDDY_ACCOUNT_*`。正则锚定在行首空白之后，故 CN 的 ref 不会被
+ * 误当成国际版账号（两者都含 `BUDDY_` 字样，但前缀整体不同）。
+ */
+export function loadBuddyCredential(options: LoadOptions = {}): BuddyCredential {
+  const fromEnv = options.env ?? process.env.DSH_BUDDY_CREDENTIAL_JSON
   if (fromEnv !== undefined && fromEnv.length > 0) {
-    return parseCredentialJson(fromEnv, 'DSH_WORKBUDDY_CREDENTIAL_JSON')
+    return parseCredentialJson(fromEnv, 'DSH_BUDDY_CREDENTIAL_JSON')
   }
 
   const text = readCredentialsFile(options.path)
-  const declared = [...text.matchAll(/^[ \t]*(WORKBUDDY_ACCOUNT_[A-Z0-9]+):/gm)].map((m) => m[1])
+  const declared = [...text.matchAll(/^[ \t]*(BUDDY_ACCOUNT_[A-Z0-9]+):/gm)].map((m) => m[1])
   if (declared.length === 0) {
-    throw new Error(`未找到 WORKBUDDY_ACCOUNT_* 凭据；${HINT}`)
+    throw new Error(`未找到 BUDDY_ACCOUNT_* 凭据；${HINT}`)
   }
-  const ref = options.ref ?? process.env.DSH_WORKBUDDY_ACCOUNT_REF ?? declared[0]
+  const ref = options.ref ?? process.env.DSH_BUDDY_ACCOUNT_REF ?? declared[0]
   return parseCredentialJson(extractYamlScalar(text, ref), `凭据 ${ref}`)
 }
