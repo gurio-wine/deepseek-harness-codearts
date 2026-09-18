@@ -6,6 +6,7 @@ import { registerCodeArtsLlm } from './llm-adapter.js'
 import { registerBuddyLlm } from './buddy-adapter.js'
 import { registerLobsteraiLlm } from './lobsterai-adapter.js'
 import { registerTraeCnLlm } from './trae-cn-adapter.js'
+import { fetchTraeCnWorkModels, registerTraeCnWorkLlm } from './trae-cn-work-adapter.js'
 import { CODEARTS_CREDENTIAL_REF, CodeArtsAuth } from './service.js'
 import { BUDDY_CREDENTIAL_REF, BuddyAuth } from './buddy-auth.js'
 import { LobsteraiAuth } from './lobsterai-auth.js'
@@ -16,6 +17,7 @@ import { registerJetHubRpc } from './jet-hub-rpc.js'
 import { BUDDY_CN, BUDDY } from './product.js'
 import { LOBSTERAI } from './lobsterai-product.js'
 import { TRAE_CN } from './trae-cn-product.js'
+import { TRAE_CN_WORK } from './trae-cn-work-product.js'
 import type { CodeArtsCredential, BuddyCredential } from './types.js'
 import type { LobsteraiCredential } from './lobsterai.js'
 import type { TraeCnCredential } from './trae-cn-oauth.js'
@@ -206,7 +208,12 @@ export function apply(ctx: Context): void {
   // 注意 `llm-trae-cn` / `llm-buddy-cn` 里的连字符是**正确**的：namespace 是
   // 字符串键而非标识符，与 cordis 服务名（`traeCnAuth` / `buddyCnAuth`）
   // 走的是两套命名规则。
-  registerProviderSettings(ctx, 'llm-buddy-cn', 'llm-buddy', 'llm-codearts', 'llm-lobsterai', 'llm-trae-cn')
+  // 第六个 namespace 是 Trae CN **Work**（`trae-cn-work`）—— 与 `trae-cn`
+  // 是**两个 provider**（协议不同源、模型池不重合、扣不同积分池），
+  // 但**共用同一批账号与凭据**（Work 无独立登录）。
+  registerProviderSettings(
+    ctx, 'llm-buddy-cn', 'llm-buddy', 'llm-codearts', 'llm-lobsterai', 'llm-trae-cn', 'llm-trae-cn-work',
+  )
   const service = new CodeArtsAuth(ctx)
   const pool = new AccountPool(ctx)
 
@@ -423,6 +430,50 @@ export function apply(ctx: Context): void {
     },
     accountPool: pool,
     product: TRAE_CN,
+  })
+
+  // ===== Trae CN Work (TraeWork 网页版) 服务 =====
+  //
+  // **复用上面那条 Trae CN 的全部账号基础设施**：同一个 `traeCn` auth 实例、
+  // 同一个 `pickTraeCnAccount` 选号器、同一批 `TRAE_CN_ACCOUNT_*` 凭据。
+  // Work **没有独立登录**（它的登录就是 Trae CN 的登录），故**不注册**独立
+  // auth 服务、不新建选号器 —— 新建只会得到第二个指向同一份凭据的解析器，
+  // 且两处选号可能挑到不同账号。
+  //
+  // ⚠️ **账号池查询一律传 `TRAE_CN_WORK.poolProviderId`（= `'trae-cn'`），
+  // 不是 `TRAE_CN_WORK.id`（= `'trae-cn-work'`）**：
+  // 账号条目的 `provider` 字段是 `trae-cn`，按 `trae-cn-work` 过滤一个都
+  // 匹配不到 → 适配器每次拿 `MISSING_CREDENTIAL`（「请先登录」）而账号明明在
+  // 列表里。这个接线是本插件唯一一处「provider id 与池键不同名」的地方，
+  // 已在 AGENTS.md 单独登记。
+  //
+  // 反方向的错误同样静默：路由名若用池键，`trae-cn-work` 根本不会出现在
+  // 模型选择器里。
+  registerTraeCnWorkLlm(ctx, {
+    credentialRef: credentialRef(TRAE_CN.defaultCredentialRef),
+    // 与 IDE 路径**同一份凭据、同一个池键**（`trae-cn`）—— 两条路径是同一批
+    // 账号的两种用法，不是两批账号。
+    resolveCredential: makeCredentialResolver<TraeCnCredential>(
+      ctx, pool, TRAE_CN_WORK.poolProviderId, TRAE_CN.defaultCredentialRef,
+    ),
+    refresh: async (model?: string) => {
+      // 与 resolveCredential 用**同一个**选号器与同一个 model：否则会出现
+      // 「解析到 B、却刷新了 A」，B 的过期 token 永不更新（历史 S1 缺陷）。
+      const available = await pickTraeCnAccount(model)
+      if (available) await traeCn.refreshAccountCredential(available.entry.credentialRef)
+      else await traeCn.refresh()
+    },
+    // Work 的模型目录**真的可拉**（与 IDE 路径相反，见 parseTraeCnWorkModels）。
+    // 用解析到的凭据拉：目录端点要鉴权，且不消耗积分。
+    fetchRemoteModels: async () => {
+      const credential = await makeCredentialResolver<TraeCnCredential>(
+        ctx, pool, TRAE_CN_WORK.poolProviderId, TRAE_CN.defaultCredentialRef,
+      )()
+      if (credential === undefined || credential.access_token.length === 0) return []
+      return fetchTraeCnWorkModels(credential)
+    },
+    accountPool: pool,
+    product: TRAE_CN_WORK,
   })
 
   // ===== 多账号静默续期调度 =====

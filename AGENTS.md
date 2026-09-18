@@ -36,6 +36,35 @@
 
 Account Hub 设置页（`plugin-src/client/jet-hub.js`）提供多账号管理与限流自动切换；「一键领取积分」按钮（每日签到）**由 Buddy CN、LobsterAI 与 Trae CN 三个面板提供** —— Buddy（国际版）后端没有签到接口，Codearts 是华为云账号体系不参与。Trae CN 的签到与余额**前后端及宿主接线均已就绪**（`src/trae-cn-credits.ts` + 客户端能力矩阵 + `jet-hub-rpc.ts` 三处分支与 `traeCn` 实例传参）。T5 / T7 / T9 均已真机校准，见「积分能力必须在请求前判定」与 README 的「Trae CN provider」章节。
 
+### Trae CN Work（`trae-cn-work`）—— 第二条 Trae CN 路径
+
+`trae-cn-work`（显示名 **Trae CN Work**）走 **TraeWork（`work.trae.cn`）网页 RPC**，消耗 **Work 专属积分池**（`available_endpoint=1`）。它与 `trae-cn`（IDE 路径）是**两个 provider**，因为：
+
+- **扣的池不同**：IDE 路径只扣通用池，本 provider 只扣 Work 池。通用池耗尽而 Work 池有额度时，两条路径的可用性**互相独立**；
+- **模型池完全不重合**：IDE 是 16 项 `chat_v3` 代际，Work 是 **12 项 SOLO 代际**（只有 `Doubao-Seed-Code` 同名且窗口不同），合并目录会产生无法路由的条目。
+
+⚠️ **唯一的非常规接线（改错会静默失效，两个方向都不报错）**：
+
+| 用途 | 取值 |
+|---|---|
+| 注册到 `ctx.llm` 的路由名 / settingsNs / 模型黑名单 | `trae-cn-work` |
+| **账号池查询**（`getAvailableAccount` / `findAccountIdByCredential` / `updateModelRateLimit`） | **`trae-cn`** |
+
+Work **没有独立登录**：账号、凭据（`TRAE_CN_ACCOUNT_*`）、限流切换全部复用 `trae-cn`，故**不注册独立 auth 服务**。池查询若传 `trae-cn-work`，账号条目的 `provider` 字段（`trae-cn`）一个都匹配不到 → 适配器每次都抛 `MISSING_CREDENTIAL`（「请先登录」）而账号明明在列表里；路由名若传 `trae-cn`，本 provider 根本不会出现在模型选择器里。该值由 `TraeCnWorkProduct.poolProviderId` 显式承载（与 `id` 并列命名，防「顺手统一」）。
+
+**协议要点**（全部真机实测 2026-09-18，详见 README 的「Trae CN Work provider」）：
+
+- **三段式有状态会话**：`POST chat_sessions` → `POST …/messages` → `GET …/events`（SSE），**每轮 `finally` 里 DELETE**（会话会拉起云端沙箱并出现在用户 TraeWork 列表里）。删除覆盖**整次尝试**而不只是成功路径 —— 建会话成功而发消息/订阅失败时同样要删，否则会话全部泄漏；
+- **`query` 是 JSON 字符串**，元素形态 `{type:"text",data:{content}}`（是 **`data.content`**，不是 IDE 的 `text_content`）；`agent_type` / `agent_id` / `model_selection_strategy` / `origin` 是出站身份标识，一字符不能动；
+- **`plan_item` 是累计快照不是增量**（`thought` / `reasoning_content` 每帧都是「到目前为止的全文」）。直接当增量拼接会让文本重复，必须按 `plan_item.id` 差分只发后缀；
+- **正文有两条通道**，两条都要认：`plan_item.thought`（流式）与 `plan_item.tool_call_info.params.summary`（`name === "finish"`，真机第 2 轮 `thought` 全程为空）。合流时去重，否则同一段文字发两次；
+- **`model_config` 的 `model_name` 带 `__dev` 后缀**（请求发的是无后缀的），比对静态表前必须归一；
+- **模型目录远端可用**（`GET /api/remote/v1/models`，与 IDE 路径相反）：响应是 `{data:{list:[{models:[…]}]}}` **分组**结构，倍率在 `features` 这个 **JSON 字符串**里二次解析；
+- **错误分类以 HTTP 状态码为主**：Work 码表**未标定**（真机两轮全绿、一帧错误未遇），未知业务码**一律直报并带原文**，不猜动作；`fail` 不映射 `CONTEXT_WINDOW_EXCEEDED`（会误触发 DSH 的上下文压缩，真实改写用户会话）；
+- **思考档 v1 不声明**：真机目录里唯一的 `reasoning_effort_config` 是 `support_thinking:false`。
+
+**Account Hub 刻意不加本 provider 的面板**：`PROVIDERS` 列表与 `credits-capabilities.js` 都**不含** `trae-cn-work` —— 账号管理、积分查询、签到全在 Trae CN 面板（同一批账号），加了只会产生空面板与重复积分行。
+
 - **包名**：`dsh-account-hub`
 - **入口**：`lib/index.js`（宿主侧）、`lib/client/jet-hub.js`（客户端 bundle）
 - **构建**：`pnpm build:all`（`tsc` 编译宿主侧 + `esbuild` 打包客户端）

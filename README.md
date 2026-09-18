@@ -236,10 +236,13 @@ Tokens 福利）。
 凭据来自默认的新式 IAM OAuth 流程（含 `refresh_token`）。请求发起时会解析最新
 凭据，若已过期则先静默续期，再用新 AK/SK/SecurityToken 签名，无需重新打开浏览器。
 
-除 `codearts` 外，插件另注册三个独立路由：`buddy-cn`（见
+除 `codearts` 外，插件另注册五个独立路由：`buddy-cn`（见
 [Buddy CN provider](#buddy-cn-provider)）与 `buddy`（见
-[Buddy provider](#buddy-provider)）两个 buddy 系路由，以及 `lobsterai`
-（见 [LobsterAI provider](#lobsterai-provider)）。四者互不覆盖，可同时使用。
+[Buddy provider](#buddy-provider)）两个 buddy 系路由、`lobsterai`
+（见 [LobsterAI provider](#lobsterai-provider)）、`trae-cn`
+（见 [Trae CN provider](#trae-cn-provider字节跳动-trae-国内版)）与
+`trae-cn-work`（见 [Trae CN Work provider](#trae-cn-work-providertraework-网页协议)）。
+六者互不覆盖，可同时使用。
 
 ## 凭证
 
@@ -1086,3 +1089,240 @@ x-app-version: 3.3.100
 >
 > 两处的调试出口是 `TraeCnCreditsOptions.onDebug`，在 RPC 分发处接到
 > `ctx.logger.info`（**看宿主日志，面板上看不到**），输出一律只有键名与结构判定。
+
+## Trae CN Work provider（TraeWork 网页协议）
+
+`trae-cn-work`（显示名 **Trae CN Work**）是 Trae CN 的**第二条路径**：
+走 **TraeWork（`work.trae.cn`）网页 RPC**，消耗 **Work 专属积分池**
+（`available_endpoint=1`）。
+
+### 为什么需要它：两个池、两套模型、两条协议
+
+Trae CN 账号的积分**分两个互不通用的池**，而**只有 Work 池能在 TraeWork 里花**
+（见上文「余额按 `available_endpoint` 分池」）。IDE 路径只扣通用池，因此当
+**通用池耗尽而 Work 池仍有额度**时，IDE 路径必回 `4008`，而 Work 路径正常扣费 ——
+两条路径的可用性**互相独立**。
+
+| | `trae-cn`（IDE 路径） | `trae-cn-work`（本 provider） |
+|---|---|---|
+| Host | `trae-api-cn.mchost.guru`（IDE 网关） | `work.trae.cn`（同源网页 RPC） |
+| 网关头 | 必须带齐 `x-app-id` / 纯数字 `x-ide-version-code` 等全套 | **不需要**，仅鉴权三头 |
+| 请求形态 | 单次 `POST /api/ide/v1/chat`（无状态） | **三段式**（建会话 → 发消息 → 订阅 SSE） |
+| 模型池 | 16 项 `chat_v3` 代际 | **12 项，id 与 IDE 池完全不重合** |
+| 扣费池 | 通用积分（`endpoint=0`） | **Work 专属（`endpoint=1`）** |
+| 会话清理 | 无状态，无需清理 | **每轮 DELETE** |
+
+> **两个池的模型 id 完全不重合**（只有 `Doubao-Seed-Code` 同名，且上下文窗口不同），
+> 这是「两个 provider 而非一个带开关的 provider」的直接理由 —— 合并目录会产生
+> 无法路由的条目。
+
+**选择指引**：通用池有额度、要用 IDE 那套模型 → 选 `Trae CN`；
+通用池耗尽或想用 Work 的额度 → 选 `Trae CN Work`。
+
+### 账号与凭据：**复用 Trae CN**（本 provider 唯一的非常规接线）
+
+Work **没有独立登录** —— 它用**同一批 Trae CN 账号**（`TRAE_CN_ACCOUNT_*`）、
+同一份凭据、同一套限流切换。故本 provider **不注册独立 auth 服务**。
+
+⚠️ 由此产生一处**必须分开、且两个方向的错误都是静默的**接线：
+
+| 用途 | 取值 |
+|---|---|
+| 注册到 `ctx.llm` 的路由名 / settingsNs / 模型黑名单 | `trae-cn-work` |
+| **账号池查询**（`getAvailableAccount` / `findAccountIdByCredential` / `updateModelRateLimit`） | **`trae-cn`** |
+
+- 池查询若用 `trae-cn-work`：账号条目的 `provider` 字段是 `trae-cn`，
+  **一个都匹配不到** → 适配器每次都抛 `MISSING_CREDENTIAL`（「请先登录」），
+  而账号明明在列表里；
+- 路由名若用 `trae-cn`：本 provider 根本不会出现在模型选择器里。
+
+两个方向都**不报错**，只是查不到/不出现。该值由
+`TraeCnWorkProduct.poolProviderId` 显式承载（与 `id` 并列命名，防止被「顺手统一」）。
+
+### 协议配方（**全部真机实测**，2026-09-18）
+
+三段式，host 恒为 `https://work.trae.cn`，鉴权与 IDE 路径相同
+（`Authorization: Cloud-IDE-JWT <access>` + 同值 `X-Ide-Token` / `X-Cloudide-Token`）：
+
+| # | 请求 | 关键点 |
+|---|---|---|
+| 1 | `POST /api/remote/v1/chat_sessions`，body `{"mode":"code"}` | → `{"code":0,"data":{"chat_session_id":"…"}}` |
+| 2 | `POST /api/remote/v1/chat_sessions/{sid}/messages` | body 见下 |
+| 3 | `GET /api/remote/v1/chat_sessions/{sid}/events?reply_to_message_id={mid}` | `Accept: text/event-stream` → SSE |
+| — | `DELETE /api/remote/v1/chat_sessions/{sid}` | **每轮收完必调** |
+
+发消息 body（官方 `buildSendMessageRequest` 逐字）：
+
+```json
+{"chat_session_id":"…","content":[],"query":"[{\"type\":\"text\",\"data\":{\"content\":\"hi\"}}]",
+ "model_name":"Doubao-Seed-Code","agent_type":"solo_agent_remote","agent_id":"solo_agent_remote",
+ "model_selection_strategy":"manual","origin":"web"}
+```
+
+- `query` 是 **JSON 字符串**（不是数组），元素形态 `{type:"text",data:{content}}` ——
+  注意是 **`data.content`**，与 IDE 路径的 `text_content` 不同；
+- `agent_type` / `agent_id` / `model_selection_strategy` / `origin` 是**出站身份标识**，
+  服务端按它们归因 agent 形态，一个字符都不能动。
+
+### 会话生命周期：每轮自建自删
+
+每次 `stream()` 调用 = **建会话 → 发消息 → 订阅 → 收完 → DELETE**，删除在
+`finally` 里且**失败仅告警不抛**。
+
+- **为什么必须删**：Work 的会话会在云端拉起**沙箱**（真机
+  `platform_timing.sandbox_name` 形如 `run-agent-<sid>-xxxx`），且会话会出现在
+  用户的 TraeWork 列表里 —— 每问一句就往用户列表塞一条是很糟的副作用；
+- **为什么删除失败不抛**：用户要的是回复，会话残留是**副作用**而非本次请求的
+  失败原因；把清理失败变成用户可见错误，会让一次成功的对话因收尾问题报错；
+- **`finally` 覆盖整次尝试**（不只是成功路径）：建会话成功而**发消息/订阅失败**
+  时，会话已经在云端建起来了 —— 只在成功分支删会让这些会话**全部泄漏**；
+- **为什么不做持久会话复用**：能省两次往返，但引入状态耦合（DSH 的每次
+  `stream()` 是独立的，可能并发/来自不同分支）。每轮新建把该复杂度归零，
+  代价是两次额外往返（真机建会话 ~0.3s、删 ~0.2s，相对 3–13s 的生成时间可忽略）。
+
+### SSE 解析：`plan_item` 是**累计快照**，不是增量
+
+这是本 provider 最容易搞错、且搞错就整段文字重复的地方。
+
+真机逐帧记录显示，同一 `plan_item.id` 的 `thought` 与 `reasoning_content`
+**每一帧都是「到目前为止的全文」**：
+
+```
+[3575ms] thought=""      reason="The"
+[3776ms] thought=""      reason="The user wants me to"
+[3968ms] thought=""      reason="The user wants me to reply with exactly: alpha beta gamma delta"
+[4108ms] thought=""      reason="…alpha beta gamma delta epsilon"
+```
+
+逐帧验证：后一帧恒为前一帧的**前缀扩展**。因此**不能**把每帧当增量拼接 ——
+那会得到 `TheThe user wants me toThe user wants me to reply…`。
+适配器按 `plan_item.id` 记录上一次快照，**只发新增的后缀**
+（`diffCumulativeSnapshot`）。快照若不是前一次的扩展（服务端重算/回退），
+则记一条诊断（`snapshotRewinds`）并**放弃**该次差异，而不是发一段会造成错乱的"差异"。
+
+**正文有两条通道**，真机各出现过一次，两条都必须认：
+
+1. **`plan_item.thought`** —— 逐帧累计增长的流式通道（真机第 1 轮）；
+2. **`plan_item.tool_call_info.params.summary`**（`name === "finish"`）——
+   真机第 2 轮的 `thought` **全程为空**，正文只出现在这里。
+
+只认第一条会漏掉「模型直接收尾」的回复（表现为空回复）；只认第二条则失去流式效果。
+两者合流进同一个正文块并**去重**（只补发 `thought` 尚未覆盖的后缀），
+故第 1 轮那种「summary 与 thought 最终相同」的情形**不会重复**。
+
+**其它事件一律忽略**：真机观测到的事件全集是
+`status_changed` / `platform_timing` / `metadata` / `model_config` /
+`session_title_message` / `session_icon_message` / `timing_events` /
+`plan_item` / `token_usage` / `done`。其中只有 `plan_item` / `token_usage` /
+`done` 对 harness 有意义 —— 把其余帧的 JSON 当正文渲染会让用户看到元数据乱码。
+
+- **`model_config` 的 `model_name` 带 `__dev` 后缀**（真机 `Doubao-Seed-Code__dev`，
+  而请求发的是 `Doubao-Seed-Code`）。`__dev` 是服务端的**配置通道标记**
+  （dev 档上下文窗口），不是模型 id 的一部分 —— 任何拿它去比对静态表的代码都会
+  **一项都匹配不上**，故解析时统一剥掉；
+- **`id:` 行**：Work 的帧比 IDE 路径多一个 `id:` 行，解析器忽略它；
+- **终止判据**：`done` 帧，或 `status_changed.new_status ∈ {4,5}`。
+  ⚠️ 真机两轮**都只出现 `new_status: 3`**（会话开始）并以 `done` 收尾，
+  4/5 **从未出现** —— 它是按调研配方保留的候选判据，不是实测结论；
+- **`token_usage`** 有完整计数（真机含 `cache_read_input_tokens` 与
+  `reasoning_tokens`），已接进 DSH 的用量回调；`inputTokens` 只计**未命中缓存**
+  的部分（与其余 provider 同口径）。
+
+### 模型目录：**远端可用**（与 IDE 路径相反）
+
+IDE 路径的目录端点刻意不接线（任何 HTTP 端点都拿不到新池）；Work 的
+`GET /api/remote/v1/models` **真机 200 且回全 12 项**，故本 provider **已接线**，
+远端是权威来源，静态表（`TRAE_CN_WORK_FALLBACK_MODELS`）只在整体失败时顶替。
+
+响应结构（注意**分组**，不是顶层平铺数组）：
+
+```json
+{"code":0,"data":{"list":[{"function":"solo_coder","models":[ …12 项… ]}]}}
+```
+
+每项字段：`name` / `multimodal` / `is_default` / `display_name` / `is_new` /
+`is_beta` / `icon` / `features`（**JSON 字符串**）/ `config_source` / `is_preset` /
+`max_mode` / `context_window_tokens`（`{dev,max}`）。倍率在
+`features.consumption_rate.data.rate` —— `features` 要**再解析一次**（它是字符串）。
+
+解析器**只认这个实测形态**，不做「`data` 直接是数组」这类容忍式回退：
+那些形态从未被观测到，写进来只是把未验证的假设固化成代码；上游真改版时，
+一个**空目录**（回退静态表，用户仍能用）比「猜对形状但字段读错」的半成品目录
+更容易诊断。
+
+**12 项**（真机逐字，倍率为实测值）：
+
+| id | 展示名 | 多模态 | 上下文 | 倍率 |
+|---|---|---|---|---|
+| `Doubao-Seed-2.0-Code` | Doubao-Seed-2.0-Code | ✓ | 184000 | 0.39 |
+| `Doubao-Seed-Code` | Seed-Code（默认） | ✓ | 184000 | 0.06 |
+| `minimax-m2.7` | MiniMax-M2.7 | ✗ | 200000 | 0.27 |
+| `glm-5.1` | GLM-5.1 | ✗ | 200000 | 0.83 |
+| `glm-5v-turbo` | GLM-5V-Turbo | ✓ | 200000 | 0.51 |
+| `glm-5` | GLM-5 | ✗ | 200000 | 0.7 |
+| `DeepSeek-V4-Pro` | DeepSeek-V4-Pro | ✗ | 200000 | 0.36 |
+| `DeepSeek-V4-Flash` | DeepSeek-V4-Flash | ✗ | 200000 | 0.08 |
+| `kimi-k2.6` | Kimi-K2.6 | ✓ | 200000 | 0.75 |
+| `kimi-k2.5` | Kimi-K2.5 | ✓ | 200000 | 0.48 |
+| `qwen-3.6-plus` | Qwen3.6-Plus | ✓ | 200000 | 0.26 |
+| `qwen-3.5` | Qwen3.5-Plus | ✓ | 200000 | 0.26 |
+
+> 调研简报里记的 `DeepSeek-V4-Pro 0.72` / `DeepSeek-V4-Flash 0.16` /
+> `qwen-3.5-plus` 与真机响应**不符**（实测 0.36 / 0.08，且 id 是 `qwen-3.5`）。
+> 静态表按**真机响应逐字**写。
+
+### 思考档：v1 **不声明**
+
+真机目录里只有 `Doubao-Seed-Code` 一项带 `reasoning_effort_config`，且内容是
+`{support_thinking:false, options:null, default_level:""}` —— 即**明确不支持思考**；
+其余 11 项连该字段都没有。故 `resolveModel` **不声明 `reasoning`**
+（模型选择器显示「当前模型未提供推理等级」，那是诚实的）。
+若将来实测出 Work 的档位配置，在 `resolveModel` 补 `reasoning` 即可。
+
+### 错误分类：**以 HTTP 状态码为主**（Work 码表未标定）
+
+与 IDE 路径**关键差异**：IDE 的码表已用官方 bundle + `ai_agent.dll` 三方互证，
+Work 的码表**没有任何实测样本**（真机两轮全绿，一帧错误都没遇到）。
+直接复用 IDE 码表会把未经验证的假设当成事实，故：
+
+- **HTTP 状态码**（两条路径都成立的客观事实）是主判据：401/403 → 换号、
+  429/408/5xx → 退避、其余 → 直报；
+- **业务码**只接住两个跨路径可确证的额度码与几个限流/退避码
+  （`TRAE_CN_WORK_KNOWN_*`），**未知码一律直报并带原文** ——
+  真机第一次遇到就会把真实码暴露在错误文案里，一步即可校准。
+
+> 未知码**刻意不猜动作**：猜成 `switch-account` 会把一个确定性失败放大成 N 次
+> 无用请求，且**真实码被吞掉**（用户只看到「都失败了」）。
+
+同理，`fail` 一律映射为 `INVALID_REQUEST`，**不**照搬 IDE 路径的
+`4006 → CONTEXT_WINDOW_EXCEEDED`：把一个未标定的码当「上下文超长」会让 DSH
+**误触发上下文压缩**，那是会真实改写用户会话历史的副作用。
+
+### 协议漂移风险
+
+⚠️ `/api/remote/v1/*` 是 **TraeWork 前端自己调的浏览器内部 RPC，没有公开契约**，
+随时可能随前端发版改变字段或路径。本 provider 已把全部路径与形态常量集中在
+`src/trae-cn-work-product.ts`，上游一变只需改这一处；但**无法从协议层预防**这类
+漂移 —— 真出现时应以真机重新校准（本仓库的 `TraeCnWork*` 注释里保留了每一次
+实测的原始帧与字段，便于比对）。
+
+### 真机实测记录（2026-09-18，三轮对话）
+
+用**与适配器完全相同的代码路径**（`lib/trae-cn-work-adapter.js` 的
+`stream()`，不是平行脚本）验证：
+
+| 项 | 结果 |
+|---|---|
+| `GET /api/remote/v1/models` | HTTP 200，12 项，字段清单见上表 |
+| 三段式全链路 | 建会话 200 → 发消息 200 → 订阅 200（`text/event-stream`） |
+| 正文 | `"work adapter verified"`（走 `thought` 通道） |
+| 思考 | `"\n我现在需要按照用户的要求精确回复：work adapter verified"` |
+| 用量 | `input 332 / output 18 / cacheRead 20792 / reasoning 15` |
+| 收尾 | `finish(stop)`，chunk 序列 `usage → block-start → reasoning-delta×2 → block-start → text-delta → block-end×2 → finish` |
+| **Work 池扣费** | **0.0568**（前 1999.816 → 后 1999.7592） |
+| **通用池扣费** | **0.0000**（未动，印证两池独立） |
+| 会话清理 | 适配器自己发出 `DELETE … → 200`；重复 DELETE 同一 sid 回 **404**（确认已删） |
+
+三轮实测的 Work 池扣费分别为 **0.0616 / 0.0652 / 0.0572 / 0.0568**
+（前两轮为裸协议探针，后两轮走适配器），通用池**全程 0.0000**。
+
