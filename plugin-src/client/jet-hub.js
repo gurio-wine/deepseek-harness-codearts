@@ -204,6 +204,108 @@ function formatPackageLine(pkg) {
 }
 
 /**
+ * 失败 outcome **没有** `message` 时的回退文案。
+ *
+ * 正常路径下服务端与 `collectClaimResults` 都会带上 message（含它们自己在
+ * 客户端侧造的 failed，如「凭据未配置」）；真正会走到这里的只有**字段缺失
+ * 或为空白**的异常响应。此时宁可显示一句固定的「领取失败」，也不能让那一行
+ * 只剩一个光秃秃的账号名和 code。
+ */
+const CLAIM_FAILURE_FALLBACK = '领取失败';
+
+/**
+ * 把一次失败的领取结果格式化成一行「账号：原因（code N）」。
+ *
+ * 输入是 `credits.claimAll` 响应里 `results[]` 的一项
+ * （`src/types.ts` 的 `RpcCreditsClaimAccountResult`）：`nickname` / `accountId`
+ * 加判别联合 `outcome`（`src/credits.ts` 的 `ClaimOutcome`，失败分支为
+ * `{ kind:'failed', code:number, message:string }`）。
+ *
+ * 服务端原文（`message`，如「当前参与用户太多，请稍后再试」）是用户判断
+ * 「是风控限流、凭据失效还是活动结束」的**唯一依据** —— 只报一个「1 个失败」
+ * 等于让用户去翻日志。`code` 一并带上（如 `code 9074`）便于对着服务端文档
+ * 或插件日志核对；Trae CN 的 `9074` 就在 `src/trae-cn-errors.ts` 的软限流码表里。
+ */
+function formatClaimFailureLine(result) {
+  const outcome = result?.outcome ?? {};
+  const label = result?.nickname || result?.accountId || '未知账号';
+  const raw = typeof outcome.message === 'string' ? outcome.message.trim() : '';
+  const message = raw !== '' ? raw : CLAIM_FAILURE_FALLBACK;
+  const code = typeof outcome.code === 'number' && Number.isFinite(outcome.code)
+    ? String(outcome.code)
+    : '未知';
+  return `${label}：${message}（code ${code}）`;
+}
+
+/**
+ * 从 `credits.claimAll` 的响应里取出失败账号的原因行（成功 / 已领 / 活动未开启
+ * 都**不**产生行：那几类没有需要用户关注的信息）。
+ *
+ * `results` 缺失或不是数组时回退空数组，而不是抛错：摘要行本身仍然有效，
+ * 不能因为拿不到明细就让整块提示消失（旧宿主或异常响应都不该把提示吞掉）。
+ */
+function claimFailureLines(res) {
+  const results = res?.results;
+  if (!Array.isArray(results)) return [];
+  return results
+    .filter((item) => item?.outcome?.kind === 'failed')
+    .map(formatClaimFailureLine);
+}
+
+/**
+ * 把一次 `credits.claimAll` 的响应整理成 {@link ClaimNotice} 的 props。
+ *
+ * 摘要行只讲各档计数（「3 个账号领取成功（+300 积分），1 个失败」），
+ * 失败账号的**服务端原文**另走 `details` —— 计数回答「有几个」，原文才回答
+ * 「为什么」，而后者决定用户下一步做什么（等一会儿重试 / 重新登录 / 明天再来）。
+ *
+ * 纯函数、不依赖 hooks，故可在单测里直接喂响应做整树深比较。
+ * `res.summary` 刻意不做兜底：宿主必然返回它，真缺了就让异常走 `claimCredits`
+ * 的 catch 显示错误提示，而不是静默降级成「没有可领取的账号」。
+ */
+function buildClaimNotice(res) {
+  const summary = res.summary;
+  const parts = [];
+  if (summary.claimed > 0) parts.push(`${summary.claimed} 个账号领取成功（+${summary.totalCredit} 积分）`);
+  if (summary.alreadyClaimed > 0) parts.push(`${summary.alreadyClaimed} 个今日已领取`);
+  if (summary.inactive > 0) parts.push(`${summary.inactive} 个活动未开启`);
+  if (summary.failed > 0) parts.push(`${summary.failed} 个失败`);
+  return {
+    tone: summary.failed > 0 ? 'warn' : 'ok',
+    text: parts.length > 0 ? parts.join('，') : '没有可领取的账号',
+    // 成功 / 已领 / 活动未开启都不产生明细行，故那些路径的渲染逐元素不变。
+    details: claimFailureLines(res),
+  };
+}
+
+/**
+ * 领取结果的提示块：摘要行（`text`）+ 失败账号明细列表（`details`）。
+ *
+ * 形状与上方「重测 / 重置」的 `probeNotice` 完全一致（同 `.dim-jh-probeNotice`
+ * + `.dim-jh-probeDetails`，同一个 `tone` 取值域），两处提示在界面上是同一种
+ * 东西，不该长成两个样。
+ *
+ * **刻意抽成组件而不是在 ProviderPanel 里内联**：`ProviderPanel` 用了 hooks，
+ * 单元测试加载不了它（react 不在依赖里，见 `tests/unit/jet-hub-credit-balance-row.spec.ts`
+ * 的说明）；抽出来才能对这棵树做**整树深比较**，把「成功路径一个字符都不变」
+ * 变成可执行的断言，而不是靠肉眼看源码。
+ */
+function ClaimNotice({ tone, text, details }) {
+  return React.createElement('div', {
+    className: 'dim-jh-probeNotice',
+    'data-tone': tone,
+    role: tone === 'error' ? 'alert' : 'status',
+  },
+  React.createElement('div', null, text),
+  // 每个失败账号一行：账号名 + 服务端 message + code。文案已由
+  // formatClaimFailureLine 兜底（message 缺失时给固定文案），这里只判有无。
+  (details?.length ?? 0) > 0
+    ? React.createElement('ul', { className: 'dim-jh-probeDetails' },
+        details.map((line, i) => React.createElement('li', { key: i }, line)))
+    : null);
+}
+
+/**
  * 账号卡片上的积分余额行。
  *
  * 三种状态严格区分，不能混为一谈：
@@ -671,17 +773,11 @@ function ProviderPanel({ provider, rpcCall }) {
     setClaimNotice(null);
     try {
       const res = await rpcCall('credits.claimAll', { provider });
-      const { summary } = res;
-      const parts = [];
-      if (summary.claimed > 0) parts.push(`${summary.claimed} 个账号领取成功（+${summary.totalCredit} 积分）`);
-      if (summary.alreadyClaimed > 0) parts.push(`${summary.alreadyClaimed} 个今日已领取`);
-      if (summary.inactive > 0) parts.push(`${summary.inactive} 个活动未开启`);
-      if (summary.failed > 0) parts.push(`${summary.failed} 个失败`);
+      // 摘要与失败明细一起交给 ClaimNotice（含每个失败账号的服务端 code +
+      // message —— 早期实现只解构 summary，把用户判断原因的唯一依据整块丢了）。
+      const notice = buildClaimNotice(res);
       if (!mounted.current) return;
-      setClaimNotice({
-        tone: summary.failed > 0 ? 'warn' : 'ok',
-        text: parts.length > 0 ? parts.join('，') : '没有可领取的账号',
-      });
+      setClaimNotice(notice);
       await loadAccounts();
       // 领取会改变余额，顺带刷新一次，免得卡片还显示领取前的数字
       await loadCredits();
@@ -938,11 +1034,11 @@ function ProviderPanel({ provider, rpcCall }) {
           : null)
       : null,
     claimNotice
-      ? React.createElement('div', {
-          className: 'dim-jh-probeNotice',
-          'data-tone': claimNotice.tone,
-          role: claimNotice.tone === 'error' ? 'alert' : 'status',
-        }, React.createElement('div', null, claimNotice.text))
+      ? React.createElement(ClaimNotice, {
+          tone: claimNotice.tone,
+          text: claimNotice.text,
+          details: claimNotice.details,
+        })
       : null,
     // 弹窗被拦截时的兜底入口。刻意**不做成按钮 + window.open(url)**：
     // 那需要在 onClick 里再开窗，而此刻用户手势是新鲜的、本可以成功 —— 但
