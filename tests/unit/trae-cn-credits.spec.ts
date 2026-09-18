@@ -546,3 +546,226 @@ describe('fetchTraeCnCreditBalance', () => {
     expect(TRAE_CN_BALANCE_REMAIN_FIELDS).toContain('remain_amount')
   })
 })
+
+// ─────────────────────────────────────────────────────────────
+// 真机校准（2026-09-18）：无 code 信封 + 嵌套 credits_limit / credits_amount
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 真机 `web_user_ent_usage` 的响应样例（字段名与层级照抄实测，数值用实测值）。
+ *
+ * 两个**已实证**的形态差异正是本节要锁住的：
+ *
+ * 1. **顶层没有 `code` 字段**。原实现按 code 信封判定，直接 `return` 失败
+ *    （「响应缺少 code 字段」）→ 余额**恒失败**，与「余额为 0」无关。
+ * 2. 礼包数组的真名是根层的 `user_entitlement_pack_list`，且额度**嵌在**
+ *    `entitlement_base_info.product_extra.package_extra.quota.credits_limit`，
+ *    已用在 `usage.credits_amount`。只看顶层的读法会全部 miss → 每个包算 0。
+ *
+ * 真机响应里的包名字段**未在校准结论中列出**，故 fixture 只用已登记的
+ * `name` 候选，不对名字做任何断言（断言按 `available_endpoint` 定位礼包）。
+ */
+function realDeviceBalanceResponse(): Record<string, unknown> {
+  return {
+    is_credits_billing: true,
+    is_dollar_usage_billing: false,
+    is_pay_freshman: false,
+    trial_status: { is_in_trial: false },
+    usage_summary: { consumed_amount: 2650, total_amount: 4650 },
+    user_entitlement_pack_list: [
+      {
+        // endpoint=0 通用池：2000 用满 → 余额 0。
+        entitlement_base_info: {
+          available_endpoint: TRAE_CN_POOL_UNIVERSAL,
+          entitlement_id: 'ent-universal',
+          product_extra: { package_extra: { quota: { credits_limit: 2000 } } },
+          quota: { credits_limit: 9999 },
+        },
+        usage: { credits_amount: 2000 },
+      },
+      {
+        // endpoint=1 Work 池：usage 为 `{}`（该包未产生用量）→ 按 0 计 → 余额 2000。
+        entitlement_base_info: {
+          available_endpoint: TRAE_CN_POOL_WORK,
+          entitlement_id: 'ent-work',
+          product_extra: { package_extra: { quota: { credits_limit: 2000 } } },
+          quota: { credits_limit: 2000 },
+        },
+        usage: {},
+      },
+    ],
+  }
+}
+
+describe('fetchTraeCnCreditBalance —— 真机样例（2026-09-18 校准）', () => {
+  it('无 code 信封也判成功（不再报「响应缺少 code 字段」）', async () => {
+    const debug: string[] = []
+    const { fetcher } = stubFetch(() => new Response(
+      JSON.stringify(realDeviceBalanceResponse()), { status: 200 },
+    ))
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
+      fetcher, onDebug: (message) => debug.push(message),
+    })
+    expect(balance).not.toBeNull()
+    // 原缺陷的原文案绝不能出现 —— 那正是「余额恒失败」的直接原因。
+    expect(debug.join('\n')).not.toContain('响应缺少 code 字段')
+    expect(debug.join('\n')).not.toContain('余额查询失败')
+  })
+
+  it('真机样例：通用池 0 / Work 池 2000（双池不合并）', async () => {
+    const { fetcher } = stubFetch(() => new Response(
+      JSON.stringify(realDeviceBalanceResponse()), { status: 200 },
+    ))
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    expect(balance).not.toBeNull()
+    // endpoint=0 包 limit 2000 − consumed 2000 = 0；endpoint=1 包 limit 2000 − 0 = 2000。
+    expect(balance!.total).toBe(0)
+    expect(balance!.workTotal).toBe(2000)
+    // 主数字**只**是通用池：合并会得到 2000，让用户以为 Work 额度能用于对话。
+    expect(balance!.total).not.toBe(balance!.total + balance!.workTotal)
+    expect(balance!.pools.map((pool) => pool.endpoint)).toEqual([TRAE_CN_POOL_UNIVERSAL, TRAE_CN_POOL_WORK])
+  })
+
+  it('嵌套口径生效：credits_limit 与 credits_amount 都被读到', async () => {
+    const { fetcher } = stubFetch(() => new Response(
+      JSON.stringify(realDeviceBalanceResponse()), { status: 200 },
+    ))
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    // 按 endpoint 定位（包名字段未在校准结论中，不做名字断言）。
+    const universal = balance!.pools.find((pool) => pool.endpoint === TRAE_CN_POOL_UNIVERSAL)!
+      .packages[0]!
+    expect(universal.total).toBe(2000)
+    expect(universal.used).toBe(2000)
+    expect(universal.remaining).toBe(0)
+
+    const work = balance!.pools.find((pool) => pool.endpoint === TRAE_CN_POOL_WORK)!
+      .packages[0]!
+    // usage:{} ⇒ 已用按 0（不是「查不到」）。
+    expect(work.total).toBe(2000)
+    expect(work.used).toBe(0)
+    expect(work.remaining).toBe(2000)
+  })
+
+  it('礼包数组从根层 user_entitlement_pack_list 定位，且按分池指纹确认为可信', async () => {
+    const debug: string[] = []
+    const { fetcher } = stubFetch(() => new Response(
+      JSON.stringify(realDeviceBalanceResponse()), { status: 200 },
+    ))
+    await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
+      fetcher, onDebug: (message) => debug.push(message),
+    })
+    const joined = debug.join('\n')
+    // 真机响应**没有** `data` 层，礼包数组就在根上 —— 路径必须如实报 root，
+    // 而不是回退层被误标成 data（那会让真机校准时找不到数组的真实位置）。
+    expect(joined).toContain('root.user_entitlement_pack_list')
+    expect(joined).not.toContain('data.user_entitlement_pack_list')
+    // 真机的 available_endpoint 嵌在 entitlement_base_info 里，指纹扫描必须
+    // 认得出它 —— 否则会退化成「仅按候选键名命中」的不可信路径。
+    expect(joined).toContain('已按分池指纹确认')
+    expect(joined).not.toContain('未确认')
+  })
+
+  it('嵌套 credits_limit 优先于同层 quota.credits_limit', async () => {
+    // 两个路径同时存在且取值不同（2000 vs 9999）：必须取 package_extra 那一个。
+    const { fetcher } = stubFetch(() => new Response(JSON.stringify({
+      user_entitlement_pack_list: [{
+        entitlement_base_info: {
+          available_endpoint: 0,
+          product_extra: { package_extra: { quota: { credits_limit: 2000 } } },
+          quota: { credits_limit: 9999 },
+        },
+        usage: { credits_amount: 500 },
+      }],
+    }), { status: 200 }))
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    expect(balance!.packages[0]!.total).toBe(2000)
+    expect(balance!.total).toBe(1500)
+  })
+
+  it('package_extra 缺失时回退 entitlement_base_info.quota.credits_limit', async () => {
+    const { fetcher } = stubFetch(() => new Response(JSON.stringify({
+      user_entitlement_pack_list: [{
+        entitlement_base_info: { available_endpoint: 0, quota: { credits_limit: 800 } },
+        usage: { credits_amount: 300 },
+      }],
+    }), { status: 200 }))
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    expect(balance!.total).toBe(500)
+    expect(balance!.packages[0]!.total).toBe(800)
+  })
+
+  it('usage 缺失时已用按 0（未产生用量 ≠ 查不到）', async () => {
+    const { fetcher } = stubFetch(() => new Response(JSON.stringify({
+      user_entitlement_pack_list: [{
+        entitlement_base_info: {
+          available_endpoint: 0,
+          product_extra: { package_extra: { quota: { credits_limit: 2000 } } },
+        },
+      }],
+    }), { status: 200 }))
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    expect(balance!.total).toBe(2000)
+    expect(balance!.packages[0]!.used).toBe(0)
+  })
+
+  it('只有 usage_summary（无礼包数组）时不再按 code 判失败，而是找不到数组返回 null', async () => {
+    // `usage_summary` 也是 trae-pay 信封特征字段，故**不会**被报成
+    // 「响应缺少 code 字段」——失败原因如实指向「找不到礼包数组」。
+    const debug: string[] = []
+    const { fetcher } = stubFetch(() => new Response(JSON.stringify({
+      is_credits_billing: true,
+      usage_summary: { consumed_amount: 2650, total_amount: 4650 },
+    }), { status: 200 }))
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
+      fetcher, onDebug: (message) => debug.push(message),
+    })
+    expect(balance).toBeNull()
+    expect(debug.join('\n')).toContain('找不到礼包数组')
+    expect(debug.join('\n')).not.toContain('响应缺少 code 字段')
+  })
+
+  it('业务失败仍按 code 报错（code:1001 凭据失效的翻译不丢）', async () => {
+    // 「无 code 信封」不等于「忽略 code」：服务端真返回非 0 码时照样失败。
+    const { fetcher } = stubFetch(() => new Response(JSON.stringify({
+      code: TRAE_CN_CODE_CREDENTIAL_INVALID,
+      user_entitlement_pack_list: [],
+    }), { status: 200 }))
+    const debug: string[] = []
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
+      fetcher, onDebug: (message) => debug.push(message),
+    })
+    expect(balance).toBeNull()
+    expect(debug.join('\n')).toContain('余额查询失败')
+  })
+
+  it('既无 code 也无信封特征字段时仍判失败（不把垃圾响应当成功）', async () => {
+    const debug: string[] = []
+    const { fetcher } = stubFetch(() => new Response(JSON.stringify({
+      mystery: 'payload',
+    }), { status: 200 }))
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
+      fetcher, onDebug: (message) => debug.push(message),
+    })
+    expect(balance).toBeNull()
+    expect(debug.join('\n')).toContain('无余额信封特征字段')
+  })
+})
+
+describe('签到端点不受余额信封改动影响（仍按 code 判定）', () => {
+  it('status 响应缺 code 时仍返回 null（信封宽松只对余额端点生效）', async () => {
+    // 若把「结构特征即成功」误推广到签到端点，一次失败的领取会被报成
+    // 「已领取」—— 比报失败更糟。这条断言就是那道边界。
+    const { fetcher } = stubFetch(() => new Response(JSON.stringify({
+      user_entitlement_pack_list: [], usage_summary: {},
+    }), { status: 200 }))
+    expect(await fetchTraeCnCheckinStatus(makeCredential(), TRAE_CN, { fetcher })).toBeNull()
+  })
+
+  it('claim 响应缺 code 时不返回 claimed', async () => {
+    const { fetcher } = stubFetch((url) => url.includes('/claim')
+      ? new Response(JSON.stringify({ credit: 100 }), { status: 200 })
+      : new Response(JSON.stringify({ code: 0, data: { checked_in: false, enable: true } }), { status: 200 }))
+    const outcome = await claimTraeCnDailyCheckin(makeCredential(), TRAE_CN, { fetcher })
+    expect(outcome.kind).toBe('failed')
+  })
+})

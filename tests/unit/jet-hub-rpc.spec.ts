@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
+  accountCredentialRefName,
   collectClaimResults,
   collectCreditBalances,
   collectCreditsStatus,
@@ -10,7 +12,60 @@ import type { CreditsEndpointDeps } from '../../src/jet-hub-rpc.js'
 import { AccountPool } from '../../src/account-pool.js'
 import type { ClaimOutcome, CheckinStatus, CreditBalance } from '../../src/credits.js'
 import { WORKBUDDY } from '../../src/product.js'
+import { TRAE_CN } from '../../src/trae-cn-product.js'
 import type { ProviderAccountEntry } from '../../src/types.js'
+
+/**
+ * 账号凭据 ref 的归一化（连字符 → 下划线）。
+ *
+ * ## 为什么这条必须有测试
+ *
+ * provider id 允许带连字符（`trae-cn`），而 DSH 的 `credentialRef()` 只接受
+ * `REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/`。不归一化时 `TRAE-CN_ACCOUNT_XXX`
+ * 会让 `credentialRef()` 抛 TypeError，后果链是：凭据**从未落盘** → 账号池里
+ * 留下永远没有凭据的条目 → 三个积分收集器在 `credentialRef(entry.credentialRef)`
+ * 处一并抛错（面板显示「积分查询失败 / 领取失败」）→ 对话也不可用。
+ *
+ * 因此本组断言不满足于「形状对」：直接把结果喂给**真实的** `credentialRef()`，
+ * 用它的接受与否作为判据 —— 那正是当初炸掉的那一步。
+ */
+describe('accountCredentialRefName（账号凭据 ref 归一化）', () => {
+  const PROVIDERS = ['codearts', 'buddy', 'workbuddy', 'lobsterai', 'trae-cn'] as const
+
+  it.each(PROVIDERS)('%s 产出的 ref 被 credentialRef() 接受，且前缀为 ^[A-Z_]+_ACCOUNT$', (provider) => {
+    const name = accountCredentialRefName(provider, 'A1B2C3D4')
+    // 不抛 TypeError = 当初那条后果链的断点已被修好。
+    expect(() => credentialRef(name)).not.toThrow()
+    // 整体形状：前缀 + 大写十六进制后缀。
+    expect(name).toMatch(/^[A-Z_]+_ACCOUNT_[A-Z0-9]+$/)
+    // 前缀（去掉后缀）必须匹配该模式 —— 连字符一旦漏折就会在这里现形。
+    expect(name.replace(/_A1B2C3D4$/, '')).toMatch(/^[A-Z_]+_ACCOUNT$/)
+    // 后缀必须原样保留（它是账号身份，不该被归一化动到）。
+    expect(name.endsWith('_A1B2C3D4')).toBe(true)
+  })
+
+  it('trae-cn 归一化为 TRAE_CN_ACCOUNT，与产品配置的 accountCredentialRefPrefix 同值', () => {
+    // 归一化后的前缀必须与 trae-cn-product.ts 的 accountCredentialRefPrefix
+    // **逐字符一致** —— 后者是该前缀的唯一真相源，两处漂移会让凭据写到
+    // 一个名字、读的时候找另一个名字。
+    expect(accountCredentialRefName('trae-cn', 'A1B2C3D4'))
+      .toBe(`${TRAE_CN.accountCredentialRefPrefix}_A1B2C3D4`)
+    expect(TRAE_CN.accountCredentialRefPrefix).toBe('TRAE_CN_ACCOUNT')
+  })
+
+  it('无连字符的 provider 输出与归一化前**逐字符相同**（既有账号 ref 无需迁移）', () => {
+    // 这四条锁住「改动不外溢」：回归时若有人顺手改了大小写或分隔符，
+    // 用户既有账号的凭据会瞬间全部失联。
+    expect(accountCredentialRefName('codearts', 'A1B2C3D4')).toBe('CODEARTS_ACCOUNT_A1B2C3D4')
+    expect(accountCredentialRefName('buddy', 'A1B2C3D4')).toBe('BUDDY_ACCOUNT_A1B2C3D4')
+    expect(accountCredentialRefName('workbuddy', 'A1B2C3D4')).toBe('WORKBUDDY_ACCOUNT_A1B2C3D4')
+    expect(accountCredentialRefName('lobsterai', 'A1B2C3D4')).toBe('LOBSTERAI_ACCOUNT_A1B2C3D4')
+  })
+
+  it('多个连字符也全部折成下划线（不留下第二个非法字符）', () => {
+    expect(accountCredentialRefName('a-b-c', 'X')).toBe('A_B_C_ACCOUNT_X')
+  })
+})
 
 describe('积分领取结果汇总', () => {
   it('统计成功数量与累计积分', () => {

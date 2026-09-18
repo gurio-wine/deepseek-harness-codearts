@@ -92,6 +92,34 @@ function shortId(): string {
   return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
+/**
+ * 由 provider 名与短 id 派生**账号凭据 ref 名**。
+ *
+ * ## 为什么必须归一化连字符
+ *
+ * provider id 允许带连字符（`trae-cn` 是对齐生态叫法的刻意选择，见
+ * `src/trae-cn-product.ts`），但 DSH 的 `@deepseek-ai/dsh-credentials` 把 ref 名
+ * 约束为 `REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/` —— 连字符**不在**字符集内。
+ *
+ * 归一化前的后果链（已实证）：`pool.addAccount` 把 `TRAE-CN_ACCOUNT_XXX` 原样
+ * 写进账号池 → 后台登录第二段调 `credentialRef(refName)` 直接抛 TypeError →
+ * 凭据**从未**写入 `.credentials.yaml` → 池里留下一个永远没有凭据的条目，
+ * 三个积分收集器在 `credentialRef(entry.credentialRef)` 处一并抛错（面板显示
+ * 「积分查询失败 / 领取失败」），trae-cn 的 LLM 对话同样不可用。
+ *
+ * ## 为什么是「先 toUpperCase、再折连字符」
+ *
+ * `trae-cn` → `TRAE_CN_ACCOUNT_XXX`，与 `src/trae-cn-product.ts` 的
+ * `accountCredentialRefPrefix`（`TRAE_CN_ACCOUNT`）**逐字符一致** —— 后者是
+ * 该前缀的唯一真相源，本函数必须与它同值。
+ *
+ * 无连字符的 provider（`codearts` / `buddy` / `workbuddy` / `lobsterai`）
+ * 输出与归一化前**完全相同**，既有账号的 ref 全部兼容，**无需迁移**。
+ */
+export function accountCredentialRefName(provider: string, suffix: string): string {
+  return `${provider.toUpperCase().replace(/-/g, '_')}_ACCOUNT_${suffix}`
+}
+
 /** 解析 Buddy 凭据 JSON；解析失败返回 undefined。 */
 function parseBuddyCredential(raw: string): BuddyCredential | undefined {
   try {
@@ -478,7 +506,10 @@ function registerJetHubEndpoints(
         const { provider } = req
         const id = `${provider}-${shortId()}`
         const suffix = shortId().toUpperCase()
-        const refName = `${provider.toUpperCase()}_ACCOUNT_${suffix}`
+        // 归一化连字符：`trae-cn` → `TRAE_CN_ACCOUNT_XXX`（见
+        // {@link accountCredentialRefName} 的后果链说明）。无连字符的 provider
+        // 输出与归一化前逐字符相同。
+        const refName = accountCredentialRefName(provider, suffix)
 
         // CodeBuddy 系（buddy / workbuddy）共用两步登录流程：
         // 只获取 loginUrl 和 state 立即返回，后台用同一个 state 异步执行

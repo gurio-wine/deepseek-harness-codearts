@@ -22,12 +22,17 @@
  *
  * ## 三条本协议独有的约束
  *
- * 1. **必须带设备头**：`x-device-id`（凭据里的 Aha 设备号，16 位十进制）+
- *    `x-device-type` / `x-os-version` / `x-app-version`。claim 严格校验，
- *    缺失时服务端回 `code:9004`。**这是 Trae 与另外两条线最大的形态差异** ——
+ * 1. **必须带设备头**：`x-device-id`（凭据里的 `device_id`，即登录 exchange
+ *    返回的 `BoundDeviceID`）+ `x-device-type` / `x-os-version` / `x-app-version`。
+ *    ⚠️ **T9 已校准**（2026-09-18 真机）：status / claim **都不校验设备号形态**
+ *    —— 16 位十进制号、`BoundDeviceID`、空串全返回 `code:0`；完全不带设备头时
+ *    `did_checked_in:false`（设备级语义的佐证）。故照常取凭据值，**不**拿
+ *    `machine_id` 折算假设备号。**这是 Trae 与另外两条线最大的形态差异** ——
  *    腾讯系与 LobsterAI 都不需要设备四件套。
- * 2. **判定以 body `code:0` 为准，不看 HTTP 状态**（对齐 CodeBuddy 既有约定）。
+ * 2. **签到判定以 body `code:0` 为准，不看 HTTP 状态**（对齐 CodeBuddy 既有约定）。
  *    `code:1001` + `enable:false` 是「凭据失效」，按需要重新登录处理。
+ *    **余额端点例外**：`web_user_ent_usage` 的响应**没有 code 信封**（T7 已校准），
+ *    按结构特征判成功 —— 详见 {@link ResponseEnvelope}。
  * 3. **幂等判据是 `checked_in`（账号级当日）**，而**不是** `did_checked_in`
  *    ——后者是**设备级**语义：同一账号换一台设备仍为 false，拿它判幂等会
  *    对已经领过的账号重复发领取请求。
@@ -79,9 +84,9 @@ export const TRAE_CN_USER_ENT_USAGE_PATH = '/trae/api/v2/pay/web_user_ent_usage'
 /**
  * 两个签到端点的请求体字段。
  *
- * 实测**唯一**成功过的组合是「`req_source: 1` + 设备头」。调研未定论
- * `{}` 与 `{"req_source":1}` 哪个才是 9004 的真因（T1），故照抄实测成功的
- * 那一个 —— 带重复字段的成本是零，猜错形态的成本是设备校验失败。
+ * ⚠️ **T1 已校准**（2026-09-18 真机）：`req_source` 带与不带，服务端返回
+ * **逐字节相同**，它不是 `code:9004` 的成因。保留 `req_source: 1` 是因为
+ * 它是唯一被实测成功过的组合，且带一个多余字段的成本是零。
  */
 export const TRAE_CN_CHECKIN_REQ_SOURCE = 1
 
@@ -91,10 +96,11 @@ export const TRAE_CN_DEVICE_TYPE = 'windows'
 /**
  * 设备头中的操作系统版本。
  *
- * ⚠️ **T7 待校准**：调研报告把构建号记成了 `Windows 10.0.xxxxx`（脱敏形态），
+ * 调研报告把构建号记成了 `Windows 10.0.xxxxx`（脱敏形态），
  * 故这里填一个真实存在的 Windows 构建号。它必须**形态合法**（`Windows 10.0.\d+`）
- * 而非留 `xxxxx` 字面量 —— 后者一定过不了校验。真机若在 claim 处拿到 9004，
- * 按本机 Trae 客户端实际发送的值替换即可（`x-os-version` 在系统 API 上可取）。
+ * 而非留 `xxxxx` 字面量 —— 后者一定过不了校验。T9 校准（2026-09-18）确认
+ * **设备号形态不被校验**，但 `x-os-version` 仍照实测值发；真机若在 claim 处
+ * 拿到 9004，按本机 Trae 客户端实际发送的值替换即可（`x-os-version` 在系统 API 上可取）。
  */
 export const TRAE_CN_OS_VERSION = 'Windows 10.0.22631'
 
@@ -103,7 +109,7 @@ export const TRAE_CN_APP_VERSION = '3.3.100'
 
 // ── 业务码 ──
 
-/** 成功码（判定以 body code 为准，不看 HTTP 状态）。 */
+/** 成功码（签到判定以 body code 为准，不看 HTTP 状态）。 */
 export const TRAE_CN_CODE_OK = 0
 /**
  * 凭据失效码。
@@ -113,7 +119,7 @@ export const TRAE_CN_CODE_OK = 0
  */
 export const TRAE_CN_CODE_CREDENTIAL_INVALID = 1001
 /**
- * 设备校验失败码（claim 严格校验设备头，缺失时返回）。
+ * 设备校验失败码（缺少**设备头本身**时返回；T9 校准确认设备**号形态**不校验）。
  *
  * 本模块**总是**带设备四件套，因此真机遇到它只可能是「服务端不认可我们构造的
  * 设备身份」（例如 {@link TRAE_CN_OS_VERSION} 的构建号形态不对）。故错误文案
@@ -121,7 +127,7 @@ export const TRAE_CN_CODE_CREDENTIAL_INVALID = 1001
  */
 export const TRAE_CN_CODE_DEVICE_REJECTED = 9004
 
-/** 传输层失败（网络异常 / 响应无法解析 / 缺少 code 字段）的统一码。 */
+/** 传输层失败（网络异常 / 响应无法解析 / 信封与预期不符）的统一码。 */
 const CODE_TRANSPORT_FAILED = -1
 
 // ── 积分池 ──
@@ -236,13 +242,39 @@ function dataLayer(body: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
+ * 响应信封形态。
+ *
+ * - `code`：**业务码信封**（签到 status / claim）。判定全部依据 body 的 `code`，
+ *   缺失即失败 —— 信封与预期不符时「当作成功」会把一次失败的领取报成
+ *   「已领取」，比报失败更糟。
+ * - `trae-pay`：`web_user_ent_usage` 的**无 code 信封**。真机实测（2026-09-18）
+ *   该端点响应顶层是 `{"is_credits_billing":…,"usage_summary":{…},
+ *   "user_entitlement_pack_list":[…]}`，**根本没有 `code` 字段** —— 沿用
+ *   `code` 信封会让余额**恒失败**（实测表现为「响应缺少 code 字段」）。
+ *   故本形态按「结构特征存在即成功」，同时保留「若真的解析出 `code` 且非 0，
+ *   仍按业务码报错」的通道（对齐「业务失败在 HTTP 200」的协议，
+ *   `code:1001` 的凭据失效翻译因此不丢）。
+ */
+type ResponseEnvelope = 'code' | 'trae-pay'
+
+/** `trae-pay` 信封的结构特征字段：任一存在即认定响应形态正确。 */
+const TRAE_PAY_ENVELOPE_MARKERS: readonly string[] = [
+  'user_entitlement_pack_list', 'usage_summary',
+]
+
+/** `trae-pay` 信封的响应体是否具备已实测的结构特征。 */
+function hasTraePayEnvelope(record: Record<string, unknown>): boolean {
+  return TRAE_PAY_ENVELOPE_MARKERS.some((key) => key in record)
+}
+
+/**
  * 发起一次 POST 并解析业务码。
  *
  * 判定的全部依据是 **body 的 `code`**，`response.ok` 一概不看：实测无 auth 时
  * 服务端返回的是 HTTP 200 + `code:1001`，按状态码判会把它当成成功。
  *
- * `code` **缺失**同样判失败（{@link CODE_TRANSPORT_FAILED}）：信封与预期不符时
- * 「当作成功」的代价是把一次失败的领取报成「已领取」，比报失败更糟。
+ * `code` **缺失**时按 `envelope` 分派（见 {@link ResponseEnvelope}）：
+ * 签到端点判失败，余额端点按结构特征判成功。
  */
 async function postJson(
   path: string,
@@ -250,6 +282,7 @@ async function postJson(
   product: TraeCnProduct,
   options: TraeCnCreditsOptions,
   body: string,
+  envelope: ResponseEnvelope = 'code',
 ): Promise<CreditsCallResult> {
   const fetcher = options.fetcher ?? fetch
   let parsed: unknown
@@ -275,6 +308,14 @@ async function postJson(
   const record = parsed as Record<string, unknown>
   const code = readCode(record)
   if (code === undefined) {
+    if (envelope === 'trae-pay') {
+      // 无 code 信封：结构特征在即成功（真机校准，2026-09-18）。
+      if (hasTraePayEnvelope(record)) return { ok: true, body: record }
+      options.onDebug?.(
+        `[trae-cn] ${path} 响应既无 code 也无余额信封特征字段，字段名: ${describeKeys(record)}`,
+      )
+      return { ok: false, code: CODE_TRANSPORT_FAILED, message: UNPARSABLE_RESPONSE_MESSAGE }
+    }
     options.onDebug?.(`[trae-cn] ${path} 响应缺少 code 字段，字段名: ${describeKeys(record)}`)
     return { ok: false, code: CODE_TRANSPORT_FAILED, message: '响应缺少 code 字段' }
   }
@@ -295,9 +336,9 @@ function describeFailureCode(code: number, message: string): string {
   if (code === TRAE_CN_CODE_DEVICE_REJECTED) {
     // 本模块总是带设备四件套 ⇒ 9004 只可能是「服务端不认可我们构造的设备身份」，
     // 而不是「忘了带设备头」。文案因此指向真正要校准的那个值。
+    // （T9 已校准确认**设备号形态**不被校验，故这里不再声称形态是成因。）
     return `设备校验未通过（code ${TRAE_CN_CODE_DEVICE_REJECTED}）：`
-      + 'x-device-id 取自凭据的 device_id（登录 exchange 返回的 BoundDeviceID，T9 待校准：'
-      + '真机签到成功时用的是 16 位十进制设备号，与本字段形态不同），'
+      + 'x-device-id 取自凭据的 device_id（登录 exchange 返回的 BoundDeviceID），'
       + `x-os-version / x-app-version 为实测常量（${TRAE_CN_OS_VERSION} / ${TRAE_CN_APP_VERSION}）`
   }
   return message
@@ -498,14 +539,16 @@ export async function claimTraeCnDailyCheckin(
 // ── 积分余额 ──
 
 /**
- * 礼包数组所在的候选键（**T7 待校准**）。
+ * 礼包数组所在的候选键（**T7 已按真机校准**，2026-09-18）。
  *
- * 先按名字找，再退回「按标记字段扫描」（见 {@link findPackageArray}）。
- * 之所以两者都做：`web_user_ent_usage` 带 `require_usage:true`，响应里很可能
- * **同时**有「用量」数组与「礼包」数组，只按名字猜容易猜错，只按扫描又可能
- * 命中用量数组。名字优先 + `available_endpoint` 标记兜底是最稳的组合。
+ * 真机 `web_user_ent_usage` 的礼包数组位于**根层**、键名
+ * `user_entitlement_pack_list` —— 故它排在首位。其余候选键与「按
+ * `available_endpoint` 指纹扫描」兜底一并保留：`require_usage:true` 下响应里
+ * 同时有「用量」数组与「礼包」数组，只按名字猜容易猜错，只按扫描又可能命中
+ * 用量数组。名字优先 + 分池指纹兜底是最稳的组合。
  */
 export const TRAE_CN_BALANCE_ARRAY_KEYS: readonly string[] = [
+  'user_entitlement_pack_list',
   'packages', 'gift_packages', 'gifts', 'gift_list', 'credit_packages',
   'resource_list', 'ent_list', 'entitlements', 'data_list', 'list', 'items',
 ]
@@ -594,6 +637,32 @@ function readFirstString(source: Record<string, unknown>, keys: readonly string[
 }
 
 /**
+ * 沿嵌套路径读取一个**普通对象**；任一层缺失或不是对象时返回 undefined。
+ *
+ * 真机的礼包条目把额度放在嵌套对象里（`entitlement_base_info` →
+ * `product_extra` → `package_extra` → `quota`），`readFirstNumber` 那种只看
+ * 顶层的读法在真机响应上**全部 miss**（表现为每个礼包余额都算 0）。
+ */
+function readObjectPath(
+  source: Record<string, unknown>,
+  path: readonly string[],
+): Record<string, unknown> | undefined {
+  let current: unknown = source
+  for (const key of path) {
+    if (typeof current !== 'object' || current === null || Array.isArray(current)) return undefined
+    current = (current as Record<string, unknown>)[key]
+  }
+  return typeof current === 'object' && current !== null && !Array.isArray(current)
+    ? current as Record<string, unknown>
+    : undefined
+}
+
+/** 真机（2026-09-18）实测的额度字段名：`credits_limit` 是总额，`credits_amount` 是已用。 */
+const NESTED_LIMIT_FIELD = 'credits_limit'
+/** 已用额度的字段名（位于 `usage` 对象内）。 */
+const NESTED_CONSUMED_FIELD = 'credits_amount'
+
+/**
  * 定位礼包数组。
  *
  * `require_usage:true` 意味着响应里很可能**同时**有「用量」数组与「礼包」数组，
@@ -608,13 +677,25 @@ function readFirstString(source: Record<string, unknown>, keys: readonly string[
 function findPackageArray(
   body: Record<string, unknown>,
 ): { path: string; items: unknown[]; confident: boolean } | undefined {
-  const hasMarker = (items: unknown[]): boolean => items.some((item) =>
-    typeof item === 'object' && item !== null
-    && BALANCE_ENDPOINT_FIELDS.some((field) => field in (item as Record<string, unknown>)))
+  const hasMarker = (items: unknown[]): boolean => items.some((item) => {
+    if (typeof item !== 'object' || item === null) return false
+    const record = item as Record<string, unknown>
+    if (BALANCE_ENDPOINT_FIELDS.some((field) => field in record)) return true
+    // 真机的分池字段**嵌在** `entitlement_base_info` 里（不在条目顶层），
+    // 只看顶层会把真机礼包数组判成「无指纹」，退化成仅按键名命中的不可信路径。
+    const base = readObjectPath(record, ['entitlement_base_info'])
+    return base !== undefined && BALANCE_ENDPOINT_FIELDS.some((field) => field in base)
+  })
 
   const data = dataLayer(body)
+  // `dataLayer` 在没有 `data` 键时**回退到根对象** —— 此时若仍把这一层叫
+  // 'data'，调试行会报出「data.user_entitlement_pack_list」这种不存在的路径，
+  // 而调试行的全部价值就在于如实报出真实层级（真机校准靠它）。
+  const scopes: ReadonlyArray<readonly [string, Record<string, unknown>]> = data === body
+    ? [['root', body]]
+    : [['data', data], ['root', body]]
   let fallback: { path: string; items: unknown[] } | undefined
-  for (const [scopeName, scope] of [['data', data], ['root', body]] as const) {
+  for (const [scopeName, scope] of scopes) {
     for (const key of TRAE_CN_BALANCE_ARRAY_KEYS) {
       const value = scope[key]
       if (!Array.isArray(value)) continue
@@ -667,12 +748,53 @@ interface ParsedPackage {
   endpoint: number
   pkg: CreditPackage
   /** 余额取数口径（供脱敏调试行说明「这个数是怎么来的」）。 */
-  source: 'remain-field' | 'total-minus-used' | 'total-as-remain' | 'none'
+  source: 'nested-limit' | 'remain-field' | 'total-minus-used' | 'total-as-remain' | 'none'
+}
+
+/**
+ * 按真机口径读取礼包的额度（**T7 已按真机校准**，2026-09-18）。
+ *
+ * 真机响应的礼包条目把额度放在**嵌套对象**里，顶层没有任何额度字段：
+ *
+ * ```
+ * entitlement_base_info.product_extra.package_extra.quota.credits_limit  ← 总额（主路径）
+ * entitlement_base_info.quota.credits_limit                              ← 总额（回退）
+ * usage.credits_amount                                                   ← 已用
+ * entitlement_base_info.available_endpoint                               ← 分池
+ * ```
+ *
+ * `usage` 真机上可能是 `{}`（该包尚未产生用量），此时已用按 0 计 ——
+ * 不是「查不到」，而是「这个包一分没用过」。
+ *
+ * 主路径（含 `credits_limit`）命中时返回**余额 = limit − consumed**；
+ * 未命中返回 undefined，由调用方走原有的候选表回退链。
+ */
+function readNestedQuota(record: Record<string, unknown>): {
+  endpoint: number | undefined
+  limit: number
+  consumed: number
+  total: number
+} | undefined {
+  const base = readObjectPath(record, ['entitlement_base_info'])
+  if (base === undefined) return undefined
+
+  const packageQuota = readObjectPath(base, ['product_extra', 'package_extra', 'quota'])
+  const plainQuota = readObjectPath(base, ['quota'])
+  const limit = readFirstNumber(packageQuota ?? {}, [NESTED_LIMIT_FIELD])
+    ?? readFirstNumber(plainQuota ?? {}, [NESTED_LIMIT_FIELD])
+  if (limit === undefined) return undefined
+
+  // `usage` 可为 `{}` 或缺失 —— 两种都按「未产生用量」计 0。
+  const consumed = readFirstNumber(readObjectPath(record, ['usage']) ?? {}, [NESTED_CONSUMED_FIELD]) ?? 0
+  const endpoint = readFirstNumber(base, BALANCE_ENDPOINT_FIELDS)
+  return { endpoint, limit, consumed, total: limit - consumed }
 }
 
 /** 解析一个礼包条目。 */
 function parseTraeCnPackage(record: Record<string, unknown>): ParsedPackage {
-  const endpointRaw = readFirstNumber(record, BALANCE_ENDPOINT_FIELDS)
+  // 真机嵌套口径优先；未命中时 endpoint 才走顶层候选表。
+  const nested = readNestedQuota(record)
+  const endpointRaw = nested?.endpoint ?? readFirstNumber(record, BALANCE_ENDPOINT_FIELDS)
   // 缺失 available_endpoint 时归入**通用池**：chat 扣的就是通用池，
   // 且缺失数量会由调试行报出，真机校准时一眼能看到是不是猜错了。
   const endpoint = endpointRaw ?? TRAE_CN_POOL_UNIVERSAL
@@ -683,13 +805,19 @@ function parseTraeCnPackage(record: Record<string, unknown>): ParsedPackage {
 
   let remaining: number
   let source: ParsedPackage['source']
-  let totalForDisplay = total ?? 0
-  if (remain !== undefined) {
+  let totalForDisplay: number
+  if (nested !== undefined) {
+    remaining = nested.total
+    totalForDisplay = nested.limit
+    source = 'nested-limit'
+  } else if (remain !== undefined) {
     remaining = remain
+    totalForDisplay = total ?? 0
     source = 'remain-field'
   } else if (total !== undefined && used !== undefined) {
     // 余额 = 总额 - 已用（调研给出的口径之一）。
     remaining = total - used
+    totalForDisplay = total
     source = 'total-minus-used'
   } else if (total !== undefined) {
     // 三级回退：调研观察到 claim 后 `total_amount` 由 4500 变为 4650，形态上
@@ -704,6 +832,8 @@ function parseTraeCnPackage(record: Record<string, unknown>): ParsedPackage {
     source = 'none'
   }
 
+  // 已用额度：真机在嵌套 `usage.credits_amount`，其余形态走顶层候选表。
+  const usedForDisplay = nested?.consumed ?? used
   const expireRaw = readFirstString(record, BALANCE_EXPIRE_FIELDS)
   const expireValue = BALANCE_EXPIRE_FIELDS
     .map((field) => record[field])
@@ -721,7 +851,7 @@ function parseTraeCnPackage(record: Record<string, unknown>): ParsedPackage {
       // 原样透出会让卡片显示「-12.5 积分」，既无意义又误导。
       remaining: Math.max(0, remaining),
       total: Math.max(0, totalForDisplay),
-      used: Math.max(0, used ?? 0),
+      used: Math.max(0, usedForDisplay ?? 0),
       // 只按失效时间判：本协议未见 Status 字段（CodeBuddy 那套 3=已过期 不适用）。
       active: !(Number.isFinite(expiresAt) && Date.now() >= expiresAt),
       cycleStartTime: '',
@@ -748,6 +878,8 @@ export async function fetchTraeCnCreditBalance(
   const result = await postJson(
     TRAE_CN_USER_ENT_USAGE_PATH, credential, product, options,
     JSON.stringify({ require_usage: true }),
+    // 本端点**没有 code 信封**（真机校准），按结构特征判成功。
+    'trae-pay',
   )
   if (!result.ok) {
     options.onDebug?.(`[trae-cn] 余额查询失败 code=${result.code}: ${result.message}`)
@@ -774,7 +906,7 @@ export async function fetchTraeCnCreditBalance(
     + `字段名（仅键名）: ${firstItem === undefined ? '(无条目)' : describeKeys(firstItem as Record<string, unknown>)}`,
   )
   const sources = [...new Set(parsed.map((entry) => entry.source))]
-  options.onDebug?.(`[trae-cn] 余额取数口径: ${sources.length === 0 ? '(无条目)' : sources.join(' / ')}（T7 待校准）`)
+  options.onDebug?.(`[trae-cn] 余额取数口径: ${sources.length === 0 ? '(无条目)' : sources.join(' / ')}（T7 已校准：nested-limit 为主路径）`)
 
   const endpoints = [...new Set(parsed.map((entry) => entry.endpoint))].sort((a, b) => a - b)
   const pools: TraeCnCreditPool[] = endpoints.map((endpoint) => {
