@@ -50,10 +50,38 @@
  * | `x-device-id` | AHA/iCube SDK 的 16 位号 | 凭据的 `BoundDeviceID` | **刻意不动**（见 {@link traeCnCreditsHeaders}） |
  * | `X-Ide-Token` / `X-Cloudide-Token` | 未逐字确认 | 保留 | **刻意不动**（见 {@link traeCnCreditsHeaders}） |
  *
- * ⚠️ **本次修复是「身份保真」，不是 `9074` 的解药**：`9074` 已由真机实证为
- * **瞬时频次软限流**（同账号隔一会儿重试即成功），与设备身份形态无关。
+ * ⚠️ **本次修复是「身份保真」，不是 `9074` 的解药**：`9074` 的成因**与设备身份
+ * 形态无关**（2026-09-20 已重新定性，见下节）。
  * 改这两处是为了让出站身份与真实客户端一致，从而消除「服务端按身份归因/风控
  * 时看到的是一个不存在的客户端形态」这类隐患，而不是为了让某个具体错误码消失。
+ *
+ * ## `9074` 的定性（2026-09-20 重新取证，**推翻**「瞬时频次软限流」）
+ *
+ * 旧记载「瞬时频次软限流（同账号隔一会儿重试即成功）」**已不成立**。三日取证：
+ *
+ * | 观测 | 实测结果 |
+ * |---|---|
+ * | 同账号跨 3 天报错量（09-17 / 09-18 / 09-19） | **15 / 187 / 250 次，合计 452 次** |
+ * | 8 秒退避后重放 | **仍回 `9074`** |
+ * | 同一套设备头下 status vs claim | **status 恒成功、claim 恒 `9074`** |
+ *
+ * 新定性：**活动级当日容量/名额限制，或账号侧风控** —— 服务端对**写**（claim）
+ * 有独立于**读**（status）的名额桶，故「状态读得到、奖励领不到」是正常形态，
+ * 不是请求节奏问题。用户引导文案因此按「稍后或次日再试」写（见
+ * {@link describeFailureCode}），而不是「等几秒再重试」。
+ *
+ * 另一条**推测（未证实）**：09-18 / 09-19 的两次成功都在下午 14:28–14:43，
+ * 而 09-20 的失败全在零点后（00:50 / 01:04）—— 可能叠加了**零点结算窗口**
+ * （当日名额在结算前后处于不可领状态）。
+ *
+ * ## claim 段的有界重试（2026-09-20）
+ *
+ * 定性改变**不等于「不该重试」**：名额在同一分钟内也可能被释放（前一次请求
+ * 恰好撞在桶满的瞬间），而 `9074` / `4007` / `3004` 这三个码本身都带「稍后再来」
+ * 语义。故 claim 段做**有界**退避重试（1s → 3s，共 2 次，见
+ * {@link TRAE_CN_CLAIM_RETRY_DELAYS_MS}）；**status 段不重试**（读接口没有名额
+ * 问题，重试只是重复请求），`9004`（设备被拒）与 `1001`（凭据失效）**绝不**
+ * 重试 —— 那是确定性失败，重试只会把同一个结果问三遍。
  *
  * ## 与 `lobsterai-credits.ts` 的签名差异（刻意）
  *
@@ -78,6 +106,9 @@ import {
   traeCnAccessHeaders,
   type TraeCnCredential,
 } from './trae-cn-oauth.js'
+// 重试判据**复用** chat 侧的退避码表（`src/trae-cn-errors.ts`）——「哪些码算
+// 稍后再来」在两条协议线上必须是同一份定义，各写一份必然漂移。
+import { TRAE_CN_BACKOFF_CODES } from './trae-cn-errors.js'
 import type {
   CheckinStatus,
   ClaimOutcome,
@@ -178,8 +209,59 @@ export const TRAE_CN_CODE_CREDENTIAL_INVALID = 1001
  */
 export const TRAE_CN_CODE_DEVICE_REJECTED = 9004
 
+/**
+ * 「当前参与用户太多，请稍后再试」码（**活动级当日容量/名额限制或账号侧风控**）。
+ *
+ * ⚠️ **定性已于 2026-09-20 推翻重写**（原文记作「瞬时频次软限流」）。三日取证：
+ * 同账号跨 09-17/18/19 报错 15 / 187 / 250 次（合计 **452 次**）、8 秒退避重放
+ * **仍** 9074、同一套设备头下 **status 恒成功而 claim 恒 9074**（读/写两个名额桶）。
+ * 故它**不是**请求节奏问题，重试只是覆盖「撞在名额释放瞬间」的小概率；
+ * 用户引导按「稍后或次日再试」写（见 {@link describeFailureCode}）。
+ */
+export const TRAE_CN_CODE_TOO_MANY_USERS = 9074
+
 /** 传输层失败（网络异常 / 响应无法解析 / 信封与预期不符）的统一码。 */
 const CODE_TRANSPORT_FAILED = -1
+
+// ── claim 段的有界重试（2026-09-20） ──
+
+/**
+ * claim 段可重试的业务码（**`TRAE_CN_BACKOFF_CODES` 的真子集**）。
+ *
+ * 刻意不是「整张退避码表」：那张表里还有 `3003`（`MODEL_FAIL`，
+ * `all models failed`）—— 它是 **chat 通道**的基础设施故障码，签到端点上
+ * 没有对应的观测，把它放进来只会让签到多等 4 秒再拿到同一个结果。
+ *
+ * 三个码在签到语境下都意味着「服务端此刻不受理这次写入，稍后再来」：
+ * - `9074`：活动级当日名额已满 / 账号侧风控（新定性，见文件头注释）；
+ * - `4007` / `3004`：服务端明确要求稍后重试。
+ *
+ * ⚠️ 判定**同时**要求命中 {@link TRAE_CN_BACKOFF_CODES}（见
+ * {@link isTraeCnClaimRetryable}）：上游若把某个码从共享退避表里移除
+ * （即不再认为它可重试），签到侧的重试会**自动**跟着停 —— 一处定义，不会漂移。
+ */
+export const TRAE_CN_CLAIM_RETRY_CODES: readonly number[] = [9074, 4007, 3004]
+
+/**
+ * 重试前的等待时长（指数退避，**共 2 次重试**：1s → 3s，累计 4s）。
+ *
+ * 上界刻意压得很小：`9074` 的新定性是**当日名额/风控**，不是「等几秒就好」，
+ * 长时间重试只会让用户对着转圈等；这两次重试的真正价值是覆盖「撞在名额释放
+ * 瞬间」的极小概率，以及 `4007` / `3004` 这类真正的瞬时软限流。
+ */
+export const TRAE_CN_CLAIM_RETRY_DELAYS_MS: readonly number[] = [1000, 3000]
+
+/**
+ * 该业务码是否应触发 claim 段的退避重试。
+ *
+ * 两道判据缺一不可：本地清单（签到语境的相关码）+ 共享退避表（上游对
+ * 「可重试」的权威定义）。`9004`（设备被拒）与 `1001`（凭据失效）**都**不在
+ * 任何一张表里 —— 它们是确定性失败，重试只会把同一个结果问三遍。
+ */
+export function isTraeCnClaimRetryable(code: number | undefined): boolean {
+  if (code === undefined) return false
+  return TRAE_CN_CLAIM_RETRY_CODES.includes(code) && TRAE_CN_BACKOFF_CODES.includes(code)
+}
 
 // ── 积分池 ──
 
@@ -469,6 +551,16 @@ function describeFailureCode(code: number, message: string): string {
       + `x-os-version 为本机 os.version() 的运行时取值（${TRAE_CN_OS_VERSION}）、`
       + `x-app-version 为实测常量（${TRAE_CN_APP_VERSION}）`
   }
+  if (code === TRAE_CN_CODE_TOO_MANY_USERS) {
+    // 服务端原文（「当前参与用户太多，请稍后再试」）说的是「稍后」，但实测证明
+    // 那不是几秒钟的事 —— 三日 452 次报错、8 秒退避重放仍 9074、同设备头下
+    // status 恒成功而 claim 恒失败。故在原文后补一句**定性**，把用户的预期从
+    // 「刷新几次就好」纠到「今天可能已经没有名额了」。
+    //
+    // 刻意**不在文案里重复 code**：前端 `formatClaimFailureLine` 会统一追加
+    // `（code N）`，这里再写一次会显示成「…（code 9074）…（code 9074）」。
+    return `${message}（该活动可能已达当日名额，请稍后或次日再试）`
+  }
   return message
 }
 
@@ -593,6 +685,48 @@ function readClaimedCredit(data: Record<string, unknown>): number | undefined {
   return undefined
 }
 
+/** 等待指定毫秒（抽成函数是为了让测试能用假定时器接管，不必真等 4 秒）。 */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms) })
+}
+
+/**
+ * 发起 claim 请求，命中可重试码时按 {@link TRAE_CN_CLAIM_RETRY_DELAYS_MS} 退避重试。
+ *
+ * 语义边界（三条都刻意）：
+ * - **只重试可重试码**（{@link isTraeCnClaimRetryable}）：`9004` / `1001` 等
+ *   确定性失败第一次就返回，绝不浪费两次往返；
+ * - **最多重试 `delays.length` 次**（当前 2 次，累计等待 4s，加上请求耗时
+ *   仍远低于 {@link TRAE_CN_REQUEST_TIMEOUT_MS} 的三倍）；
+ * - **返回最后一次的结果**，无论成功还是失败 —— 调用方拿到的 code / message /
+ *   logid 一定是最近一次尝试的现场。
+ *
+ * 成功时立即返回，不等待剩余退避。
+ */
+async function claimTraeCnWithRetry(
+  credential: TraeCnCredential,
+  product: TraeCnProduct,
+  options: TraeCnCreditsOptions,
+): Promise<CreditsCallResult> {
+  let result = await postJson(
+    TRAE_CN_CHECKIN_CLAIM_PATH, credential, product, options,
+    JSON.stringify({ req_source: TRAE_CN_CHECKIN_REQ_SOURCE }),
+  )
+  for (const delay of TRAE_CN_CLAIM_RETRY_DELAYS_MS) {
+    if (result.ok) return result
+    if (!isTraeCnClaimRetryable(result.code)) return result
+    options.onDebug?.(
+      `[trae-cn] claim 命中可重试码 ${result.code}，${delay}ms 后重试`,
+    )
+    await sleep(delay)
+    result = await postJson(
+      TRAE_CN_CHECKIN_CLAIM_PATH, credential, product, options,
+      JSON.stringify({ req_source: TRAE_CN_CHECKIN_REQ_SOURCE }),
+    )
+  }
+  return result
+}
+
 /**
  * 执行每日签到领取。
  *
@@ -606,8 +740,18 @@ function readClaimedCredit(data: Record<string, unknown>): number | undefined {
  * 4. 领取请求失败 → `failed`（`1001` 凭据失效 / `9004` 设备被拒各有专门文案）；
  * 5. 成功 → `claimed`。
  *
+ * ## 只有 claim 段重试（status 段**一次都不重试**）
+ *
+ * 第 1 步的 status 是**读**接口：它没有名额问题（实测同一套设备头下 status
+ * 恒成功、claim 恒 `9074`），失败即失败，重试只是把同一个结果再问一遍。
+ * 第 4 步的 claim 是**写**接口，命中 {@link isTraeCnClaimRetryable} 时按
+ * {@link TRAE_CN_CLAIM_RETRY_DELAYS_MS} 退避重试（1s → 3s，共 2 次）；
+ * 重试**耗尽**后按**最后一次**尝试的 code / message / logid 返回 ——
+ * 用户看到的是最近一次现场，而不是第一次的（logid 尤其如此：它标识单次请求）。
+ *
  * 幂等是**服务端**保证的（`checked_in`），本模块只在客户端做一次预检以省掉
  * 无效请求 —— 即便预检与实际状态竞态，重复领取也只会得到服务端的幂等响应。
+ * 重试因此也是安全的：服务端不会因为同一账号连发三次 claim 就发三份奖励。
  */
 export async function claimTraeCnDailyCheckin(
   credential: TraeCnCredential,
@@ -637,16 +781,13 @@ export async function claimTraeCnDailyCheckin(
     return { kind: 'inactive', message: '签到未开启' }
   }
 
-  const claimResult = await postJson(
-    TRAE_CN_CHECKIN_CLAIM_PATH, credential, product, options,
-    JSON.stringify({ req_source: TRAE_CN_CHECKIN_REQ_SOURCE }),
-  )
+  const claimResult = await claimTraeCnWithRetry(credential, product, options)
   if (!claimResult.ok) {
     return {
       kind: 'failed',
       code: claimResult.code,
       message: describeFailureCode(claimResult.code, claimResult.message),
-      // logid 透传：claim 失败是最需要服务端日志的场景（9074 频次软限流就发生在这里）。
+      // logid 透传：claim 失败是最需要服务端日志的场景（9074 就发生在这里）。
       ...claimResult.logid === undefined ? {} : { logid: claimResult.logid },
     }
   }
