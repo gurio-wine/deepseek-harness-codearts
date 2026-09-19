@@ -238,7 +238,11 @@ Work **没有独立登录**：账号、凭据（`TRAE_CN_ACCOUNT_*`）、限流�
 
 - 状态 `POST /trae/api/v2/ug/checkin_credits/status` → 未领则 `POST /trae/api/v2/ug/checkin_credits/claim`，两者 body 均为 `{"req_source":1}`
 - **幂等判据用 `checked_in`（账号级当日）**；`did_checked_in` 是**设备级**语义（换设备仍 false），**不要用**
-- **claim 必须带设备头**：`x-device-id`（**取自凭据**的 `device_id`，即登录 exchange 返回的 `BoundDeviceID`）+ `x-device-type: windows` + `x-os-version` + `x-app-version: 3.3.100`；缺了回 `code:9004`。✅ **T9 已校准（2026-09-18）**：status / claim **都不校验设备号形态** —— 16 位十进制号、`BoundDeviceID`、空串全回 `code:0`；**完全不带设备头**时 `did_checked_in:false`（这正好印证它是设备级语义）。故照常取凭据值，**不要**拿 `machine_id` 折算一个假的 16 位号顶上；`9004` 只可能意味着「服务端不认可我们构造的设备身份」（此时文案会指向 `x-os-version` / `x-app-version`）
+- **claim 必须带设备头**：`x-device-id`（**取自凭据**的 `device_id`，即登录 exchange 返回的 `BoundDeviceID`）+ `x-device-type: windows` + `x-os-version` + `x-app-version: 3.3.102`；缺了回 `code:9004`。✅ **T9 已校准（2026-09-18）**：status / claim **都不校验设备号形态** —— 16 位十进制号、`BoundDeviceID`、空串全回 `code:0`；**完全不带设备头**时 `did_checked_in:false`（这正好印证它是设备级语义）。故照常取凭据值，**不要**拿 `machine_id` 折算一个假的 16 位号顶上；`9004` 只可能意味着「服务端不认可我们构造的设备身份」（此时文案会指向 `x-os-version` / `x-app-version`）
+- ⚠️ **`x-os-version` 是运行时取值，不是常量**（2026-09-19 身份保真修复）：真机客户端发 `os.version()` 的返回值（本机 `Windows 10 Home`，**市场营销名**），本插件改为运行时 `node:os` 的 `os.version()`（`traeCnOsVersion()`），不再硬编码 `Windows 10.0.22631`（构建号）。`x-app-version` 同步 `3.3.100` → `3.3.102`。**这是身份保真，不是 `9074` 的解药** —— `9074` 已实证为**瞬时频次软限流**，与设备身份形态无关
+- **「设备号」在本项目里是两个位置，不要混**：**登录 URL 的 `device_id`**（`generateTraeCnDeviceId`）**必须 16 位纯十进制**（登录握手的形态要求，README 讲的就是它）；**claim 的 `x-device-id`** 取凭据值、**服务端不校验形态**（T9）。早先注释把「形态不符」归因成「触发 9074」是**错的**
+- **两处刻意不改成真机样子的**（防「顺手统一」）：`x-device-id` 维持 `BoundDeviceID`（服务端不校验形态 + 伪造设备身份被 README 禁止 + 读 Trae 客户端 `storage.json` 是跨产品耦合）；`X-Ide-Token` / `X-Cloudide-Token` 保留（签到不需要，但 **chat 网关可能依赖**，而构造器与 chat 共用）
+- **失败时透传服务端 logid**：claim / status 失败若响应头带 `x-tt-logid`，透传到 `outcome.logid`（`src/credits.ts` 的 `ClaimOutcome` 失败分支，**可选**字段），前端失败行追加 ` · logid <值>`。Buddy 系与 LobsterAI **未透传**（无已知等价响应头，不发明字段名）
 - `Origin` / `Referer` = `https://www.trae.cn`（编译期常量 `product.portalBase`，不从凭据推断）
 - 无 auth 时是 **HTTP 200 + `code:1001` + `enable:false`**（不是 401）—— 判定**以 body `code` 为准**；`1001` 统一译为「凭据已失效，请重新登录」
 

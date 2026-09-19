@@ -46,6 +46,11 @@
  * `BoundDeviceID`，如 `wl2k1e2endpp32`）。真机实测 status / claim
  * **都不校验设备号形态**（16 位十进制号 / `BoundDeviceID` / 空串返回逐字节相同），
  * 故「该用哪个号」这个悬念已消解。见 {@link TraeCnCredential.device_id}。
+ *
+ * ⚠️ **本模块的「设备号」是另一个位置**（2026-09-19 澄清）：本模块生成并使用
+ * **登录 URL 的 `device_id`**，那个**必须**是 16 位纯十进制（登录握手的形态要求，
+ * 见 {@link generateTraeCnDeviceId}）；T9 说的「不校验形态」指的是**签到头**的
+ * `x-device-id`。两个字段同名不同位，`README.md` 里讲 16 位形态的是登录 URL 那个。
  */
 
 import { createServer, type Server } from 'node:http'
@@ -174,11 +179,25 @@ export function generateTraeCnMachineId(): string {
 }
 
 /**
- * 生成 16 位纯十进制 `device_id`。
+ * 生成 16 位纯十进制 `device_id`（**登录 URL 专用**）。
  *
  * 真机值形如 `2996599860772203`（16 位十进制）。**不能用 hex32 或 UUID**：
- * 开源移植版的注释明确记录「设备号形态不符会触发 9074 风控」。
- * 故这里取 8 字节随机数、十进制化、截取/补齐到 16 位。
+ * 这是**登录握手**的参数形态要求 —— 授权页与 authCode 交换按这个形态校验。
+ *
+ * ## ⚠️ 「设备号」在本项目里有**两个位置**，边界不要混（2026-09-19 澄清）
+ *
+ * | 位置 | 取值 | 形态要求 |
+ * |---|---|---|
+ * | **登录 URL 的 `device_id`**（本函数，见 {@link buildTraeCnLoginUrl}） | 本函数现场生成的 16 位十进制号 | **必须** 16 位纯十进制 |
+ * | **claim 的 `x-device-id`**（`src/trae-cn-credits.ts`） | 凭据里的 `device_id`，即 exchange 返回的 `BoundDeviceID` | **不校验形态**（T9 实测） |
+ *
+ * 两处都曾被称为「设备号」，于是产生过「T9 说不校验形态，这里却说形态不符有风险」
+ * 的矛盾假象 —— 它们说的是**两个不同的字段**：前者进登录 URL，后者进签到请求头。
+ *
+ * 另外，早先这条注释把「形态不符」的后果记成「会触发 9074 风控」，**归因是错的**：
+ * `9074` 是**瞬时频次软限流**（同账号隔一会儿重试即成功，见
+ * `src/trae-cn-errors.ts` 的软限流码表），与设备号形态无关。保留 16 位形态的理由
+ * 是**登录握手的形态校验**，不是 9074。
  */
 export function generateTraeCnDeviceId(): string {
   // 8 字节 → 最大约 1.8e19（20 位十进制），取其**低 16 位十进制**。
@@ -224,7 +243,7 @@ export interface TraeCnCredential {
   /** OAuth 客户端 ID（五件套之一；与产品配置的 `clientId` 同值，随凭据快照留档）。 */
   client_id: string
   /**
-   * 设备号（五件套之一）。
+   * 设备号（五件套之一）——**claim 的 `x-device-id` 来源**。
    *
    * ## 来源（**已用真机校准**，2026-09-17）
    *
@@ -233,6 +252,15 @@ export interface TraeCnCredential {
    * `Result.DeviceBindStatus: "BOUND"`；它**不是**客户端上报的 `DeviceID`
    * （16 位十进制）或 `MachineID`（64 hex）的回显。
    *
+   * ## ⚠️ 与「登录 URL 的 `device_id`」是两个位置，别混（2026-09-19 澄清）
+   *
+   * 本项目里「设备号」一词曾同时指两个字段，造成了「T9 说不校验形态、别处却说
+   * 形态有风险」的矛盾假象。边界如下：
+   *
+   * - **登录 URL 的 `device_id`**：`generateTraeCnDeviceId()` 现场生成的
+   *   **16 位纯十进制**号（`README.md` 讲的就是它）—— 那是**登录握手**的形态要求；
+   * - **claim 的 `x-device-id`**：**本字段**。服务端**不校验形态**，静默可用。
+   *
    * ## ✅ T9 已校准（2026-09-18）：签到不校验设备号形态
    *
    * 签到端点的 `x-device-id` 读的就是本字段（`src/trae-cn-credits.ts`）。
@@ -240,7 +268,11 @@ export interface TraeCnCredential {
    * 空串三者返回**逐字节相同**；只有**完全不带设备头**时才出现
    * `did_checked_in:false`（这恰好印证它是设备级语义）。
    *
-   * 故「签到该用哪个号」这个悬念已消解 —— 用本字段即可。
+   * 故「签到该用哪个号」这个悬念已消解 —— 用本字段即可。真实客户端发的是
+   * AHA/iCube SDK 的 16 位号，但**刻意不模仿**（三条理由见
+   * `src/trae-cn-credits.ts` 的 `traeCnCreditsHeaders`：服务端不校验形态、
+   * 伪造设备身份被 README 明令禁止、读 Trae 客户端 storage.json 是跨产品耦合）。
+   *
    * 若仍拿到 `code:9004`，那意味着服务端不认可我们构造的设备**身份**
    * （此时按 `x-os-version` / `x-app-version` 的实测值校准），
    * **不是** `MachineID` 的问题（形态不符，且它是遥测机器号），

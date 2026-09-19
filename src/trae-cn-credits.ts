@@ -37,6 +37,24 @@
  *    ——后者是**设备级**语义：同一账号换一台设备仍为 false，拿它判幂等会
  *    对已经领过的账号重复发领取请求。
  *
+ * ## 身份保真对照（2026-09-19 反混淆真机客户端）
+ *
+ * 反混淆 `out/main.js` 的 claim 调用链
+ * （`claimCheckinCredits()` → `eb("/trae/api/v2/ug/checkin_credits/claim","POST","checkin_claim")`）
+ * 后与本节实现逐字段对照，四处差异中**改了两处、刻意留了两处**：
+ *
+ * | 项 | 真机 | 本实现 | 处置 |
+ * |---|---|---|---|
+ * | `x-os-version` | `os.version()`（本机 `Windows 10 Home`） | 原硬编码 `Windows 10.0.22631` | **已改为运行时取值** |
+ * | `x-app-version` | `3.3.102` | 原 `3.3.100` | **已升到 `3.3.102`** |
+ * | `x-device-id` | AHA/iCube SDK 的 16 位号 | 凭据的 `BoundDeviceID` | **刻意不动**（见 {@link traeCnCreditsHeaders}） |
+ * | `X-Ide-Token` / `X-Cloudide-Token` | 未逐字确认 | 保留 | **刻意不动**（见 {@link traeCnCreditsHeaders}） |
+ *
+ * ⚠️ **本次修复是「身份保真」，不是 `9074` 的解药**：`9074` 已由真机实证为
+ * **瞬时频次软限流**（同账号隔一会儿重试即成功），与设备身份形态无关。
+ * 改这两处是为了让出站身份与真实客户端一致，从而消除「服务端按身份归因/风控
+ * 时看到的是一个不存在的客户端形态」这类隐患，而不是为了让某个具体错误码消失。
+ *
  * ## 与 `lobsterai-credits.ts` 的签名差异（刻意）
  *
  * LobsterAI 版用 positional `fetcher` 形参；本模块改用
@@ -51,6 +69,7 @@
  * 故真机校准时看宿主日志，而不是看 Account Hub 面板。
  */
 
+import { version as osVersion } from 'node:os'
 import {
   TRAE_CN_REQUEST_TIMEOUT_MS,
   type TraeCnProduct,
@@ -94,18 +113,50 @@ export const TRAE_CN_CHECKIN_REQ_SOURCE = 1
 export const TRAE_CN_DEVICE_TYPE = 'windows'
 
 /**
- * 设备头中的操作系统版本。
+ * 设备头中的操作系统版本 —— 运行时取 `node:os` 的 `os.version()`。
  *
- * 调研报告把构建号记成了 `Windows 10.0.xxxxx`（脱敏形态），
- * 故这里填一个真实存在的 Windows 构建号。它必须**形态合法**（`Windows 10.0.\d+`）
- * 而非留 `xxxxx` 字面量 —— 后者一定过不了校验。T9 校准（2026-09-18）确认
- * **设备号形态不被校验**，但 `x-os-version` 仍照实测值发；真机若在 claim 处
- * 拿到 9004，按本机 Trae 客户端实际发送的值替换即可（`x-os-version` 在系统 API 上可取）。
+ * ## 为什么不硬编码（2026-09-19 身份保真修复）
+ *
+ * 原实现硬编码 `Windows 10.0.22631`（一个**构建号**形态），而反混淆真实客户端的
+ * claim 调用链（`out/main.js` 的 `claimCheckinCredits()` → `eb(…)`）后确认：
+ * 真机发的是 **`os.version()` 的返回值**，本机实测为 `Windows 10 Home`
+ * —— 是**带品牌名的市场营销名**，不是 `10.0.x` 构建号。两者形态不同。
+ *
+ * 更早的一处自相矛盾也因此消除：登录 URL 的 `x_os_version` 一直是
+ * `Windows 10 Home`（`TRAE_CN_LOGIN_OS_VERSION`），而签到头却发 `10.0.22631`
+ * —— 同一个插件对同一台机器报了两种操作系统身份。
+ *
+ * ⚠️ **如实说明一个已知边界**：`os.version()` 是**宿主真实值**，故本插件跑在
+ * macOS / Linux 上时这里会发出该平台自己的版本串，而同一组头里的
+ * `x-device-type` 仍是伪装常量 `windows` —— 两者会不自洽。这是**如实反映
+ * 「真机取系统 API」这一事实**的代价，刻意不做「非 Windows 就回退 Windows 串」
+ * 的兜底：那会把「运行环境不是 Windows」这一事实掩盖掉，而且真机客户端本身
+ * 就是 Windows 桌面应用，非 Windows 宿主本来就不在模仿的目标形态内。
  */
-export const TRAE_CN_OS_VERSION = 'Windows 10.0.22631'
+export function traeCnOsVersion(): string {
+  return osVersion()
+}
 
-/** 设备头中的客户端版本（调研实测值）。 */
-export const TRAE_CN_APP_VERSION = '3.3.100'
+/**
+ * `x-os-version` 的模块级快照（派生自 {@link traeCnOsVersion}）。
+ *
+ * **单一生效者是上面那个函数**；本常量存在只是因为 `src/trae-cn-adapter.ts`
+ * 的 chat 头需要一个字符串（它不做函数调用），而 chat 与签到**必须报同一种
+ * 设备身份**。`os.version()` 在同一进程内不会变化，模块加载时取一次快照
+ * 与每次调用取值等价。
+ */
+export const TRAE_CN_OS_VERSION = traeCnOsVersion()
+
+/**
+ * 设备头中的客户端版本（**签到专用常量**）。
+ *
+ * 真机客户端已到 `3.3.102`（原值 `3.3.100` 落后两个补丁号）。
+ *
+ * ⚠️ 与登录协议的 {@link TRAE_CN_IDE_VERSION}（`3.3.100`，`x_app_version` /
+ * `DeviceInfo.ClientVersion` / exchange body 的 `IDEVersion`）**是两个号**，
+ * 刻意分开：那是登录 URL 与 authCode 交换那条协议线的逐字真机值，本次不动它。
+ */
+export const TRAE_CN_APP_VERSION = '3.3.102'
 
 // ── 业务码 ──
 
@@ -184,12 +235,36 @@ export interface TraeCnCreditsOptions {
 /** 一次请求的解析结果（与 `credits.ts` 的 `PostResult` 同构，另带业务码）。 */
 type CreditsCallResult =
   | { ok: true; body: Record<string, unknown> }
-  | { ok: false; code: number; message: string }
+  | { ok: false; code: number; message: string; logid?: string }
 
 /** 响应体可解析为对象、但缺少必要字段时的统一失败说明。 */
 const UNPARSABLE_RESPONSE_MESSAGE = '请求失败或响应无法解析'
 
-/** 读取带 Trae 鉴权与设备四件套的请求头。 */
+/**
+ * 读取带 Trae 鉴权与设备四件套的请求头。
+ *
+ * ## 两处与真机不同、但**刻意不改**的地方（防「顺手统一」）
+ *
+ * ### 1. `x-device-id` 维持凭据里的 `BoundDeviceID`
+ *
+ * 真实客户端发的是 **AHA/iCube SDK 生成的 16 位号**，与本实现的 `BoundDeviceID`
+ * 形态不同。**不改**，三条理由缺一不可：
+ *
+ * - **(a) 真机实证服务端不校验形态**：16 位十进制号 / `BoundDeviceID` / 空串
+ *   返回**逐字节相同**（T9，2026-09-18），`BoundDeviceID` 拿到的是 `code:0`。
+ *   模仿一个服务端明确不看的字段，收益为零。
+ * - **(b) 伪造 16 位号是 `README.md` 明令禁止的「伪造设备身份」** ——
+ *   本插件的既定立场是「如实留空/如实取凭据值」，而不是造一个看起来合法的号。
+ * - **(c) 读 Trae 客户端 `storage.json` 是跨产品耦合**：那是另一个产品的私有
+ *   存储，其 schema 随时可能变；为发一个服务端不校验的头而依赖它，是在给
+ *   本插件绑一个自己控制不了的脆弱前置。
+ *
+ * ### 2. `X-Ide-Token` / `X-Cloudide-Token` 保留
+ *
+ * 签到**不需要**它们（三选一即可），但 **chat 网关可能依赖**（未验证）——
+ * 而 `traeCnAccessHeaders` 是签到与 chat **共用**的构造器。为一个未验证的
+ * 「少发一个头更真」而承担 chat 全线 401 的风险，去头风险大于收益。
+ */
 export function traeCnCreditsHeaders(
   credential: TraeCnCredential,
   product: TraeCnProduct,
@@ -202,9 +277,11 @@ export function traeCnCreditsHeaders(
     Origin: product.portalBase,
     Referer: product.portalBase,
     // 设备四件套：claim 严格校验，缺了回 9004。
+    // `x-device-id` 取凭据值而非伪造 16 位号 —— 理由见本函数头注释（三条）。
     'x-device-id': credential.device_id,
     'x-device-type': TRAE_CN_DEVICE_TYPE,
-    'x-os-version': TRAE_CN_OS_VERSION,
+    // 运行时取 `os.version()`（真机客户端同源），不再硬编码构建号。
+    'x-os-version': traeCnOsVersion(),
     'x-app-version': TRAE_CN_APP_VERSION,
   }
 }
@@ -272,6 +349,33 @@ function hasTraePayEnvelope(record: Record<string, unknown>): boolean {
 }
 
 /**
+ * 服务端日志追踪号响应头（字节系网关的 logid）。
+ *
+ * 真机样本：`x-tt-logid: 20260919142909176141A5DE791F4FE75E`。
+ *
+ * 它是**定位服务端日志的唯一线索**：`code` / `message` 只说「失败了、为什么」，
+ * 而「这一次请求在服务端到底发生了什么」只有 logid 能查。故失败时若响应头带值，
+ * 就一路透传到 outcome 与前端失败行。
+ *
+ * 读取用 `Headers.get`（大小写不敏感），并 trim + 判空：缺失或空白串一律
+ * 视为「没有」，避免前端显示出一个空的 logid 尾巴。
+ */
+const TRAE_CN_LOGID_HEADER = 'x-tt-logid'
+
+/** 从响应头读 logid；没有（或为空白）返回 undefined。 */
+function readLogId(response: Response): string | undefined {
+  const raw = response.headers?.get(TRAE_CN_LOGID_HEADER)
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
+/** 把可选 logid 合并进结果对象（无值时**不新增字段**，保持对象形态干净）。 */
+function withLogId<T extends Record<string, unknown>>(base: T, logid: string | undefined): T & { logid?: string } {
+  return logid === undefined ? base : { ...base, logid }
+}
+
+/**
  * 发起一次 POST 并解析业务码。
  *
  * 判定的全部依据是 **body 的 `code`**，`response.ok` 一概不看：实测无 auth 时
@@ -279,6 +383,9 @@ function hasTraePayEnvelope(record: Record<string, unknown>): boolean {
  *
  * `code` **缺失**时按 `envelope` 分派（见 {@link ResponseEnvelope}）：
  * 签到端点判失败，余额端点按结构特征判成功。
+ *
+ * 失败路径**一律带上响应头里的 logid**（见 {@link TRAE_CN_LOGID_HEADER}）——
+ * 传输层失败（fetch 抛错）时没有响应，故那里取不到 logid，这是如实的缺失。
  */
 async function postJson(
   path: string,
@@ -290,6 +397,7 @@ async function postJson(
 ): Promise<CreditsCallResult> {
   const fetcher = options.fetcher ?? fetch
   let parsed: unknown
+  let logid: string | undefined
   try {
     const response = await fetcher(`${product.apiBase}${path}`, {
       method: 'POST',
@@ -297,6 +405,9 @@ async function postJson(
       body,
       signal: AbortSignal.timeout(TRAE_CN_REQUEST_TIMEOUT_MS),
     })
+    // 先读响应头再解析 body：`response.json()` 之后再读头同样可行，但把取数
+    // 放在紧邻响应的位置，能让「logid 属于这一次响应」这件事在代码上显而易见。
+    logid = readLogId(response)
     parsed = await response.json() as unknown
   } catch (error) {
     // 保留原始错误消息（含 timeout / socket hang up），不吞掉诊断信息。
@@ -307,7 +418,10 @@ async function postJson(
     }
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return { ok: false, code: CODE_TRANSPORT_FAILED, message: UNPARSABLE_RESPONSE_MESSAGE }
+    return withLogId(
+      { ok: false as const, code: CODE_TRANSPORT_FAILED, message: UNPARSABLE_RESPONSE_MESSAGE },
+      logid,
+    )
   }
   const record = parsed as Record<string, unknown>
   const code = readCode(record)
@@ -318,18 +432,27 @@ async function postJson(
       options.onDebug?.(
         `[trae-cn] ${path} 响应既无 code 也无余额信封特征字段，字段名: ${describeKeys(record)}`,
       )
-      return { ok: false, code: CODE_TRANSPORT_FAILED, message: UNPARSABLE_RESPONSE_MESSAGE }
+      return withLogId(
+        { ok: false as const, code: CODE_TRANSPORT_FAILED, message: UNPARSABLE_RESPONSE_MESSAGE },
+        logid,
+      )
     }
     options.onDebug?.(`[trae-cn] ${path} 响应缺少 code 字段，字段名: ${describeKeys(record)}`)
-    return { ok: false, code: CODE_TRANSPORT_FAILED, message: '响应缺少 code 字段' }
+    return withLogId(
+      { ok: false as const, code: CODE_TRANSPORT_FAILED, message: '响应缺少 code 字段' },
+      logid,
+    )
   }
   if (code !== TRAE_CN_CODE_OK) {
     const serverMessage = readServerMessage(record)
-    return {
-      ok: false,
-      code,
-      message: serverMessage.length > 0 ? serverMessage : `服务端返回 code=${code}`,
-    }
+    return withLogId(
+      {
+        ok: false as const,
+        code,
+        message: serverMessage.length > 0 ? serverMessage : `服务端返回 code=${code}`,
+      },
+      logid,
+    )
   }
   return { ok: true, body: record }
 }
@@ -343,7 +466,8 @@ function describeFailureCode(code: number, message: string): string {
     // （T9 已校准确认**设备号形态**不被校验，故这里不再声称形态是成因。）
     return `设备校验未通过（code ${TRAE_CN_CODE_DEVICE_REJECTED}）：`
       + 'x-device-id 取自凭据的 device_id（登录 exchange 返回的 BoundDeviceID），'
-      + `x-os-version / x-app-version 为实测常量（${TRAE_CN_OS_VERSION} / ${TRAE_CN_APP_VERSION}）`
+      + `x-os-version 为本机 os.version() 的运行时取值（${TRAE_CN_OS_VERSION}）、`
+      + `x-app-version 为实测常量（${TRAE_CN_APP_VERSION}）`
   }
   return message
 }
@@ -501,6 +625,8 @@ export async function claimTraeCnDailyCheckin(
       message: statusResult.code === TRAE_CN_CODE_CREDENTIAL_INVALID
         ? describeFailureCode(statusResult.code, statusResult.message)
         : `签到状态查询失败：${statusResult.message}`,
+      // logid 透传（响应头有值才有这个字段）。
+      ...statusResult.logid === undefined ? {} : { logid: statusResult.logid },
     }
   }
   const state = parseCheckinState(statusResult.body)
@@ -520,6 +646,8 @@ export async function claimTraeCnDailyCheckin(
       kind: 'failed',
       code: claimResult.code,
       message: describeFailureCode(claimResult.code, claimResult.message),
+      // logid 透传：claim 失败是最需要服务端日志的场景（9074 频次软限流就发生在这里）。
+      ...claimResult.logid === undefined ? {} : { logid: claimResult.logid },
     }
   }
   const data = dataLayer(claimResult.body)

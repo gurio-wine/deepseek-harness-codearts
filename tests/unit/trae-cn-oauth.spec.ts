@@ -230,8 +230,18 @@ describe('trae-cn 产品配置常量', () => {
 
   it('真机流程常量逐项锁死（main.log:136）', () => {
     expect(TRAE_CN_PLUGIN_VERSION).toBe('2.3.83560')
+    // ⚠️ 登录线的 IDE 版本仍是 `3.3.100` —— 那是 authCode 交换与登录 URL 那条
+    // 协议线里**逐字校准过的真机字面量**。签到头的 `x-app-version` 已升到
+    // `3.3.102`（那是**另一条协议线**，见 `tests/unit/trae-cn-credits.spec.ts`）。
+    // 两个号刻意分开，不要因为「客户端升级了」就把这里也一起改。
     expect(TRAE_CN_IDE_VERSION).toBe('3.3.100')
     expect(TRAE_CN_CHANNEL_NAME).toBe('common')
+    // 登录 URL 的 x_os_version 同样是**登录线**的真机字面量（市场营销名），
+    // 且**刻意保留为常量**：它由官方 `getSystemInformation().osVersion` 取系统
+    // 信息得到，在真机上与 `os.version()` 同源；本插件在登录线上照发该校准值，
+    // 不在本次改动边界内。签到头的 x-os-version 已改为运行时 `os.version()`
+    // （见 `tests/unit/trae-cn-credits.spec.ts` 的说明）—— 两者**形态一致**
+    // （都是市场营销名而非构建号），这是本次修复消掉的矛盾。
     expect(TRAE_CN_LOGIN_OS_VERSION).toBe('Windows 10 Home')
   })
 
@@ -258,7 +268,16 @@ describe('设备标识生成（形态即风控）', () => {
   })
 
   it('deviceId 是 16 位纯十进制', () => {
-    // 真机形态：2996599860772203。**不能用 hex32/UUID** —— 形态不符会触发 9074 风控。
+    // 真机形态：2996599860772203。**不能用 hex32/UUID**。
+    //
+    // ⚠️ 本断言测的是**登录 URL 的 `device_id`**（`generateTraeCnDeviceId`）——
+    // 那个字段进授权页与 authCode 交换，形态由**登录握手**要求。它与签到头
+    // `x-device-id`（凭据里的 `BoundDeviceID`）是**两个位置**：后者服务端
+    // **不校验形态**（T9 实测，见 `tests/unit/trae-cn-credits.spec.ts`）。
+    //
+    // 另：早先这条注释把「形态不符」的后果记成「会触发 9074 风控」，**归因错误**
+    // —— 9074 是**瞬时频次软限流**（同账号隔一会儿重试即成功），与设备号形态无关。
+    // 断言本身没变（登录 URL 的 16 位形态要求仍然成立），只修了注释语义。
     expect(generateTraeCnDeviceId()).toMatch(/^\d{16}$/)
   })
 

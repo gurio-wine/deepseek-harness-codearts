@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { version as osVersion } from 'node:os'
 import {
   TRAE_CN_APP_VERSION,
   TRAE_CN_BALANCE_ARRAY_KEYS,
@@ -16,9 +17,10 @@ import {
   fetchTraeCnCheckinStatus,
   fetchTraeCnCreditBalance,
   traeCnCreditsHeaders,
+  traeCnOsVersion,
   traeCnPoolName,
 } from '../../src/trae-cn-credits.js'
-import { TRAE_CN } from '../../src/trae-cn-product.js'
+import { TRAE_CN, TRAE_CN_LOGIN_OS_VERSION } from '../../src/trae-cn-product.js'
 import type { TraeCnCredential } from '../../src/trae-cn-oauth.js'
 
 /**
@@ -94,12 +96,34 @@ describe('Trae CN 签到端点常量', () => {
     expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ req_source: 1 })
   })
 
-  it('设备头常量为实测值（且非 xxxxx 占位）', () => {
+  it('设备头常量与真实客户端一致（app 版本 3.3.102）', () => {
     expect(TRAE_CN_DEVICE_TYPE).toBe('windows')
-    expect(TRAE_CN_APP_VERSION).toBe('3.3.100')
-    // x-os-version 必须是形态合法的 Windows 版本号：留 `Windows 10.0.xxxxx`
-    // 这种脱敏字面量一定过不了服务端校验。
-    expect(TRAE_CN_OS_VERSION).toMatch(/^Windows 10\.0\.\d+$/)
+    // 反混淆真机客户端 claim 调用链后确认已到 3.3.102（原 3.3.100 落后两个补丁号）。
+    expect(TRAE_CN_APP_VERSION).toBe('3.3.102')
+  })
+
+  it('x-os-version 是运行时 os.version() 的取值，不是硬编码构建号', () => {
+    // 真机客户端发的是 `os.version()`（本机 `Windows 10 Home`，市场营销名），
+    // 而不是 `Windows 10.0.22631` 这种构建号。故断言「等于本机 os.version()」，
+    // 而不是断言某个写死的形态 —— 写死形态的断言在别的机器上会假绿。
+    expect(TRAE_CN_OS_VERSION).toBe(osVersion())
+    expect(traeCnOsVersion()).toBe(osVersion())
+    // 回归护栏：旧的硬编码构建号必须**不再**出现（它会掩盖真实机器身份）。
+    expect(TRAE_CN_OS_VERSION).not.toBe('Windows 10.0.22631')
+    expect(TRAE_CN_OS_VERSION).not.toMatch(/^Windows 10\.0\.\d+$/)
+  })
+
+  it('登录 URL 的 x_os_version 与签到头**形态一致**（都是市场营销名，不再是构建号）', () => {
+    // 修复前：登录 URL 发 `Windows 10 Home`（市场营销名），签到头发
+    // `Windows 10.0.22631`（构建号）—— 同一个插件对同一台机器报了两种**形态**。
+    // 现在两者都是「系统 API 的 osVersion」，形态统一。
+    //
+    // 刻意**不**断言两者逐字相等：登录 URL 那个常量是登录握手线里
+    // 逐字校准过的真机字面量（`src/trae-cn-product.ts`，不在本次改动边界内），
+    // 在非 Windows 10 Home 的机器上它与本机 `os.version()` 自然不同 ——
+    // 那是「两条协议线各自如实」的结果，不是缺陷。
+    expect(TRAE_CN_LOGIN_OS_VERSION).not.toMatch(/^Windows 10\.0\.\d+$/)
+    expect(traeCnOsVersion()).not.toMatch(/^Windows 10\.0\.\d+$/)
   })
 })
 
@@ -322,6 +346,112 @@ describe('claimTraeCnDailyCheckin', () => {
     expect(outcome.kind).toBe('failed')
     expect((outcome as { code: number }).code).toBe(-1)
     expect((outcome as { message: string }).message).toContain('签到状态查询失败')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// logid 透传（x-tt-logid → outcome.logid）
+// ─────────────────────────────────────────────────────────────
+
+/** 真机样本（字节系网关的 logid 形态）。 */
+const REAL_LOGID = '20260919142909176141A5DE791F4FE75E'
+
+/**
+ * 构造一个带 `x-tt-logid` 响应头的 200 响应。
+ *
+ * 直接传 body 字符串而不是包装已有 `Response`：包装会转发 ReadableStream，
+ * 而这里只需要一个干净响应，少一层流传递就少一种失败模式。
+ */
+function jsonWithLogId(body: unknown, logid: string): Response {
+  const headers = new Headers({ 'Content-Type': 'application/json' })
+  headers.set('x-tt-logid', logid)
+  return new Response(JSON.stringify(body), { status: 200, headers })
+}
+
+describe('logid 透传（失败诊断的关键线索）', () => {
+  it('claim 失败时把响应头 x-tt-logid 透传到 outcome.logid', async () => {
+    const { fetcher } = stubFetch((url) => url.includes('/claim')
+      // 真机场景：HTTP 200 + code 9074（瞬时频次软限流）+ logid。
+      ? jsonWithLogId({ code: 9074, message: '当前参与用户太多，请稍后再试' }, REAL_LOGID)
+      : new Response(JSON.stringify({ code: 0, data: { checked_in: false, enable: true } }), { status: 200 }))
+    const outcome = await claimTraeCnDailyCheckin(makeCredential(), TRAE_CN, { fetcher })
+    expect(outcome).toMatchObject({
+      kind: 'failed', code: 9074, message: '当前参与用户太多，请稍后再试', logid: REAL_LOGID,
+    })
+  })
+
+  it('status 失败时同样透传 logid（两步里任一步失败都带得上）', async () => {
+    const { fetcher } = stubFetch(() => jsonWithLogId({
+      code: TRAE_CN_CODE_CREDENTIAL_INVALID,
+    }, REAL_LOGID))
+    const outcome = await claimTraeCnDailyCheckin(makeCredential(), TRAE_CN, { fetcher })
+    expect(outcome).toMatchObject({
+      kind: 'failed', code: TRAE_CN_CODE_CREDENTIAL_INVALID, logid: REAL_LOGID,
+    })
+  })
+
+  it('响应头没有 logid 时 outcome **不含** logid 字段（不是空串）', async () => {
+    const { fetcher } = stubFetch((url) => url.includes('/claim')
+      ? new Response(JSON.stringify({ code: 9074, message: '限流' }), { status: 200 })
+      : new Response(JSON.stringify({ code: 0, data: { checked_in: false, enable: true } }), { status: 200 }))
+    const outcome = await claimTraeCnDailyCheckin(makeCredential(), TRAE_CN, { fetcher })
+    expect(outcome.kind).toBe('failed')
+    // 关键：字段**不存在**，而不是 `logid: undefined` / `logid: ''`。
+    // 前端判「非空才追加显示」时，空串与 undefined 都要被挡住。
+    expect('logid' in outcome).toBe(false)
+  })
+
+  it('logid 为空白串时视为没有（不显示一个空的 logid 尾巴）', async () => {
+    const { fetcher } = stubFetch((url) => url.includes('/claim')
+      ? jsonWithLogId({ code: 9074, message: '限流' }, '   ')
+      : new Response(JSON.stringify({ code: 0, data: { checked_in: false, enable: true } }), { status: 200 }))
+    const outcome = await claimTraeCnDailyCheckin(makeCredential(), TRAE_CN, { fetcher })
+    expect('logid' in outcome).toBe(false)
+  })
+
+  it('logid 两侧空白被 trim（服务端偶尔带空格）', async () => {
+    const { fetcher } = stubFetch((url) => url.includes('/claim')
+      ? jsonWithLogId({ code: 9074, message: '限流' }, `  ${REAL_LOGID}  `)
+      : new Response(JSON.stringify({ code: 0, data: { checked_in: false, enable: true } }), { status: 200 }))
+    const outcome = await claimTraeCnDailyCheckin(makeCredential(), TRAE_CN, { fetcher })
+    expect((outcome as { logid?: string }).logid).toBe(REAL_LOGID)
+  })
+
+  it('响应头名大小写不敏感（X-TT-LogId 同样命中）', async () => {
+    const { fetcher } = stubFetch((url) => {
+      if (!url.includes('/claim')) {
+        return new Response(JSON.stringify({ code: 0, data: { checked_in: false, enable: true } }), { status: 200 })
+      }
+      const headers = new Headers()
+      headers.set('X-TT-LogId', REAL_LOGID)
+      return new Response(JSON.stringify({ code: 9074, message: '限流' }), { status: 200, headers })
+    })
+    const outcome = await claimTraeCnDailyCheckin(makeCredential(), TRAE_CN, { fetcher })
+    expect((outcome as { logid?: string }).logid).toBe(REAL_LOGID)
+  })
+
+  it('响应体无法解析（信封异常）时也透传 logid', async () => {
+    const { fetcher } = stubFetch((url) => url.includes('/claim')
+      ? jsonWithLogId([1, 2, 3], REAL_LOGID)
+      : new Response(JSON.stringify({ code: 0, data: { checked_in: false, enable: true } }), { status: 200 }))
+    const outcome = await claimTraeCnDailyCheckin(makeCredential(), TRAE_CN, { fetcher })
+    expect(outcome).toMatchObject({ kind: 'failed', logid: REAL_LOGID })
+  })
+
+  it('传输层失败（fetch 抛错）没有响应，故没有 logid —— 如实缺失', async () => {
+    const fetcher = vi.fn(async () => { throw new Error('ENOTFOUND') }) as unknown as typeof fetch
+    const outcome = await claimTraeCnDailyCheckin(makeCredential(), TRAE_CN, { fetcher })
+    expect(outcome.kind).toBe('failed')
+    expect('logid' in outcome).toBe(false)
+  })
+
+  it('成功路径**不带** logid 字段（只有 failed 才需要）', async () => {
+    const { fetcher } = stubFetch((url) => url.includes('/claim')
+      ? jsonWithLogId({ code: 0, data: { credit: 100 } }, REAL_LOGID)
+      : new Response(JSON.stringify({ code: 0, data: { checked_in: false, enable: true } }), { status: 200 }))
+    const outcome = await claimTraeCnDailyCheckin(makeCredential(), TRAE_CN, { fetcher })
+    expect(outcome.kind).toBe('claimed')
+    expect('logid' in outcome).toBe(false)
   })
 })
 

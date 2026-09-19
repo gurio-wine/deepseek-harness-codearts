@@ -600,6 +600,16 @@ Work 池还剩多少。
 > ——后者是设备级语义，换台设备仍为 false，拿它判幂等会对已领账号重复发请求。
 > 无 auth 时服务端返回的是 **HTTP 200 + `code:1001` + `enable:false`**
 > （不是 401），故判定一律**以 body `code` 为准**。
+>
+> ⚠️ **`x-os-version` 是运行时取值，不是常量**（2026-09-19 身份保真修复）：
+> 反混淆真机客户端 `out/main.js` 的 claim 调用链后确认它发的是 **`os.version()`**
+> 的返回值（本机 `Windows 10 Home`，带品牌名的市场营销名），而本插件原先硬编码
+> `Windows 10.0.22631`（构建号）——**同一个插件对同一台机器报了两种操作系统身份**
+> （登录 URL 的 `x_os_version` 一直是 `Windows 10 Home`）。现已改为运行时
+> `node:os` 的 `os.version()`，两者形态统一。`x-app-version` 同步升到 `3.3.102`
+> （原 `3.3.100` 落后两个补丁号）。
+> **这是身份保真，不是 `9074` 的解药** —— `9074` 已由真机实证为**瞬时频次软限流**
+> （同账号隔一会儿重试即成功），与设备身份形态无关。
 
 完成后按钮下方给出结果摘要（如「3 个账号领取成功（+300 积分），1 个今日已领取」）。
 **有账号失败时，摘要行下面逐个失败账号各列一行**
@@ -607,6 +617,9 @@ Work 池还剩多少。
 「1 个失败」只说有几个，服务端原文才说明**为什么**（风控限流 / 凭据失效 /
 活动结束的处置完全不同）。`message` 为空时回退固定文案「领取失败」，
 `code` 缺失时显示「未知」；成功、已领、活动未开启都不产生明细行。
+
+**失败行末尾还会追加 `· logid <值>`**（当服务端给了时）——见下方
+「失败诊断的 logid 透传」。
 
 领取按账号隔离：单个账号凭据缺失、损坏或请求失败不会中断整批，只计入失败数。
 完整结构化结果（`results[].outcome`）仍保留在 RPC 响应里，需要时也可查看日志。
@@ -625,6 +638,34 @@ Work 池还剩多少。
   `X-Domain` / `X-Product` / `X-Product-Code` 头。
 - Trae CN 的签到用 `Authorization: Cloud-IDE-JWT`（另带两个等值 token 头）+
   `Origin` / `Referer` = `https://www.trae.cn`；**不发**任何腾讯系或 LobsterAI 归属头。
+
+### 失败诊断的 logid 透传
+
+失败时界面能给出「服务端原文 + 业务码」还不够：这两样只说「失败了、为什么」，
+**说不出「这一次请求在服务端到底发生了什么」**。字节系网关为此在响应头返回
+`x-tt-logid`（真机样本 `20260919142909176141A5DE791F4FE75E`），它是向服务端
+追查单次请求的**唯一线索** —— 用户报障时给出这一串，服务端才查得到当时现场。
+
+三段链路（缺一段这串就到不了用户眼前）：
+
+| 段 | 位置 | 落点 |
+|---|---|---|
+| 1. 类型 | `src/credits.ts` | `ClaimOutcome` 失败分支新增**可选**字段 `logid?: string` |
+| 2. 宿主 | `src/trae-cn-credits.ts` | `postJson` 读响应头 `x-tt-logid`（大小写不敏感、trim、空白视为没有），失败路径一路带到 `outcome.logid` |
+| 3. 前端 | `plugin-src/client/jet-hub.js` | `formatClaimFailureLine` 在 logid 非空时追加 ` · logid <值>` |
+
+几个刻意的取舍：
+
+- **字段可选**：`ClaimOutcome` 是**三套协议共用**的判别联合，`logid` 必须可选，
+  否则 Buddy 系与 LobsterAI 的 outcome 构造点全部要改（且它们根本没有这个值）。
+- **只在失败分支**：成功路径不带该字段（没有追查需求）。
+- **没有值就不带字段**，而不是 `logid: ''` —— 前端判「非空才追加」时两种都要挡住，
+  但字段缺失能让「宿主压根没读到」与「读到了空串」在调试时区分开。
+- **传输层失败（fetch 抛错）没有响应，因此没有 logid**：这是**如实缺失**，
+  不是漏读 —— 请求根本没到服务端，也就没有服务端日志可查。
+- **Buddy 系与 LobsterAI 未透传**：两条线的 `postJson` / `requestJson` 里
+  `response` 对象虽然在手，但**没有任何已知的等价 logid 响应头**（未经真机确认）。
+  按「不发明字段名」的既有约定**保持不动**；将来真机发现等价头再补。
 
 想单独验证领取闭环（会真实改动账号当日签到状态）可运行
 `pnpm test:e2e:buddy-claim` 或 `pnpm test:e2e:lobsterai-claim`，
@@ -761,7 +802,13 @@ https://www.trae.cn/authorization?login_version=1&auth_from=trae&login_channel=n
    方法名是 **`S256`**，不是 CodeArts 那套 `SHA-256`。
 
 `machine_id` 是 **64 位 hex**（生成随机即可，服务端不校验其真实性）；
-`device_id` 是 **16 位纯十进制**（**不能用 hex32/UUID** —— 形态不符会触发 9074 风控）。
+`device_id` 是 **16 位纯十进制**。
+> ⚠️ 这里说的 `device_id` 是**登录 URL 的那个**（`generateTraeCnDeviceId`），
+> 形态要求来自**登录握手**。它与签到头的 `x-device-id`（凭据里的
+> `BoundDeviceID`，服务端**不校验形态**）是**两个位置** —— 详见「Trae CN provider」
+> 章节的「设备号在本项目里是两个位置」。
+> 早先把「形态不符」的后果记成「会触发 9074 风控」是**归因错误**：`9074` 是
+> **瞬时频次软限流**，与设备号形态无关。
 `login_trace_id` 是本次登录的 UUID，回调把它原样带回，是「这次回调属于这次登录」的
 现成凭证。
 
@@ -912,7 +959,7 @@ x-ide-version-type:  stable
 request-traffic-type: normal
 x-device-id:         <凭据的 device_id>   ← 与签到头同源
 x-device-type:       windows
-x-os-version:        Windows 10.0.22631
+x-os-version:        <本机 os.version()，与签到头同源>
 User-Agent:          TraeClient/TTNet     ← 官方客户端 UA，不是浏览器 UA
 ```
 
@@ -1082,23 +1129,62 @@ Origin:  https://www.trae.cn
 Referer: https://www.trae.cn
 x-device-id:   <凭据里的 device_id（= 登录 exchange 的 BoundDeviceID）>
 x-device-type: windows
-x-os-version:  Windows 10.0.22631
-x-app-version: 3.3.100
+x-os-version:  <本机 os.version() 的运行时取值，如 Windows 10 Home>
+x-app-version: 3.3.102
 ```
 
 - 设备四件套是 **claim 的硬要求**，缺失时服务端回 `code:9004`。
   `x-device-id` **取自凭据**（`device_id` 字段），不是登录 URL 里那个随机生成的
-  16 位号 —— 后者只参与登录握手与风控形态校验，不是设备身份。
+  16 位号 —— 后者只参与登录握手，不是设备身份。
   ✅ **T9 已校准（2026-09-18）**：设备**号形态**不被校验（16 位十进制号 /
   `BoundDeviceID` / 空串全回 `code:0`），只有**完全不带设备头**才 `did_checked_in:false`；
+- ⚠️ **`x-os-version` 是运行时值**（2026-09-19）：真机客户端发 `os.version()`
+  的返回值（带品牌名的市场营销名），故本插件同样在运行时取 `node:os` 的
+  `os.version()`，不再硬编码构建号。`x-app-version` 同步升到 `3.3.102`。
 - `Origin` / `Referer` 取编译期常量 `product.portalBase`，**不从凭据推断**
   （与 `X-Domain` 那条约定同因）；
 - `req_source:1` 照抄**唯一次实测成功**的组合。✅ **T1 已校准**：带与不带服务端返回
   **逐字节相同**，它不是 9004 的成因；保留它只因为成本是零。
 
+#### 「设备号」在本项目里是**两个位置**（2026-09-19 澄清，消 T9 矛盾假象）
+
+「设备号」一词曾被同时用在这两个字段上，于是产生了「T9 说不校验形态、别处却说
+形态不符有风险」的矛盾假象 —— 它们说的是**两个不同的字段**：
+
+| 位置 | 取值 | 形态要求 |
+|---|---|---|
+| **登录 URL 的 `device_id`**（`src/trae-cn-oauth.ts` 的 `generateTraeCnDeviceId`） | 登录时现场生成的随机号 | **必须 16 位纯十进制**（登录握手的形态要求） |
+| **claim 的 `x-device-id`**（`src/trae-cn-credits.ts`） | 凭据里的 `device_id`（= exchange 返回的 `BoundDeviceID`） | **不校验形态**，静默可用（T9 实测） |
+
+本文档前面「`device_id` 是 16 位纯十进制」讲的是**登录 URL 那个**。
+
+另外修正一处**归因错误**：早先注释把「设备号形态不符」的后果记成「会触发 9074
+风控」。`9074` 是**瞬时频次软限流**（同账号隔一会儿重试即成功，见
+`src/trae-cn-errors.ts` 的软限流码表），与设备号形态无关；保留登录 URL 的 16 位
+形态的理由是**登录握手的形态校验**。
+
+#### 两处与真机不同但**刻意不改**的（防「顺手统一」）
+
+反混淆真机客户端后确认 claim 还有两处与我们不同，**刻意保留**：
+
+| 项 | 真机 | 本实现 | 不改的理由 |
+|---|---|---|---|
+| `x-device-id` | AHA/iCube SDK 的 16 位号 | 凭据的 `BoundDeviceID` | (a) 服务端**不校验形态**（T9 实测 `BoundDeviceID` 拿到 `code:0`）；(b) 伪造 16 位号是 `README.md` 明令禁止的「伪造设备身份」；(c) 读 Trae 客户端 `storage.json` 是跨产品耦合，其 schema 不受本插件控制 |
+| `X-Ide-Token` / `X-Cloudide-Token` | 未逐字确认 | 保留 | 签到不需要（三选一即可），但 **chat 网关可能依赖**（未验证）；`traeCnAccessHeaders` 是签到与 chat **共用**的构造器，去头风险大于收益 |
+
+⚠️ **本次「身份保真」修复不是 `9074` 的解药**：`9074` 已由真机实证为**瞬时频次
+软限流**（同账号隔一会儿重试即成功），与设备身份形态无关。改 `x-os-version` /
+`x-app-version` 是为了让出站身份与真实客户端一致，消除「服务端按身份归因/风控时
+看到的是一个不存在的客户端形态」这类隐患。
+
 **幂等判据是 `checked_in`（账号级当日）**，`did_checked_in` 是**设备级**语义
 （换设备仍为 false），**不要用**。领取流程自身先查状态、已领则短路，
 故 RPC 分发处传 `precheckStatus: false`（对齐 LobsterAI 的多步流程）。
+
+**失败时透传服务端 logid**：claim / status 失败若响应头带 `x-tt-logid`，它会被
+带到 `outcome.logid` 并在 Account Hub 的失败行末尾显示 ` · logid <值>` ——
+这是向服务端追查单次请求的唯一线索。三段链路与取舍见前面的
+「失败诊断的 logid 透传」。
 
 **余额按 `available_endpoint` 分池**：
 

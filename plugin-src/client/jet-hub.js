@@ -214,17 +214,23 @@ function formatPackageLine(pkg) {
 const CLAIM_FAILURE_FALLBACK = '领取失败';
 
 /**
- * 把一次失败的领取结果格式化成一行「账号：原因（code N）」。
+ * 把一次失败的领取结果格式化成一行「账号：原因（code N）」，
+ * 有 logid 时在末尾追加「· logid …」。
  *
  * 输入是 `credits.claimAll` 响应里 `results[]` 的一项
  * （`src/types.ts` 的 `RpcCreditsClaimAccountResult`）：`nickname` / `accountId`
  * 加判别联合 `outcome`（`src/credits.ts` 的 `ClaimOutcome`，失败分支为
- * `{ kind:'failed', code:number, message:string }`）。
+ * `{ kind:'failed', code:number, message:string, logid?:string }`）。
  *
  * 服务端原文（`message`，如「当前参与用户太多，请稍后再试」）是用户判断
  * 「是风控限流、凭据失效还是活动结束」的**唯一依据** —— 只报一个「1 个失败」
  * 等于让用户去翻日志。`code` 一并带上（如 `code 9074`）便于对着服务端文档
  * 或插件日志核对；Trae CN 的 `9074` 就在 `src/trae-cn-errors.ts` 的软限流码表里。
+ *
+ * **logid** 只有 Trae CN 会填（响应头 `x-tt-logid`），它是向服务端追查这一次
+ * 请求的唯一线索 —— 用户报障时给出这一串，服务端才查得到当时发生了什么。
+ * 其余协议没有这个字段，渲染逐字不变；为空串或缺失时**不追加**，避免行尾挂
+ * 一个空的「logid 」。
  */
 function formatClaimFailureLine(result) {
   const outcome = result?.outcome ?? {};
@@ -234,7 +240,9 @@ function formatClaimFailureLine(result) {
   const code = typeof outcome.code === 'number' && Number.isFinite(outcome.code)
     ? String(outcome.code)
     : '未知';
-  return `${label}：${message}（code ${code}）`;
+  const base = `${label}：${message}（code ${code}）`;
+  const logid = typeof outcome.logid === 'string' ? outcome.logid.trim() : '';
+  return logid !== '' ? `${base} · logid ${logid}` : base;
 }
 
 /**

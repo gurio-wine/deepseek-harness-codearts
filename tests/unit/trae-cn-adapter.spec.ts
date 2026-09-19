@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
+import { version as osVersion } from 'node:os'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
@@ -56,6 +57,7 @@ import {
   traeCnErrorCodeForAction,
 } from '../../src/trae-cn-sse.js'
 import type { TraeCnCredential } from '../../src/trae-cn-oauth.js'
+import { TRAE_CN_OS_VERSION } from '../../src/trae-cn-credits.js'
 
 // ── 测试脚手架 ──
 
@@ -795,7 +797,10 @@ describe('TraeCnAdapter 请求构造', () => {
     // 设备头取自凭据的 device_id（与签到端点同一个字段，不是登录 URL 的随机号）。
     expect(headers['x-device-id']).toBe('1234567890123456')
     expect(headers['x-device-type']).toBe('windows')
-    expect(headers['x-os-version']).toMatch(/^Windows 10\.0\.\d+$/)
+    // chat 与签到**必须报同一种设备身份**，故共用 `TRAE_CN_OS_VERSION`
+    // （它是 `os.version()` 的模块级快照，2026-09-19 起不再是硬编码构建号）。
+    expect(headers['x-os-version']).toBe(TRAE_CN_OS_VERSION)
+    expect(headers['x-os-version']).toBe(osVersion())
   })
 
   it('body：model / messages / stream 恒为 true', async () => {

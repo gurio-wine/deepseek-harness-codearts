@@ -91,7 +91,23 @@ export type ClaimOutcome =
   | { kind: 'claimed'; credit: number; streakDays: number; isStreakDay: boolean; delayedMessage?: string }
   | { kind: 'already-claimed'; message: string }
   | { kind: 'inactive'; message: string }
-  | { kind: 'failed'; code: number; message: string }
+  | {
+    kind: 'failed'
+    code: number
+    message: string
+    /**
+     * 服务端日志追踪号（**可选**，只有服务端在响应头里给了才有）。
+     *
+     * 三套协议共用这个判别联合，故字段必须是可选的：Buddy 系与 LobsterAI 的
+     * 响应里没有已知的等价头，加了也不会填，其它协议的 outcome 逐字段不变。
+     *
+     * 唯一的生产者是 Trae CN：它读响应头 `x-tt-logid`（字节系网关的 logid，
+     * 真机样本 `20260919142909176141A5DE791F4FE75E`）。**这是定位服务端日志的
+     * 唯一线索** —— `code` 与 `message` 只说「失败了、为什么」，logid 才能让
+     * 服务端查到这一次请求到底发生了什么。前端失败行会把它一并显示出来。
+     */
+    logid?: string
+  }
 
 /**
  * 积分资源包（`get-user-resource` 响应里 `Accounts[]` 的一项）。

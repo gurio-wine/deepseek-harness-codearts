@@ -255,6 +255,90 @@ describe('失败账号的服务端原文必须出现在渲染树里（本次修�
   })
 })
 
+/**
+ * logid 透传（失败行末尾追加）。
+ *
+ * 来源：Trae CN 的 claim / status 失败响应头带 `x-tt-logid`
+ * （真机样本 `20260919142909176141A5DE791F4FE75E`），它是向服务端追查这一次
+ * 请求的**唯一线索**。宿主侧把它透传进 `outcome.logid`（`src/credits.ts` 的
+ * `ClaimOutcome` 失败分支），前端在这里显示。
+ *
+ * 只有 Trae CN 会填该字段 —— 其余协议的 outcome 没有它，故这些用例同时守住
+ * 「没有 logid 时**一个字符都不变**」（既有断言已覆盖，这里再加一条显式的）。
+ */
+describe('失败行的 logid 透传', () => {
+  const LOGID = '20260919142909176141A5DE791F4FE75E'
+
+  it('有 logid 时追加「· logid <值>」', () => {
+    const tree = render({
+      results: [{
+        accountId: 'acc-1',
+        nickname: '我的 Trae 账号',
+        outcome: { kind: 'failed', code: 9074, message: '当前参与用户太多，请稍后再试', logid: LOGID },
+      }],
+      summary: { claimed: 0, totalCredit: 0, alreadyClaimed: 0, inactive: 0, failed: 1 },
+    })
+    expect(textOf(tree)).toEqual([
+      '1 个失败',
+      `我的 Trae 账号：当前参与用户太多，请稍后再试（code 9074） · logid ${LOGID}`,
+    ])
+  })
+
+  it('没有 logid 字段时该行**逐字不变**（其余协议不受影响）', () => {
+    const tree = render({
+      results: [{
+        accountId: 'acc-1',
+        nickname: '我的 Trae 账号',
+        outcome: { kind: 'failed', code: 9074, message: '当前参与用户太多，请稍后再试' },
+      }],
+      summary: { claimed: 0, totalCredit: 0, alreadyClaimed: 0, inactive: 0, failed: 1 },
+    })
+    expect(textOf(tree)).toEqual([
+      '1 个失败',
+      '我的 Trae 账号：当前参与用户太多，请稍后再试（code 9074）',
+    ])
+    expect(textOf(tree).join('\n')).not.toContain('logid')
+  })
+
+  it('logid 为空串 / 纯空白 / 非字符串时都不追加（不挂空尾巴）', () => {
+    for (const logid of ['', '   ', undefined, null, 42]) {
+      const notice = buildClaimNotice({
+        results: [{
+          accountId: 'a',
+          nickname: 'A',
+          outcome: { kind: 'failed', code: 1, message: 'x', logid },
+        }],
+        summary: { claimed: 0, totalCredit: 0, alreadyClaimed: 0, inactive: 0, failed: 1 },
+      })
+      expect(notice.details, String(logid)).toEqual(['A：x（code 1）'])
+    }
+  })
+
+  it('logid 两侧空白被 trim（服务端偶尔带空格）', () => {
+    const notice = buildClaimNotice({
+      results: [{
+        accountId: 'a',
+        nickname: 'A',
+        outcome: { kind: 'failed', code: 1, message: 'x', logid: `  ${LOGID}  ` },
+      }],
+      summary: { claimed: 0, totalCredit: 0, alreadyClaimed: 0, inactive: 0, failed: 1 },
+    })
+    expect(notice.details).toEqual([`A：x（code 1） · logid ${LOGID}`])
+  })
+
+  it('message 缺失时回退文案与 logid 并存（两者互不吞并）', () => {
+    const notice = buildClaimNotice({
+      results: [{
+        accountId: 'acc-9',
+        nickname: '',
+        outcome: { kind: 'failed', code: -1, message: '', logid: LOGID },
+      }],
+      summary: { claimed: 0, totalCredit: 0, alreadyClaimed: 0, inactive: 0, failed: 1 },
+    })
+    expect(notice.details).toEqual([`acc-9：领取失败（code -1） · logid ${LOGID}`])
+  })
+})
+
 describe('成功路径的渲染逐元素不变（纯增量护栏）', () => {
   it('全成功响应渲染出的树与改动前完全一致', () => {
     // 期望值**写死**成改动前的树（摘要 div + 文本，没有任何明细列表）。
