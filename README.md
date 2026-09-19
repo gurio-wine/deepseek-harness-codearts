@@ -972,17 +972,46 @@ provider id 是 `trae-cn`（带连字符，对齐用户与生态叫法），但 
 
 ⚠️ **`function` 必须逐模型记住来源**：`glm-5.3` **只在 `solo_work_remote` 集里**，
 写死 `solo_work_lite` 必回 `4001 param is invalid`（真机实测）。静态回退表的
-16 项**全部**映射到 `solo_work_remote`（实测确认都在 remote 集内）；动态目录的
+11 项**全部**映射到 `solo_work_remote`（实测确认都在 remote 集内）；动态目录的
 条目**自带**来源 function。
 
-**网关必须带齐的请求头**（版本头维持现状；`request-traffic-type` / UA /
-追踪头是 SOLO 通道的实测值）：
+### ⚠️ `x-ide-version-code` 是 SOLO 网关的「选表键」（4001 的另一个根因）
+
+**SOLO 网关按 `x-ide-version-code` 决定上游返回哪张模型配置表**。发旧 IDE 通道的
+`107` 时，网关选出的是一张**空表** —— 后果不是「某个模型不可用」，而是**任何模型**
+都回 `4001 param is invalid`。这是端点迁移后 chat 全败的**第二个根因**（第一个是
+端点选错通道，见上），`bedd149` 当时假设「版本头维持现状即可」**是错的**。
+
+实机验证过的**成功组合**（chat 端点，`glm-5.3-flash` 流式正常）：
+
+```
+x-ide-version-code: 20260820      ← SOLO 代际；**必须是 8 位日期式 YYYYMMDD**
+x-ide-version:      0.1.61        ← SOLO 代际（不是 1.107.1）
+User-Agent:         Trae/0.1.61   ← 与上面两个头同代际
+```
+
+- **值域**（目录端点值扫描）：只有 **8 位日期式**才命中非空配置表；`20260801` 起
+  表已满 **41 项**，取证当日（`20260919`）同为 41 项；
+- **只认 `x-ide-version-code`**：`x-app-version-code` 与选表**无关**（已隔离验证），
+  但本实现让它与前者**同代际**，免得两个版本头自相矛盾；
+- **两组版本码同名不同物，不可合并**（`src/trae-cn-product.ts` 里是**四个**独立
+  常量）：`TRAE_CN_IDE_VERSION_CODE`（`107`）/ `TRAE_CN_IDE_GATEWAY_VERSION`
+  （`1.107.1`）属 **IDE 网关代际**，`TRAE_CN_SOLO_VERSION_CODE`（`20260820`）/
+  `TRAE_CN_SOLO_IDE_VERSION`（`0.1.61`）属 **SOLO 代际**。它们占同一个请求头，
+  但**值域与语义都不同** —— 「顺手统一」就会把 chat 打回恒 `4001`；
+- 历史旁证：第三方实现（traework2api 的 `constants.ts`）早有注释记着同一现象
+  （「version-code 决定上游返回哪张模型配置表……拿 `20260716` 直接调 `glm-5.3`
+  会 4001」）；
+- ⚠️ **签到链路不适用**：`traeCnCreditsHeaders`（签到）的版本头**不动** ——
+  它属另一条协议线，`x-app-version: 3.3.102` 已独立校准。
+
+**网关必须带齐的请求头**（`request-traffic-type` / UA / 追踪头是 SOLO 通道的实测值）：
 
 ```
 x-app-id:            6eefa01c-1036-4c7e-9ca5-d891f63bfcd8
-x-ide-version-code:  107            ← 必须纯数字；"3.3.100" 会 400
-x-app-version-code:  107
-x-ide-version:       1.107.1        ← 与登录用的 3.3.100 不是一个号
+x-ide-version-code:  20260820       ← SOLO 代际；选表键，发 107 会选出空表 → 4001
+x-app-version-code:  20260820       ← 与选表无关（已隔离验证），同发只为不自相矛盾
+x-ide-version:       0.1.61         ← SOLO 代际（旧 IDE 代际是 1.107.1）
 x-ide-version-type:  stable
 request-traffic-type: prod           ← SOLO 通道实测值（旧 IDE 通道是 normal）
 x-plugin-channel:    icube-ai        ← SOLO 通道新增
@@ -993,7 +1022,7 @@ x-uid:               <凭据的 user_id>
 x-device-id:         <凭据的 device_id>   ← 与签到头同源
 x-device-type:       windows
 x-os-version:        <本机 os.version()，与签到头同源>
-User-Agent:          Trae/<appVersion>    ← SOLO 通道实测值（旧通道是 TraeClient/TTNet）
+User-Agent:          Trae/0.1.61          ← SOLO 代际（旧通道是 TraeClient/TTNet）
 ```
 
 追踪四头**同源**：`x-request-id` 是一个 UUID，`x-custom-trace-id` 是它去横线后的
@@ -1001,9 +1030,10 @@ User-Agent:          Trae/<appVersion>    ← SOLO 通道实测值（旧通道�
 一个会让上游的调用链对不上；而**每次请求都必须是新的 id**（复用会把多次调用混成
 一条链）。
 
-注意 `x-ide-version-code` 与登录 URL 的 `x_app_version`（`3.3.100`）**同名不同物、
-形态要求还不同**：一个进网关头且必须纯数字，一个进 URL/请求体。三个版本号
-（`107` / `1.107.1` / `3.3.100`）在 `src/trae-cn-product.ts` 里是三个独立常量。
+注意登录 URL 的 `x_app_version`（`3.3.100`）与这些网关头**同名不同物、形态要求
+还不同**：一个进 URL/请求体，一个进网关头。IDE 代际的两个常量
+（`107` / `1.107.1`）**保留在源码里**，是为了让「107 从哪来」有据可查，并防止
+后来者把两个代际「顺手统一」。`src/trae-cn-product.ts` 里现在是**四个**独立常量。
 
 **SSE 不是 OpenAI 协议**。上游返回**具名事件**流，帧解析在 `src/trae-cn-sse.ts`
 （SOLO 通道的帧格式与旧通道**逐字一致**，故解析器一字未改）：
@@ -1051,7 +1081,7 @@ IDE 通道对我方新池请求的恒定回复。归**可重试**（退避）而
 （3 个账号，含首次）。若流已经开始产出正文才报错，则**不再换号**（换号会让用户
 看到「半截回答 + 完整回答」两段内容，比直接报错更糟），改为直报。
 
-**模型目录 = 动态 `get_detail_param`（权威）+ 静态 16 项回退**（2026-09-19 起）。
+**模型目录 = 动态 `get_detail_param`（权威）+ 静态 11 项回退**（2026-09-19 起）。
 
 | 项 | 值 |
 |---|---|
@@ -1060,7 +1090,7 @@ IDE 通道对我方新池请求的恒定回复。归**可重试**（退避）而
 | function | CN 区**两个都拉**：`solo_work_remote`（优先）与 `solo_work_lite`，取并集 |
 | 解析 | `config_info_list[].config_name` / `display_config.display_name` / `model_detail_list[0].prompt_max_tokens`（回退 `context_window_tokens.dev`）与 `.max_tokens` |
 | 缓存 | 12h TTL（参照 LobsterAI 的 `clientVersion` 缓存先例）；**失败不写缓存**，下次调用重试 |
-| 回退 | 目录整体不可用 → 现行 16 项静态表（`TRAE_CN_FALLBACK_MODELS`） |
+| 回退 | 目录整体不可用 → 现行 11 项静态表（`TRAE_CN_FALLBACK_MODELS`） |
 
 > ✅ **推翻 2026-09-18 的「远端不可接」结论**：那条结论**是对的，但试错了端点** ——
 > `model_list` 只回 6 项旧池、`batch_get_detail_param` 只回 4 个 seed 配置。
@@ -1074,40 +1104,55 @@ IDE 通道对我方新池请求的恒定回复。归**可重试**（退避）而
    都在集、要么 remote 独有」，故**只在 lite 出现**的项就是内部 agent 项；
 3. **内部项过滤两道网**：点名（`summary` / `file_search_agent` /
    `explore_sub_agent_v2` / `browser_use_subagent` / `computer_use_subagent`）
-   + 形态（id 里含 `agent` / `subagent`）。真机 16 项**一个都不命中**该形态，
+   + 形态（id 里含 `agent` / `subagent`）。现存 11 项**一个都不命中**该形态，
    故不会误杀用户可调的模型；
 4. **刻意不接 remote 骨架合并**：把远端独有项也列出来会引入 `join` 不到的不可调项
-   （如 `Doubao-Seed-Code`），选中即路由失败；
+   （如旧表里的 `Doubao-Seed-Code`），选中即路由失败；
 5. **多模态标记由静态表补齐**（目录端点不带该字段）：只对**静态表已有的 id** 补值、
-   **不新增条目**。不补的话，动态目录一旦生效，12 个支持图片的模型会全部变成纯文本
+   **不新增条目**。不补的话，动态目录一旦生效，支持图片的模型会全部变成纯文本
    —— 同一模型在「目录成功」与「目录失败」两条路径下报出不同模态，是自相矛盾。
 
-**静态回退表（16 项，2026-09-18 真机 `chat_v3` 目录）**：
+**静态回退表（11 项）**：
+
+> ⚠️ **为什么是 11 项而不是真机目录的 16 项**（2026-09-19 二次取证）：
+> 原表 16 项录自**旧 IDE 通道**的 `chat_v3` 目录；chat 迁到 **SOLO 通道**后，
+> 该通道 roster 的 **41 项**里**没有**下面这 5 项，故它们**调不了**：
+>
+> | 剔除的 id | 展示名 |
+> |---|---|
+> | `Doubao-Seed-Code` | `Seed-Code` |
+> | `glm-5.3-flash` | `GLM-5.3-Flash` |
+> | `deepseek-v4.1-flash` | `DeepSeek-V4.1-Flash` |
+> | `kimi-k2.8-preview` | `Kimi-K2.8-Preview` |
+> | `qwen3.8-flash` | `Qwen3.8-Flash` |
+>
+> 理由不是「表要精简」，而是**本 provider 只走 SOLO 通道**（IDE 通道已由五轮真机
+> 取证定案废弃）。回退表里留着 SOLO 调不了的 id，唯一效果是**在模型选择器里产出
+> 必然 `4001` 的选项** —— 用户选中即失败，且失败原因（选表键/代际不匹配）与模型
+> 本身无关，极难自行诊断。动态目录成功时本来也不会列出它们，故剔除后两条路径的
+> 目录**首次一致**。
+>
+> 注意 `Doubao-Seed-Code` 的剔除**只针对本 provider**：它在
+> `trae-cn-work`（`solo_agent_remote` 代际）里是**默认模型**，两张表互不影响。
 
 | id | 展示名 | 多模态 | max_tokens | 上下文（dev/max） |
 |---|---|---|---|---|
 | `Doubao-Seed-Evolving` | `Seed-Evolving` | ✓ | 64000 | 262144/1048576 |
 | `Doubao-Seed-2.1-Pro` | `Seed-2.1-Pro-0915` | ✓ | 64000 | 262144/1048576 |
 | `Doubao-Seed-2.1-Turbo` | `Seed-2.1-Turbo` | ✓ | 32000 | 262144 |
-| `Doubao-Seed-Code` | `Seed-Code` | ✓ | 32000 | 262144 |
-| `glm-5.3-flash` | `GLM-5.3-Flash` | ✓ | 64000 | 119040/1048576 |
 | `glm-5.3` | `GLM-5.3` | ✗ | 64000 | 119040/1048576 |
 | `glm-5.2` | `GLM-5.2` | ✗ | 64000 | 119040/1048576 |
-| `deepseek-v4.1-flash` | `DeepSeek-V4.1-Flash` | ✓ | 64000 | 119040/1048576 |
 | `DeepSeek-V4-Flash-Official` | `DeepSeek-V4-Flash 正式版` | ✗ | 64000 | 119040/1048576 |
 | `DeepSeek-V4-Pro-Official` | `DeepSeek-V4-Pro 正式版` | ✗ | 64000 | 119040/1048576 |
 | `kimi-k3` | `Kimi-K3` | ✓ | 64000 | 204800/1048576 |
-| `kimi-k2.8-preview` | `Kimi-K2.8-Preview` | ✓ | 64000 | 204800/1048576 |
 | `minimax-m3` | `MiniMax-M3` | ✓ | 64000 | 119040/1048576 |
-| `qwen3.8-flash` | `Qwen3.8-Flash` | ✓ | 64000 | 204800/1048576 |
 | `qwen3.8-max` | `Qwen3.8-Max` | ✓ | 64000 | 204800/1048576 |
 | `qwen-3.7-plus` | `Qwen3.7-Plus` | ✓ | 64000 | 204800/1048576 |
 
 来源：真机 `chat_v3` 模型目录（2026-09-18），由 Trae 客户端 **vscdb 缓存**与
 **160 处日志事件**互证；id / 展示名 / 多模态标记 / max_tokens / 窗口**逐字符**照抄。
-id 形态极不规则（`qwen3.8-flash` 无连字符、`qwen-3.7-plus` 有、
-`deepseek-v4.1-flash` 是点号、`minimax-m3` 全小写）——**任何规整化都会让请求打到
-不存在的模型上**，故原样保留。
+id 形态极不规则（`qwen-3.7-plus` 带连字符、`minimax-m3` 全小写）——**任何规整化
+都会让请求打到不存在的模型上**，故原样保留。
 
 ⚠️ 该表现在是**回退表**（不再是唯一目录），但它仍是**唯一**记录「多模态标记」的
 地方：目录端点不带该字段，故动态目录生效时由 `applyTraeCnStaticModalities` 按 id
@@ -1116,9 +1161,10 @@ id 形态极不规则（`qwen3.8-flash` 无连字符、`qwen-3.7-plus` 有、
 - 上下文窗口取 **dev 档**（如 `262144/1048576` → 262144）：它是客户端默认实际
   使用的窗口。max 档（多数 1048576）是理论上限，按它声明会让 DSH 的上下文压缩
   迟迟不触发；动态目录同口径取 `prompt_max_tokens`（回退 `context_window_tokens.dev`）；
-- `inputModalities` **按模型给**：多模态项（**12/16**）输出 `['text','image']`，
-  其余 `['text']`。`listModels` 与 `resolveModel` 读的是同一个 `supportsImages`
-  字段，两处口径强制同源（不一致会让选择器与请求路径自相矛盾）；
+- `inputModalities` **按模型给**：多模态项（原 16 项里 12 项、**现存 11 项里 7 项**
+  —— 被剔除的 5 项恰好全是多模态项）输出 `['text','image']`，其余 `['text']`。
+  `listModels` 与 `resolveModel` 读的是同一个 `supportsImages` 字段，两处口径强制
+  同源（不一致会让选择器与请求路径自相矛盾）；
 - `maxTokens` **只记录不 materialize**：DSH 的 `defaultMaxTokens` 会在调用方未给
   上限时自动填进请求体，而本仓库另外四个 provider 一个都没设该字段 ——
   由适配器替用户决定输出上限是行为变更，不在本次范围内。
@@ -1127,8 +1173,9 @@ id 形态极不规则（`qwen3.8-flash` 无连字符、`qwen-3.7-plus` 有、
   `description` 会污染选择器文案）。新的目录解析器**不读它** —— 读出来没有任何
   落点，留着只会让人以为它被用上了。
 
-**思考档位（reasoning effort）已接线**：13/16 项声明档位，另 3 项
-（`minimax-m3` / `qwen-3.7-plus` / `Doubao-Seed-Evolving`）刻意不声明。
+**思考档位（reasoning effort）已接线**：原 16 项里 13 项声明档位、现存 11 项里
+**8 项**声明，另 3 项（`minimax-m3` / `qwen-3.7-plus` / `Doubao-Seed-Evolving`）
+刻意不声明（被剔除的 5 项恰好全都有档位）。
 
 - 档位数据来自真机 **vscdb 缓存**（`User/globalStorage/state.vscdb` 的
   `reasoning_effort_config{support_thinking, options, default_level}`，
@@ -1140,8 +1187,8 @@ id 形态极不规则（`qwen3.8-flash` 无连字符、`qwen-3.7-plus` 有、
   `low`/`max`/`xhigh`）。DSH 的 `ReasoningEffortId` 是 branded string、
   **不校验取值**，改写会让请求里的档位与上游对不上。展示名对齐 Trae 客户端中文
   文案（轻 / 高 / 极高）并附英文原词；
-- 默认档照抄真机 `default_level`：多数为 `high`，**`kimi-k3` 与
-  `kimi-k2.8-preview` 是 `extra_high`**；
+- 默认档照抄真机 `default_level`：多数为 `high`，**`kimi-k3` 是 `extra_high`**
+  （同族的 `kimi-k2.8-preview` 也已随 5 项 SOLO 不可调 id 剔除）；
 - 不声明 `reasoning` 的模型在 DSH 模型选择器里显示「当前模型未提供推理等级」
   ——那是**唯一**数据源（`resolveModel().reasoning`），不声明时该行根本不渲染。
 
@@ -1187,14 +1234,24 @@ serde 字段块里两者**并列存在**，印证这是「两套账号体系各�
 
 4 个旧死 id 的下落：`qwen3.7-max` **已下线**；`deepseek-v4-flash` /
 `doubao-seed-2-1-pro` / `MiniMax-M3` 是拼写或大小写错误的**近似形态**
-（真机分别是 `deepseek-v4.1-flash` / `Doubao-Seed-2.1-Pro` / `minimax-m3`）。
+（真机分别是 `deepseek-v4.1-flash` / `Doubao-Seed-2.1-Pro` / `minimax-m3`；其中
+`deepseek-v4.1-flash` 已随 SOLO 不可调 id 一并剔除）。
 真机目录里**没有** `deepseek//deepseek-chat` 与 `deepseek//deepseek-reasoner`
 —— 那是账号自定义的 BYOK 条目，不属云端目录，已排除。
+
+**表外模型的 `4001` 有可读提示**（`src/trae-cn-adapter.ts` 的 `withOffCatalogHint`）：
+`4001 param is invalid` 在本 provider 上有**两个完全不同的成因**，而上游文案一模
+一样 —— 一是**模型不在可用目录里**（用户手输的 id、或历史会话里被剔除的旧 id，
+如 `glm-5.3-flash`），解法是**重选模型**；二是**请求形态问题**（参数类型/body
+字段），解法是改代码。不区分的话，用户只会以为插件坏了。故在 `4001` 且
+**模型不在当前目录**（判定与 `function` 路由同源，同一个 `catalogEntries()`）时，
+错误文案追加一句「（该模型已不在 Trae CN 可用目录中，请在 Hub 的显示列表里重选）」。
+其它错误码**不加**：`4023`（模型不存在）上游自带语义、文案已够清楚。
 
 **与其它 provider 一致的约定**：`stream()` 把 `options.model` 传给
 `resolveCredential` 与 `refresh`（硬约定，见「账号池与多账号」）；
 `listModels()` 实时读 `pool.disabledModelsFor('trae-cn')` 应用黑名单；
-**声明** reasoning 档位（13/16 项，真机 vscdb；下发字段 `reasoning_effort_level`，
+**声明** reasoning 档位（现存 8/11 项，真机 vscdb；下发字段 `reasoning_effort_level`，
 仅透传调用方显式传的值、不主动补档 —— 补档由 DSH 按 `defaultEffort` 完成）。
 目录拉取本身**不传 model**（目录对所有模型一致，不做逐模型限流过滤）。
 
@@ -1347,9 +1404,9 @@ Trae CN 账号的积分**分两个互不通用的池**，而**只有 Work 池能
 | | `trae-cn`（IDE 路径） | `trae-cn-work`（本 provider） |
 |---|---|---|
 | Host | `trae-api-cn.mchost.guru`（IDE 网关） | `work.trae.cn`（同源网页 RPC） |
-| 网关头 | 必须带齐 `x-app-id` / 纯数字 `x-ide-version-code` 等全套 | **不需要**，仅鉴权三头 |
+| 网关头 | 必须带齐 `x-app-id` / 日期式 `x-ide-version-code` 等全套 | **不需要**，仅鉴权三头 |
 | 请求形态 | 单次 `POST /api/agent/v3/llm_utils_chat`（无状态） | **三段式**（建会话 → 发消息 → 订阅 SSE） |
-| 模型池 | 动态 `get_detail_param`（回退 16 项 `chat_v3` 静态表） | **14 项 `solo_agent_remote`，id 与 IDE 池完全不重合** |
+| 模型池 | 动态 `get_detail_param`（回退 11 项静态表） | **14 项 `solo_agent_remote`，id 与 IDE 池完全不重合** |
 | 扣费池 | 通用积分（`endpoint=0`） | **Work 专属（`endpoint=1`）** |
 | 思考档落点 | 请求体**顶层** `reasoning_effort_level` | **`custom_model` 对象内部**同名字段 |
 | 会话清理 | 无状态，无需清理 | **每轮 DELETE** |

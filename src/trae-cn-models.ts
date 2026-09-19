@@ -31,15 +31,15 @@
 import { randomUUID } from 'node:crypto'
 import { traeCnAccessHeaders } from './trae-cn-oauth.js'
 import type { TraeCnCredential } from './trae-cn-oauth.js'
-import { TRAE_CN_APP_VERSION, TRAE_CN_DEVICE_TYPE, TRAE_CN_OS_VERSION } from './trae-cn-credits.js'
+import { TRAE_CN_DEVICE_TYPE, TRAE_CN_OS_VERSION } from './trae-cn-credits.js'
 import {
   TRAE_CN_IDE_API_BASE,
   TRAE_CN_IDE_APP_ID,
-  TRAE_CN_IDE_GATEWAY_VERSION,
-  TRAE_CN_IDE_VERSION_CODE,
   TRAE_CN_IDE_VERSION_TYPE,
   TRAE_CN_MODELS_PATH,
   TRAE_CN_REQUEST_TRAFFIC_TYPE,
+  TRAE_CN_SOLO_IDE_VERSION,
+  TRAE_CN_SOLO_VERSION_CODE,
   TRAE_CN_USER_AGENT_PREFIX,
 } from './trae-cn-product.js'
 
@@ -48,7 +48,7 @@ import {
 /**
  * CN 区**优先** function（41 项，用户可调的模型基本都在这里）。
  *
- * 静态回退表的 16 项**全部**映射到本 function —— 实测确认 16 项都在
+ * 静态回退表的 11 项**全部**映射到本 function —— 实测确认它们在
  * `solo_work_remote` 集内，而 `glm-5.3` 等模型**不在** lite 集里（写死 lite 必
  * `4001 param is invalid`）。
  */
@@ -78,14 +78,18 @@ export const TRAE_CN_SOLO_FUNCTIONS: readonly string[] = [
 export const TRAE_CN_MODELS_TTL_MS = 12 * 60 * 60 * 1000
 
 /**
- * SOLO 通道的 `User-Agent`：`Trae/<appVersion>`。
+ * SOLO 通道的 `User-Agent`：`Trae/<SOLO 代际版本>`。
  *
- * 与旧 IDE 通道的 `TraeClient/TTNet` **不是一个值** —— 那是旧通道实测的 UA，
- * 本通道实测（第三方可用实现与真机一致）为 `Trae/<客户端版本>`。形态前缀取自
- * {@link TRAE_CN_USER_AGENT_PREFIX}，版本号取 {@link TRAE_CN_APP_VERSION}
- * （`3.3.102`，与签到头同源），不另写一个字面量。
+ * 与旧 IDE 通道的 `TraeClient/TTNet` **不是一个值** —— 那是旧通道实测的 UA。
+ * SOLO 通道的 UA 与**版本头同代际**：实机验证过的成功组合是
+ * `x-ide-version-code: 20260820` + `x-ide-version: 0.1.61` + **`User-Agent: Trae/0.1.61`**，
+ * 故版本号取 {@link TRAE_CN_SOLO_IDE_VERSION}（`0.1.61`），**不是**签到线的
+ * `TRAE_CN_APP_VERSION`（`3.3.102`）—— 后者属另一条协议线，混用会让 UA 与版本头
+ * 自相矛盾（迁移前本常量确实取的是它，属于「顺手复用」而非实测值）。
+ *
+ * 形态前缀仍取 {@link TRAE_CN_USER_AGENT_PREFIX}（`Trae/`，那才是实测的形态本身）。
  */
-export const TRAE_CN_SOLO_USER_AGENT = `${TRAE_CN_USER_AGENT_PREFIX}${TRAE_CN_APP_VERSION}`
+export const TRAE_CN_SOLO_USER_AGENT = `${TRAE_CN_USER_AGENT_PREFIX}${TRAE_CN_SOLO_IDE_VERSION}`
 
 /**
  * SOLO 通道的 `x-plugin-channel`（实测值）。
@@ -142,7 +146,7 @@ const TRAE_CN_INTERNAL_NAME_PATTERN = /agent|subagent/i
  * 因此「含 agent」在当前 roster 上等价于「内部项」，不会误杀用户可调的模型。
  *
  * 取**保守**方向（宁可多过滤）：多列一个内部项，用户选中后拿到的是一个语义错乱
- * 的回复；少列一个真模型，用户只是看不到它（静态表仍会补上那 16 项）。
+ * 的回复；少列一个真模型，用户只是看不到它（静态表仍会补上那 11 项）。
  */
 export function isInternalTraeCnConfig(id: string): boolean {
   if (TRAE_CN_INTERNAL_CONFIG_NAMES.includes(id)) return true
@@ -152,7 +156,8 @@ export function isInternalTraeCnConfig(id: string): boolean {
 // ── 模型条目与静态表 ──
 
 /**
- * 静态回退表里的一个条目（**真机 16 项，逐字符照抄**）。
+ * 静态回退表里的一个条目（**真机 16 项中剔除 5 项 SOLO 不可调 id 后的 11 项，
+ * 逐字符照抄**）。
  *
  * 本表**只在动态目录整体失败时顶替**（见 {@link TRAE_CN_FALLBACK_MODELS}）。
  */
@@ -172,7 +177,8 @@ export interface TraeCnFallbackModel {
    */
   contextWindow: number
   /**
-   * 是否接受图片输入（真机目录的「多模态」标记，12/16 项为真）。
+   * 是否接受图片输入（真机目录的「多模态」标记，原 16 项里 12 项为真；本表现存
+   * 11 项中 7 项为真 —— 被剔除的 5 项恰好全是多模态项）。
    *
    * 与 `src/product.ts` 的 `supportsImages` 同语义同字段名：适配器据此在
    * `listModels` / `resolveModel` 里输出 `['text','image']` 或 `['text']`。
@@ -209,7 +215,7 @@ export interface TraeCnFallbackModel {
 }
 
 /**
- * 静态模型目录 —— **真机 16 项**（2026-09-18）。
+ * 静态模型目录 —— **11 项**（真机 `chat_v3` 16 项中剔除 5 项 SOLO 不可调 id）。
  *
  * ## 来源
  *
@@ -218,6 +224,29 @@ export interface TraeCnFallbackModel {
  * 上下文窗口**逐字符**照抄。id 的形态极不规则（`qwen3.8-flash` 无连字符、
  * `qwen-3.7-plus` 有、`deepseek-v4.1-flash` 是点号、`minimax-m3` 全小写），
  * 任何「规整化」都会让请求打到不存在的模型上 —— 故原样保留，不要改写。
+ *
+ * ## ⚠️ 为什么从 16 项缩到 11 项（2026-09-19 二次取证）
+ *
+ * 原表 16 项录自**旧 IDE 通道**的 `chat_v3` 目录。chat 迁到 **SOLO 通道**后，
+ * 该通道的 roster 只有 **41 项**，其中 5 项**不在** SOLO roster 内（实测）：
+ *
+ * | 剔除的 id | 说明 |
+ * |---|---|
+ * | `Doubao-Seed-Code` | SOLO 41 项里没有它 |
+ * | `glm-5.3-flash` | 同上 |
+ * | `deepseek-v4.1-flash` | 同上 |
+ * | `kimi-k2.8-preview` | 同上 |
+ * | `qwen3.8-flash` | 同上 |
+ *
+ * 剔除的理由不是「表要精简」，而是**本 provider 只走 SOLO 通道**（IDE 通道已由
+ * 五轮真机取证定案废弃：`llm_raw_chat` 恒回 `3003 all models failed`）。回退表里
+ * 留着 SOLO 调不了的 id，唯一效果是**在模型选择器里产出必然 `4001` 的选项** ——
+ * 用户选中即失败，且失败原因（版本头/表不匹配）与模型本身无关，极难自行诊断。
+ * 动态目录成功时本来也不会列出它们（它们不在 SOLO roster 里），故剔除后两条
+ * 路径的目录**首次一致**。
+ *
+ * 注意 `Doubao-Seed-Code` 的剔除**只针对本 provider**：它在
+ * `trae-cn-work`（`solo_agent_remote` 代际）里是**默认模型**，两张表互不影响。
  *
  * ## 现在的角色：**回退表**（不再是唯一目录）
  *
@@ -231,7 +260,7 @@ export interface TraeCnFallbackModel {
  * | 旧 id | 现状 |
  * |---|---|
  * | `qwen3.7-max` | **已下线**（真机目录里没有它） |
- * | `deepseek-v4-flash` | 拼写错误的近似形态（真机是 `deepseek-v4.1-flash`） |
+ * | `deepseek-v4-flash` | 拼写错误的近似形态（真机是 `deepseek-v4.1-flash`，该 id 亦已剔除） |
  * | `doubao-seed-2-1-pro` | 同上（真机是 `Doubao-Seed-2.1-Pro`） |
  * | `MiniMax-M3` | 大小写错误的近似形态（真机是 `minimax-m3`） |
  *
@@ -242,17 +271,12 @@ export const TRAE_CN_FALLBACK_MODELS: readonly TraeCnFallbackModel[] = [
   { id: 'Doubao-Seed-Evolving', name: 'Seed-Evolving', supportsImages: true, contextWindow: 262_144, maxTokens: 64_000 },
   { id: 'Doubao-Seed-2.1-Pro', name: 'Seed-2.1-Pro-0915', supportsImages: true, contextWindow: 262_144, maxTokens: 64_000, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
   { id: 'Doubao-Seed-2.1-Turbo', name: 'Seed-2.1-Turbo', supportsImages: true, contextWindow: 262_144, maxTokens: 32_000, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
-  { id: 'Doubao-Seed-Code', name: 'Seed-Code', supportsImages: true, contextWindow: 262_144, maxTokens: 32_000, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
-  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
   { id: 'glm-5.3', name: 'GLM-5.3', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
   { id: 'glm-5.2', name: 'GLM-5.2', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['high', 'extra_high'], defaultReasoningEffort: 'high' },
-  { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
   { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
   { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
   { id: 'kimi-k3', name: 'Kimi-K3', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'extra_high' },
-  { id: 'kimi-k2.8-preview', name: 'Kimi-K2.8-Preview', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'extra_high' },
   { id: 'minimax-m3', name: 'MiniMax-M3', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000 },
-  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
   { id: 'qwen3.8-max', name: 'Qwen3.8-Max', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
   { id: 'qwen-3.7-plus', name: 'Qwen3.7-Plus', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
 ]
@@ -307,15 +331,15 @@ export function fallbackTraeCnCatalog(): TraeCnModelEntry[] {
  *
  * `get_detail_param` 的条目里**没有**多模态标记（对照实现只读
  * `config_name` / `display_config` / `model_detail_list` / `context_window_tokens`），
- * 而静态表是真机 vscdb 逐项记录的 12/16 项多模态。不补的话，动态目录一旦生效，
- * 12 个支持图片的模型会**全部**变成纯文本 —— 同一模型在「目录拉取成功」与
- * 「目录拉取失败」两条路径下报出不同模态，是自相矛盾。
+ * 而静态表是真机 vscdb 逐项记录的模态标记（原 16 项里 12 项、现存 11 项里 7 项）。
+ * 不补的话，动态目录一旦生效，这些支持图片的模型会**全部**变成纯文本 ——
+ * 同一模型在「目录拉取成功」与「目录拉取失败」两条路径下报出不同模态，是自相矛盾。
  *
  * ## 边界（**不是**「接 remote 骨架」）
  *
  * 只对**静态表里已有的 id** 补值，**不新增**任何条目：远端独有 id 的多模态
  * 仍然未知（按纯文本）。骨架合并（把远端独有项也列出来）**刻意不做** ——
- * 那会引入 `join` 不到的不可调项（如 `Doubao-Seed-Code`），选中即失败。
+ * 那会引入 `join` 不到的不可调项（如旧表里的 `Doubao-Seed-Code`），选中即失败。
  *
  * 已被目录给出模态的条目不覆盖（目录将来若带上该字段，以目录为准）。
  */
@@ -547,13 +571,16 @@ export async function fetchTraeCnDirectory(
  * |---|---|---|
  * | `request-traffic-type` | `normal` | **`prod`** |
  * | `x-plugin-channel` | 无 | **`icube-ai`** |
- * | `User-Agent` | `TraeClient/TTNet` | **`Trae/<appVersion>`** |
+ * | `User-Agent` | `TraeClient/TTNet` | **`Trae/<SOLO 代际版本>`** |
  * | 追踪头 | 无 | **`x-request-id` / `x-trae-request-id` / `x-custom-trace-id` / `x-flow-traceparent`** |
  * | `x-uid` | 无 | **凭据的 `user_id`** |
  *
- * 版本头（`x-app-version-code` / `x-ide-version-code` = `107`、`x-ide-version` =
- * `1.107.1`）**维持现状**：迁移只由端点与 body 的 `config_name` / `function`
- * 决定成败，头集合差异已排除（网关对多余头宽容）。
+ * ⚠️ **版本头必须换成 SOLO 代际**（`20260820` / `0.1.61` / `Trae/0.1.61`），
+ * **不能**沿用旧 IDE 通道的 `107` / `1.107.1`：SOLO 网关按 `x-ide-version-code`
+ * **选模型配置表**，`107` 选出的是一张**空表**，任何模型都恒回
+ * `4001 param is invalid`（迁移后 chat 全败的根因）。三个头取自**实机验证过的
+ * 成功组合**（`glm-5.3-flash` 流式正常），须成对使用 —— 见
+ * {@link TRAE_CN_SOLO_VERSION_CODE} / {@link TRAE_CN_SOLO_IDE_VERSION}。
  *
  * 追踪头三者**同源**：`requestId` 是一个 UUID，`x-custom-trace-id` 是它去横线后
  * 的前 32 字符，`x-flow-traceparent` 是 W3C 形态 `04-<traceId>-<traceId 前 16>-01`。
@@ -573,9 +600,11 @@ export function traeCnSoloHeaders(
     // 由 oauth 模块统一构造：chat / 目录 / 签到走同一份鉴权形态。
     ...traeCnAccessHeaders(credential, accept),
     'x-app-id': TRAE_CN_IDE_APP_ID,
-    'x-ide-version-code': TRAE_CN_IDE_VERSION_CODE,
-    'x-app-version-code': TRAE_CN_IDE_VERSION_CODE,
-    'x-ide-version': TRAE_CN_IDE_GATEWAY_VERSION,
+    // SOLO 代际的版本码（**不是** IDE 代际的 `107` —— 那会选出空配置表 → 4001）。
+    'x-ide-version-code': TRAE_CN_SOLO_VERSION_CODE,
+    // 已隔离验证：本头与选表**无关**；同发 SOLO 代际只为两个版本头不自相矛盾。
+    'x-app-version-code': TRAE_CN_SOLO_VERSION_CODE,
+    'x-ide-version': TRAE_CN_SOLO_IDE_VERSION,
     'x-ide-version-type': TRAE_CN_IDE_VERSION_TYPE,
     'request-traffic-type': TRAE_CN_REQUEST_TRAFFIC_TYPE,
     'x-plugin-channel': TRAE_CN_PLUGIN_CHANNEL,

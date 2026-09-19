@@ -85,23 +85,77 @@ export const TRAE_CN_IDE_API_BASE = 'https://trae-api-cn.mchost.guru'
 export const TRAE_CN_IDE_APP_ID = '6eefa01c-1036-4c7e-9ca5-d891f63bfcd8'
 
 /**
- * IDE 网关请求头：客户端版本号（`x-ide-version-code` 与 `x-app-version-code`）。
+ * **IDE 网关代际**的客户端版本号（`x-ide-version-code` / `x-app-version-code`）。
  *
  * ⚠️ **必须是纯数字**：真机实测发 `"3.3.100"` 会被网关 **400** 拒掉，
  * 发 `"107"` 才是 200。注意它与 {@link TRAE_CN_IDE_VERSION}（`3.3.100`，
  * 登录 URL 的 `x_app_version`）**不是一个号**，也不可互换 ——
  * 一个进 URL/请求体，一个进网关头，形态要求还不同。
+ *
+ * ## ⚠️ SOLO 通道**不再使用本常量**（2026-09-19 二次取证定案）
+ *
+ * chat 与目录都已迁到 SOLO 通道，而 **SOLO 网关按 `x-ide-version-code` 选模型
+ * 配置表**：发 `107`（本常量，IDE 网关代际）选出的是**空表**，于是**任何模型**
+ * 都恒回 `4001 param is invalid` —— 这正是 `bedd149` 迁移后 chat 全败的根因。
+ * SOLO 通道改用日期式的 {@link TRAE_CN_SOLO_VERSION_CODE}（`20260820`）。
+ *
+ * **两者同名不同物，不可合并、不可互相替换**：它们不是同一个号的两种写法，
+ * 而是**两个网关代际各自的版本码**。本常量保留，是为了让「107 从哪来」有据可查
+ * （它仍是 IDE 网关代际的正确取值），并防止后来者把两者「顺手统一」。
  */
 export const TRAE_CN_IDE_VERSION_CODE = '107'
 
 /**
- * IDE 网关请求头：IDE 版本（`x-ide-version`，形如 `1.107.1`）。
+ * **IDE 网关代际**的 `x-ide-version`（形如 `1.107.1`）。
  *
  * 与 {@link TRAE_CN_IDE_VERSION}（`3.3.100`）同名不同物，故本常量**刻意不叫**
  * `TRAE_CN_IDE_VERSION` —— 那个名字已被登录协议的 IDE 版本占用（真机 main.log
  * 逐字），改它会牵动登录 URL / `DeviceInfo.ClientVersion` / exchange body 三处。
+ *
+ * ⚠️ 与 {@link TRAE_CN_IDE_VERSION_CODE} 同理，**SOLO 通道不再发本值**：
+ * SOLO 代际的对应取值是 {@link TRAE_CN_SOLO_IDE_VERSION}（`0.1.61`）。
  */
 export const TRAE_CN_IDE_GATEWAY_VERSION = '1.107.1'
+
+/**
+ * **SOLO 代际**的版本码（`x-ide-version-code` / `x-app-version-code`）。
+ *
+ * ## 为什么必须与 {@link TRAE_CN_IDE_VERSION_CODE}（`107`）分开
+ *
+ * 两者**同名不同物**：一个是 **IDE 网关代际**的版本码，一个是 **SOLO 代际**的。
+ * 它们在同一个请求头上，但**语义与值域都不同**，合并成一个是错的。
+ *
+ * ## SOLO 网关按本头选模型配置表（4001 的根因，真机 A/B 已定案）
+ *
+ * SOLO 网关用 `x-ide-version-code` **决定上游返回哪张模型配置表**。发 IDE 代际的
+ * `107` 时，网关选出的是一张**空表** —— 后果不是「某个模型不可用」，而是
+ * **任何模型**都回 `4001 param is invalid`（迁移后 chat 全败的真因）。
+ * 历史旁证：第三方实现（traework2api 的 `constants.ts`）早有注释记着同一现象
+ * （「version-code 决定上游返回哪张模型配置表……拿 `20260716` 直接调 `glm-5.3`
+ * 会 4001」），而 `bedd149` 当时假设「版本头维持现状即可」是**错的**。
+ *
+ * ## 值域：必须是 8 位日期式 `YYYYMMDD`（目录端点值扫描）
+ *
+ * 对目录端点扫描 `x-ide-version-code` 的取值空间得到：**只有 8 位日期式**才命中
+ * 有内容的配置表；`20260801` 起表已满 **41 项**，取证当日（`20260919`）同为 41 项。
+ * 故本值取**实机验证过的成功组合**中的 `20260820`。
+ *
+ * ⚠️ **只认本头**：`x-app-version-code` 与选表无关（已隔离验证），但本实现让它
+ * 与本常量**同代际**（同发 `20260820`），避免两个版本头自相矛盾。
+ */
+export const TRAE_CN_SOLO_VERSION_CODE = '20260820'
+
+/**
+ * **SOLO 代际**的 `x-ide-version`（`0.1.61`）。
+ *
+ * 与 {@link TRAE_CN_SOLO_VERSION_CODE} 同属 SOLO 代际，须**成对使用**：实机验证
+ * 过的成功组合是
+ * `x-ide-version-code: 20260820` + `x-ide-version: 0.1.61` + `User-Agent: Trae/0.1.61`。
+ * 单独换其中一个不保证仍命中同一张配置表。
+ *
+ * 形态上它与 IDE 代际的 `1.107.1` 也不同：SOLO 代际是 `0.1.x` 三段式。
+ */
+export const TRAE_CN_SOLO_IDE_VERSION = '0.1.61'
 
 /** IDE 网关请求头：版本通道（`x-ide-version-type`，真机 `stable`）。 */
 export const TRAE_CN_IDE_VERSION_TYPE = 'stable'

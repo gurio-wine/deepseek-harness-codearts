@@ -26,6 +26,7 @@ import {
   TRAE_CN_MODELS_TTL_MS,
   TRAE_CN_SOLO_LITE_FUNCTION,
   TRAE_CN_SOLO_REMOTE_FUNCTION,
+  TRAE_CN_SOLO_USER_AGENT,
   applyTraeCnStaticModalities,
   fallbackTraeCnCatalog,
   fetchTraeCnDirectory,
@@ -58,6 +59,8 @@ import {
   TRAE_CN_IDE_VERSION_TYPE,
   TRAE_CN_MODELS_PATH,
   TRAE_CN_REQUEST_TRAFFIC_TYPE,
+  TRAE_CN_SOLO_IDE_VERSION,
+  TRAE_CN_SOLO_VERSION_CODE,
   TRAE_CN,
 } from '../../src/trae-cn-product.js'
 import {
@@ -70,8 +73,7 @@ import {
   traeCnErrorCodeForAction,
 } from '../../src/trae-cn-sse.js'
 import type { TraeCnCredential } from '../../src/trae-cn-oauth.js'
-import { TRAE_CN_APP_VERSION, TRAE_CN_OS_VERSION } from '../../src/trae-cn-credits.js'
-
+import { TRAE_CN_OS_VERSION } from '../../src/trae-cn-credits.js'
 // ── 测试脚手架 ──
 
 function makeCredential(overrides: Partial<TraeCnCredential> = {}): TraeCnCredential {
@@ -573,29 +575,45 @@ describe('TraeCnAdapter providerInfo', () => {
 })
 
 describe('TraeCnAdapter 模型目录', () => {
-  it('静态表为真机 16 项（不是 8 项），且 id 逐字符等于真机目录', async () => {
+  it('静态回退表为 **11 项**（真机 16 项剔除 5 项 SOLO 不可调 id），且 id 逐字符等于真机目录', async () => {
     const { adapter } = makeAdapter(() => sseResponse(''))
     const models = await adapter.listModels('trae-cn')
-    expect(models).toHaveLength(16)
+    expect(models).toHaveLength(11)
     // 真机 id 形态极不规则（大小写/点号/连字符混用），逐项锁死防「顺手规整化」。
     expect(models.map((m) => m.id)).toEqual([
       'Doubao-Seed-Evolving',
       'Doubao-Seed-2.1-Pro',
       'Doubao-Seed-2.1-Turbo',
-      'Doubao-Seed-Code',
-      'glm-5.3-flash',
       'glm-5.3',
       'glm-5.2',
-      'deepseek-v4.1-flash',
       'DeepSeek-V4-Flash-Official',
       'DeepSeek-V4-Pro-Official',
       'kimi-k3',
-      'kimi-k2.8-preview',
       'minimax-m3',
-      'qwen3.8-flash',
       'qwen3.8-max',
       'qwen-3.7-plus',
     ])
+  })
+
+  it('**5 项 SOLO 不可调 id 已从回退表剔除**（留在表里只会产出必然 4001 的选项）', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''))
+    const ids = (await adapter.listModels('trae-cn')).map((m) => m.id)
+    // 这 5 项实测**不在 SOLO 41 项 roster** 内：本 provider 只走 SOLO 通道
+    // （IDE 通道已由五轮取证定案废弃），故它们调不了，列出来就是死选项。
+    for (const gone of [
+      'Doubao-Seed-Code',
+      'glm-5.3-flash',
+      'deepseek-v4.1-flash',
+      'kimi-k2.8-preview',
+      'qwen3.8-flash',
+    ]) {
+      expect(ids, gone).not.toContain(gone)
+    }
+    // 反证：同族的「近似但不同」的 id 仍在表里，否则上面那条反断言可能因为
+    // 整表被清空而假通过。
+    for (const live of ['Doubao-Seed-2.1-Pro', 'glm-5.3', 'glm-5.2', 'kimi-k3', 'qwen3.8-max']) {
+      expect(ids, live).toContain(live)
+    }
   })
 
   it('**4 个旧死 id 已不在表中**（换真机表的核心目的）', async () => {
@@ -608,7 +626,7 @@ describe('TraeCnAdapter 模型目录', () => {
     }
     // 反证：真机形态的「近似但不同」的 id 必须在表里，否则上面那条反断言
     // 可能因为整表为空而假通过。
-    for (const live of ['deepseek-v4.1-flash', 'Doubao-Seed-2.1-Pro', 'minimax-m3']) {
+    for (const live of ['Doubao-Seed-2.1-Pro', 'minimax-m3']) {
       expect(ids, live).toContain(live)
     }
   })
@@ -627,8 +645,9 @@ describe('TraeCnAdapter 模型目录', () => {
       expect([32_000, 64_000], model.id).toContain(model.maxTokens)
       expect(model.contextWindow, model.id).toBeGreaterThan(0)
     }
-    // 真机 12/16 项多模态 —— 数一下，避免整表被改成全 true / 全 false 还绿。
-    expect(TRAE_CN_FALLBACK_MODELS.filter((m) => m.supportsImages)).toHaveLength(12)
+    // 原真机 16 项里 12 项多模态；剔除的 5 项**全是多模态项**，故现存 11 项里 7 项。
+    // 数一下，避免整表被改成全 true / 全 false 还绿。
+    expect(TRAE_CN_FALLBACK_MODELS.filter((m) => m.supportsImages)).toHaveLength(7)
   })
 
   it('inputModalities 按模型给：多模态项 image，非多模态项只有 text', async () => {
@@ -685,14 +704,14 @@ describe('TraeCnAdapter 模型目录', () => {
         return [{ id: 'remote-only', name: 'Remote Only', function: TRAE_CN_SOLO_REMOTE_FUNCTION }]
       },
     })
-    // 第一次失败 → 静态表（16 项）。
+    // 第一次失败 → 静态表（11 项）。
     expect(await adapter.listModels('trae-cn')).toHaveLength(TRAE_CN_FALLBACK_MODELS.length)
-    // 第二次成功 → 远端目录生效（若失败被缓存，这里仍是 16 项）。
+    // 第二次成功 → 远端目录生效（若失败被缓存，这里仍是 11 项）。
     expect((await adapter.listModels('trae-cn')).map((m) => m.id)).toEqual(['remote-only'])
     expect(attempt).toBe(2)
   })
 
-  it('**动态目录的多模态标记由静态表补齐**（否则 12 个多模态模型会全变纯文本）', async () => {
+  it('**动态目录的多模态标记由静态表补齐**（否则支持图片的模型会全变纯文本）', async () => {
     const { adapter } = makeAdapter(() => sseResponse(''), {
       fetchRemoteModels: async () => [
         { id: 'kimi-k3', name: 'Kimi-K3', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
@@ -766,13 +785,12 @@ describe('TraeCnAdapter resolveModel', () => {
     expect(ids).toEqual(['light', 'high', 'extra_high'])
   })
 
-  it('kimi 两项的默认档是 extra_high（真机 default_level，与其余模型不同）', async () => {
+  it('kimi-k3 的默认档是 extra_high（真机 default_level，与其余模型不同）', async () => {
     const { adapter } = makeAdapter(() => sseResponse(''))
-    for (const model of ['kimi-k3', 'kimi-k2.8-preview']) {
-      const reasoning = (await adapter.resolveModel('trae-cn', model)).reasoning
-      expect(reasoning?.defaultEffort, model).toBe('extra_high')
-      expect(reasoning?.efforts.map((e) => e.id), model).toContain('extra_high')
-    }
+    // 同族的 `kimi-k2.8-preview` 已随 5 项 SOLO 不可调 id 一起剔除，故这里只剩它。
+    const reasoning = (await adapter.resolveModel('trae-cn', 'kimi-k3')).reasoning
+    expect(reasoning?.defaultEffort).toBe('extra_high')
+    expect(reasoning?.efforts.map((e) => e.id)).toContain('extra_high')
   })
 
   it('无档位的三个模型与表外模型**仍不声明** reasoning', async () => {
@@ -813,9 +831,14 @@ describe('TraeCnAdapter resolveModel', () => {
       const expected = (model.reasoningEfforts?.length ?? 0) > 0
       expect(declared, model.id).toBe(expected)
     }
-    // 真机 13/16 项有档位 —— 数一下，避免整表被改成全有/全无还绿。
+    // 原真机 16 项里 13 项有档位；剔除的 5 项里 5 项都有档位，故现存 11 项里 8 项。
+    // 数一下，避免整表被改成全有/全无还绿。
     const withEffort = TRAE_CN_FALLBACK_MODELS.filter((m) => (m.reasoningEfforts?.length ?? 0) > 0)
-    expect(withEffort).toHaveLength(13)
+    expect(withEffort).toHaveLength(8)
+    // 无档位的 3 项也点一次：它们的理由与「剔除」无关（真机 support_thinking:false）。
+    expect(withEffort.map((m) => m.id)).not.toContain('minimax-m3')
+    expect(withEffort.map((m) => m.id)).not.toContain('qwen-3.7-plus')
+    expect(withEffort.map((m) => m.id)).not.toContain('Doubao-Seed-Evolving')
   })
 
   it('未知模型回退为 id 作展示名且不报错（模态保守判纯文本）', async () => {
@@ -886,24 +909,32 @@ describe('TraeCnAdapter 请求构造', () => {
     }
   })
 
-  it('**带齐 SOLO 通道网关全套头**（版本头维持现状 + 新增追踪/通道/身份头）', async () => {
+  it('**带齐 SOLO 通道网关全套头**（版本头换成 SOLO 代际 + 追踪/通道/身份头）', async () => {
     const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
     await collect(adapter, generateOptions())
     const headers = calls[0]!.init?.headers as Record<string, string>
     expect(headers['x-app-id']).toBe(TRAE_CN_IDE_APP_ID)
     expect(headers['x-app-id']).toBe('6eefa01c-1036-4c7e-9ca5-d891f63bfcd8')
-    // 版本头**维持现状**（迁移只由端点与 body 决定成败，头集合差异已排除）：
-    // `x-ide-version-code` 必须纯数字，真机发 "3.3.100" 会 400。
-    expect(headers['x-ide-version-code']).toBe('107')
-    expect(headers['x-app-version-code']).toBe('107')
-    expect(headers['x-ide-version-code']).toMatch(/^\d+$/)
-    expect(headers['x-ide-version']).toBe('1.107.1')
+    // ⚠️ **版本头必须是 SOLO 代际的日期式版本码**：SOLO 网关按
+    // `x-ide-version-code` 选模型配置表，发 IDE 代际的 `107` 选出的是**空表**
+    // → 任何模型恒回 `4001 param is invalid`（迁移后 chat 全败的根因）。
+    expect(headers['x-ide-version-code']).toBe('20260820')
+    expect(headers['x-ide-version-code']).toBe(TRAE_CN_SOLO_VERSION_CODE)
+    // 8 位日期式 `YYYYMMDD` —— 目录端点值扫描：只有该形态才命中非空配置表。
+    expect(headers['x-ide-version-code']).toMatch(/^\d{8}$/)
+    // `x-app-version-code` 与选表**无关**（已隔离验证），但同发 SOLO 代际，
+    // 免得两个版本头互相矛盾。
+    expect(headers['x-app-version-code']).toBe(TRAE_CN_SOLO_VERSION_CODE)
+    expect(headers['x-ide-version']).toBe('0.1.61')
+    expect(headers['x-ide-version']).toBe(TRAE_CN_SOLO_IDE_VERSION)
     expect(headers['x-ide-version-type']).toBe('stable')
     // ⚠️ SOLO 通道实测值：`prod`（旧 IDE 通道是 `normal`）。
     expect(headers['request-traffic-type']).toBe('prod')
     expect(TRAE_CN_REQUEST_TRAFFIC_TYPE).toBe('prod')
-    // ⚠️ SOLO 通道 UA 是 `Trae/<appVersion>`，**不是**旧通道的 `TraeClient/TTNet`。
-    expect(headers['User-Agent']).toBe(`Trae/${TRAE_CN_APP_VERSION}`)
+    // ⚠️ SOLO 通道 UA 是 `Trae/<SOLO 代际版本>`，**不是**旧通道的
+    // `TraeClient/TTNet`，也不是签到线的 `3.3.102`（那是另一条协议线）。
+    expect(headers['User-Agent']).toBe('Trae/0.1.61')
+    expect(headers['User-Agent']).toBe(TRAE_CN_SOLO_USER_AGENT)
     expect(headers['x-plugin-channel']).toBe('icube-ai')
     // 追踪四头**同源**：requestId 一个 UUID，trace-id 是它去横线后的前 32 位。
     const requestId = headers['x-request-id']!
@@ -921,6 +952,19 @@ describe('TraeCnAdapter 请求构造', () => {
     // （它是 `os.version()` 的模块级快照，2026-09-19 起不再是硬编码构建号）。
     expect(headers['x-os-version']).toBe(TRAE_CN_OS_VERSION)
     expect(headers['x-os-version']).toBe(osVersion())
+  })
+
+  it('**IDE 代际与 SOLO 代际的版本码是两组值**（同名不同物，不可合并）', () => {
+    // 这条断言的价值在于「防止有人把两个代际的常量合并成一个」：
+    // 它们在同一个请求头上，但 SOLO 网关按它选配置表，值域与语义都不同。
+    expect(TRAE_CN_IDE_VERSION_CODE).toBe('107')
+    expect(TRAE_CN_IDE_GATEWAY_VERSION).toBe('1.107.1')
+    expect(TRAE_CN_SOLO_VERSION_CODE).not.toBe(TRAE_CN_IDE_VERSION_CODE)
+    expect(TRAE_CN_SOLO_IDE_VERSION).not.toBe(TRAE_CN_IDE_GATEWAY_VERSION)
+    // 形态也不同：IDE 代际是纯数字短码 / `1.x.y`，SOLO 代际是日期式 / `0.1.x`。
+    expect(TRAE_CN_IDE_VERSION_CODE).toMatch(/^\d+$/)
+    expect(TRAE_CN_SOLO_VERSION_CODE).toMatch(/^\d{8}$/)
+    expect(TRAE_CN_SOLO_IDE_VERSION).toMatch(/^0\.1\./)
   })
 
   it('**每次请求的追踪 id 都是新的**（同一个 id 复用会让上游调用链混在一起）', async () => {
@@ -943,7 +987,7 @@ describe('TraeCnAdapter 请求构造', () => {
     expect(Array.isArray(body.messages)).toBe(true)
   })
 
-  it('**function 路由**：静态表模型一律走 `solo_work_remote`（16 项全在 remote 集内）', async () => {
+  it('**function 路由**：静态表模型一律走 `solo_work_remote`（11 项全在 remote 集内）', async () => {
     const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
     await collect(adapter, generateOptions({ model: 'glm-5.3' }))
     const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>
@@ -1219,6 +1263,42 @@ describe('TraeCnAdapter 流内错误与换号', () => {
     expect(getAvailableAccount).not.toHaveBeenCalled()
     expect(error?.code).toBe('INVALID_REQUEST')
     expect(error?.message).toMatch(/code=4001/)
+    // 模型**在目录里**（glm-5.2）：这个 4001 与「模型不在目录」无关，
+    // 故**不得**追加那句提示 —— 否则会把用户引去重选一个本来可用的模型。
+    expect(error?.message).not.toMatch(/不在 Trae CN 可用目录/)
+  })
+
+  it('**表外模型的 4001 追加可读提示**（用户只需重选，而不是以为插件坏了）', async () => {
+    // `glm-5.3-flash` 是刚被剔除的 5 项 SOLO 不可调 id 之一 —— 正是历史会话里
+    // 最可能残留、且必然回 4001 的形态。
+    const { adapter, calls } = makeAdapter(() => sseResponse(errorStream(4001, '参数错误')))
+    const { error } = await collect(adapter, generateOptions({ model: 'glm-5.3-flash' }))
+    expect(calls).toHaveLength(1)
+    expect(error?.code).toBe('INVALID_REQUEST')
+    // 原始诊断信息**必须保留**（不能只留提示），否则真机排障失去依据。
+    expect(error?.message).toMatch(/code=4001/)
+    expect(error?.message).toMatch(/参数错误/)
+    expect(error?.message).toMatch(/不在 Trae CN 可用目录中，请在 Hub 的显示列表里重选/)
+  })
+
+  it('表外模型**在动态目录里**时不追加提示（判定与 function 路由同源）', async () => {
+    // 远端目录给出了 `brand-new`，它因此**在**当前目录里：此时 4001 是别的
+    // 原因（请求形态），提示会误导用户去重选一个刚被目录列出的模型。
+    const { adapter } = makeAdapter(() => sseResponse(errorStream(4001, '参数错误')), {
+      fetchRemoteModels: async () => [
+        { id: 'brand-new', name: 'Brand New', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+      ],
+    })
+    const { error } = await collect(adapter, generateOptions({ model: 'brand-new' }))
+    expect(error?.message).toMatch(/code=4001/)
+    expect(error?.message).not.toMatch(/不在 Trae CN 可用目录/)
+  })
+
+  it('**非 4001 的错误不加提示**（4023 上游自带语义，文案已够清楚）', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(errorStream(4023, '模型不存在')))
+    const { error } = await collect(adapter, generateOptions({ model: 'glm-5.3-flash' }))
+    expect(error?.message).toMatch(/模型不存在/)
+    expect(error?.message).not.toMatch(/不在 Trae CN 可用目录/)
   })
 
   it('4006（请求超长）映射为 CONTEXT_WINDOW_EXCEEDED（触发上下文压缩）', async () => {
@@ -1473,7 +1553,7 @@ describe('Trae CN 目录合并与过滤（mergeTraeCnDirectory）', () => {
     for (const id of ['some_new_agent', 'X_SubAgent', 'file_search_agent_v3']) {
       expect(isInternalTraeCnConfig(id), id).toBe(true)
     }
-    // 真机 16 项**一个都不该**命中（否则会误杀用户可调的模型）。
+    // 现存 11 项**一个都不该**命中（否则会误杀用户可调的模型）。
     for (const model of TRAE_CN_FALLBACK_MODELS) {
       expect(isInternalTraeCnConfig(model.id), model.id).toBe(false)
     }
@@ -1560,9 +1640,9 @@ describe('Trae CN 目录拉取（fetchTraeCnDirectory，零网络）', () => {
     expect(applied).toHaveLength(3)
   })
 
-  it('静态回退目录 = 16 项且全部映射到 `solo_work_remote`', () => {
+  it('静态回退目录 = 11 项且全部映射到 `solo_work_remote`', () => {
     const catalog = fallbackTraeCnCatalog()
-    expect(catalog).toHaveLength(16)
+    expect(catalog).toHaveLength(11)
     for (const entry of catalog) {
       expect(entry.function, entry.id).toBe(TRAE_CN_SOLO_REMOTE_FUNCTION)
       expect(entry.id.length).toBeGreaterThan(0)

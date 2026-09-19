@@ -20,9 +20,9 @@
  * | 端点 | **SOLO 通道** `TRAE_CN_IDE_API_BASE` + `TRAE_CN_CHAT_PATH`（`/api/agent/v3/llm_utils_chat`） |
  * | body | `model` + **`config_name`（= model）** + **`function`（模型来源 function）**，见 `buildBody` |
  * | 网关头 | 见 `src/trae-cn-models.ts` 的 `traeCnSoloHeaders`（与目录拉取共用一份） |
- * | 目录 | **动态 `get_detail_param`（按 function 取并集）+ 静态 16 项回退**，见 `ensureRemoteModels` |
- * | 图片 | **按模型给**：真机目录 12/16 项多模态 → `['text','image']`，其余 `['text']` |
- * | 思考等级 | **声明档位**（13/16 项，真机 vscdb `reasoning_effort_config`），下发字段名 `reasoning_effort_level` |
+ * | 目录 | **动态 `get_detail_param`（按 function 取并集）+ 静态 11 项回退**，见 `ensureRemoteModels` |
+ * | 图片 | **按模型给**：静态表 11 项里 7 项多模态 → `['text','image']`，其余 `['text']` |
+ * | 思考等级 | **声明档位**（原 13/16 项，现存 8/11 项，真机 vscdb `reasoning_effort_config`），下发字段名 `reasoning_effort_level` |
  *
  * 可原样复用的只有 `src/sse.ts` 的工具函数（它们处理的是 harness 侧的协议层
  * 陷阱，与厂商无关）。
@@ -120,6 +120,27 @@ function errorDetail(body: string): string {
   }
   return body
 }
+
+/**
+ * 表外模型在 `4001` 上追加的可读提示。
+ *
+ * ## 为什么需要它
+ *
+ * `4001 param is invalid` 在本 provider 上有**两个完全不同的成因**，而上游文案
+ * 一模一样：
+ *
+ * 1. **模型不在可用目录里** —— 用户手输的 id、或历史会话里被剔除的旧 id
+ *    （如 `glm-5.3-flash` / `Doubao-Seed-Code` 等 5 项 SOLO 调不了的 id）。
+ *    此时网关按 `config_name` 找不到配置，解法是**重选模型**；
+ * 2. **请求形态问题**（参数类型、body 字段等）—— 解法是改代码，与模型无关。
+ *
+ * 不区分的话，用户看到「4001 param is invalid」只会以为是插件坏了，而实际上
+ * 他只需要在 Hub 的显示列表里换一个模型。故在**确认模型不在当前目录**时补一句。
+ *
+ * 措辞刻意指向「显示列表」：那是用户真正能操作的地方（Account Hub 的模型开关），
+ * 而不是让他去翻配置文件。
+ */
+const TRAE_CN_OFF_CATALOG_HINT = '（该模型已不在 Trae CN 可用目录中，请在 Hub 的显示列表里重选）'
 
 /** 将 HTTP 状态码映射为 harness 错误码（仅用于**无业务码**的兜底路径）。 */
 function httpErrorCode(status: number): string {
@@ -282,7 +303,8 @@ export class TraeCnAdapter extends LlmAdapter {
   /**
    * 模型接受的输入模态。
    *
-   * 真机目录（2026-09-18）逐项标了多模态：**12/16 项支持图片**。动态目录条目由
+   * 真机目录（2026-09-18）逐项标了多模态：原 16 项里 **12 项支持图片**；剔除 5 项
+   * SOLO 不可调 id 后现存 11 项里 7 项。动态目录条目由
    * `applyTraeCnStaticModalities` 从静态表补齐该标记；仍缺省的（远端独有 id）
    * **保守判为纯文本** —— 目录里没有的能力不该被假定存在（与 `stream()` 的图片
    * 拦截同向：宁可报 UNSUPPORTED_CONTENT，也不静默丢图）。
@@ -299,16 +321,29 @@ export class TraeCnAdapter extends LlmAdapter {
    * roster 被 Trae 摊在多个 SOLO function 下，而**一个模型只在其来源 function 下
    * 可调**：`glm-5.3` 不在 `solo_work_lite` 集里，写死 lite 必回
    * `4001 param is invalid`（真机实测）。故动态目录条目自带 `function`，
-   * 静态回退条目一律映射到 {@link TRAE_CN_SOLO_REMOTE_FUNCTION}（16 项实测全在
+   * 静态回退条目一律映射到 {@link TRAE_CN_SOLO_REMOTE_FUNCTION}（11 项实测全在
    * remote 集内）。
    *
    * 表外模型（用户手输 / 历史会话里的旧 id）同样回退 remote —— 那是覆盖最广的
-   * function，且与静态表口径一致。
+   * function，且与静态表口径一致。**表外 id 会恒回 `4001`**（网关按 `config_name`
+   * 找不到配置），故错误路径上会补一句可读提示（见 {@link withOffCatalogHint}）。
    */
   private functionForModel(model: string): string {
     const entry = this.catalogEntries().find((candidate) => candidate.id === model)
       ?? this.fallbackIndex.get(model)
     return entry?.function ?? TRAE_CN_SOLO_REMOTE_FUNCTION
+  }
+
+  /**
+   * 目标模型是否在**当前生效的目录**里（动态优先，回退静态表）。
+   *
+   * 用途只有一个：区分「模型不在可用目录中」与「其它 `4001`」——
+   * 前者换目录/重选即可解决，后者是请求形态问题。判定与
+   * {@link functionForModel} **同源同口径**（同一个 `catalogEntries()`），
+   * 否则会出现「路由按表外处理、提示却按表内给」的自相矛盾。
+   */
+  private isModelInCatalog(model: string): boolean {
+    return this.catalogEntries().some((candidate) => candidate.id === model)
   }
 
   async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
@@ -323,7 +358,7 @@ export class TraeCnAdapter extends LlmAdapter {
       provider: this.product.id,
       id: model.id,
       name: model.name,
-      // 模态按目录条目给（真机 12/16 项多模态）；远端条目无该字段时判纯文本。
+      // 模态按目录条目给（静态表 11 项里 7 项多模态）；远端条目无该字段时判纯文本。
       inputModalities: this.inputModalitiesFor(model.supportsImages),
     }))
   }
@@ -346,7 +381,7 @@ export class TraeCnAdapter extends LlmAdapter {
     // 思考档位：DSH 的「思考程度」选择器**唯一**的数据源就是本字段
     // （`resolveModel().reasoning`）——不声明时模型选择器里整行不渲染，
     // 用户只能看到「当前模型未提供推理等级」。档位数据来自真机 vscdb 的
-    // `reasoning_effort_config`（13/16 项有档位）；动态目录里带该配置的项同样声明。
+    // `reasoning_effort_config`（原 13/16 项、现存 8/11 项有档位）；动态目录里带该配置的项同样声明。
     // 无档位的模型（minimax-m3 / qwen-3.7-plus / Doubao-Seed-Evolving）与不在
     // 表内的模型**保持不声明**：那是诚实的，而不是给一个上游不认的档位。
     const efforts = entry?.reasoningEfforts ?? []
@@ -381,7 +416,7 @@ export class TraeCnAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    // 图片：目录里 12/16 项标了多模态，但**本适配器的图片通路未实测**
+    // 图片：静态表 11 项里 7 项标了多模态，但**本适配器的图片通路未实测**
     // （`serializeTraeCnMessages` 只展平文本块，没有把 image 块编码成上游要的
     // 形态）。故这里明确报错而不是静默丢弃 —— 静默丢弃会让用户以为模型看到了
     // 图片，那比报错更糟。
@@ -559,9 +594,28 @@ export class TraeCnAdapter extends LlmAdapter {
     //   一个「请求超长」的业务错误会被映射成 `HTTP_200`，既不可重试也不触发压缩，
     //   用户只看到一句无意义的错误码。
     if (lastSseCode !== undefined) {
-      throw new LlmError(lastMessage, traeCnErrorCodeForAction(lastAction, lastSseCode))
+      throw new LlmError(
+        this.withOffCatalogHint(lastMessage, options.model, lastSseCode),
+        traeCnErrorCodeForAction(lastAction, lastSseCode),
+      )
     }
     throw new LlmError(lastMessage, actionErrorCode(lastAction, lastStatus), { status: lastStatus })
+  }
+
+  /**
+   * 若本次失败是 `4001` 且目标模型**不在当前目录**里，给错误文案补一句可读提示。
+   *
+   * 只处理 `4001`：`4023`（模型不存在）上游自带语义、文案已够清楚；`4001` 则
+   * 与「请求形态错误」共用同一句话，用户无法自行区分（见
+   * {@link TRAE_CN_OFF_CATALOG_HINT}）。
+   *
+   * 判定用 {@link isModelInCatalog}，与 `function` 路由**同源** —— 两处若用不同
+   * 口径，会出现「路由已按表外处理、提示却说模型在表里」的自相矛盾。
+   */
+  private withOffCatalogHint(message: string, model: string, sseCode: string): string {
+    if (sseCode !== '4001') return message
+    if (this.isModelInCatalog(model)) return message
+    return `${message}${TRAE_CN_OFF_CATALOG_HINT}`
   }
 
   /**
