@@ -283,27 +283,18 @@ export function isTraeCnClaimRetryable(code: number | undefined): boolean {
 
 // ── 积分池 ──
 
-/** 通用积分池（`available_endpoint === 0`）—— IDE 对话实际扣的就是它。 */
+/**
+ * 通用积分池（`available_endpoint === 0`）—— **Trae CN（IDE 对话）实际扣的就是它**。
+ *
+ * 与 {@link TRAE_CN_POOL_WORK} 的关系见 {@link fetchTraeCnCreditBalance} 的
+ * 「按 provider 分池」一节：两个池**互不通用**，各自只有一条路径能花。
+ */
 export const TRAE_CN_POOL_UNIVERSAL = 0
 /**
- * Work 积分池（`available_endpoint === 1`）—— 与通用池**不可合并展示**。
- *
- * 口径见 {@link TraeCnCreditBalance}：它**只在 TraeWork 里能花**。
+ * Work 积分池（`available_endpoint === 1`）—— **只在 TraeWork 里能花**
+ * （`work.trae.cn` 网页版 / 桌面版），也是 `trae-cn-work` 那条路径实际扣的池。
  */
 export const TRAE_CN_POOL_WORK = 1
-
-/**
- * 积分池展示名。
- *
- * 两个池**必须分开显示**（如「通用 154.22 / Work 2000」），因为它们的**可用范围
- * 不同**（口径见 {@link TraeCnCreditBalance}）：Work 专属积分只在 TraeWork 里
- * 能花，合并成一个数会让用户以为那部分能拿来对话。
- */
-export function traeCnPoolName(endpoint: number): string {
-  if (endpoint === TRAE_CN_POOL_UNIVERSAL) return '通用积分'
-  if (endpoint === TRAE_CN_POOL_WORK) return 'Work 积分'
-  return `端点 ${endpoint}`
-}
 
 /**
  * 定长字段的脱敏描述：**只列字段名，不带任何值**。
@@ -906,42 +897,39 @@ const BALANCE_ENDPOINT_FIELDS: readonly string[] = [
   'available_endpoint', 'endpoint', 'resource_endpoint',
 ]
 
-/** 积分池明细。 */
-export interface TraeCnCreditPool {
-  /** `available_endpoint` 原值：0=通用积分，1=Work 积分，其余为未知池。 */
-  endpoint: number
-  /** 池展示名（见 {@link traeCnPoolName}）。 */
-  name: string
-  /** 该池**有效**礼包余额合计（两位小数）。 */
-  total: number
-  /** 该池的礼包明细。 */
-  packages: CreditPackage[]
-}
+/**
+ * 积分池的**标识**（`available_endpoint` 的取值）。
+ *
+ * 它只用来选池，**不再有展示名** —— 分池之后每个面板只显示自己那一个池，
+ * 界面上不会出现「通用」「Work」这类字样，池名在此没有任何消费者。
+ * 池的**可用范围**语义见 {@link TraeCnCreditBalance}。
+ */
+export type TraeCnPoolId = typeof TRAE_CN_POOL_UNIVERSAL | typeof TRAE_CN_POOL_WORK
 
 /**
- * Trae CN 的余额结果：在共用 {@link CreditBalance} 之上**追加**双池信息。
+ * Trae CN 的余额结果 —— 与共用 {@link CreditBalance} **逐字段同构**。
  *
- * ## 双池语义（**准确版**，取代早先的「chat 只扣通用池」简写）
+ * ## 两个积分池（互相独立，各有一条能花掉它的路径）
  *
- * - **Work 专属积分只在 TraeWork 里能花**（`work.trae.cn` 网页版 / 桌面版）；
- * - **TraeCode / IDE 对话只消耗通用积分**（也就是本适配器走的那条路径）；
- * - 在 TraeWork 中，两类积分按**到期时间先后**扣；Work 专属积分**仅在到期时间
- *   相同时**才优先；
- * - **2026-09 起签到发的是通用积分**（不是 Work 专属）。
+ * - **通用池（`available_endpoint=0`）**：TraeCode / IDE 对话扣的就是它，
+ *   也就是 `trae-cn` provider 走的那条路径；**2026-09 起签到发的也是通用积分**；
+ * - **Work 池（`available_endpoint=1`）**：**只在 TraeWork 里能花**
+ *   （`work.trae.cn` 网页版 / 桌面版），也就是 `trae-cn-work` provider 走的那条
+ *   路径；在 TraeWork 中两类积分按**到期时间先后**扣，Work 专属**仅在到期时间
+ *   相同时**才优先。
  *
- * 展示口径因此是：`total` 仍是**主数字**（通用池，本插件唯一能用掉的那个），
- * 另给 `workTotal` 与 `pools` 让 UI 能按「通用 154.22 / Work 2000」分开展示。
- * **绝不把两池相加** —— 相加等于向用户暗示 Work 额度能用来对话。
+ * ## 展示口径：**按 provider 分池**，一个面板一个池
  *
- * （早先注释写「chat 只扣通用池」，方向正确但过窄：它把「Work 在 TraeWork 里
- * 能花」这半边事实省掉了，读者会以为 Work 积分是纯装饰。）
+ * `fetchTraeCnCreditBalance` 按调用方给的 provider 选池（见该函数的说明）：
+ * 返回的 `total` 与 `packages` **只含那一个池**。
+ *
+ * 曾经的「双池超集」（`total` = 通用池 + 另给 `workTotal` / `pools` 让 UI 渲染
+ * 「通用 154.22 / Work 2000」）**已删除**：两个面板各显示两段数字，其中永远有
+ * 一段是那个面板**花不掉**的（Trae CN 面板花不了 Work 额度、Work 面板花不了
+ * 通用额度），信息量是负的。分池之后每个面板的数字就是**它自己实际能花的池**，
+ * 不再需要「绝不合并」这条提醒 —— 合并的前提（同一处同时显示两池）已经不存在。
  */
-export interface TraeCnCreditBalance extends CreditBalance {
-  /** 各积分池明细（至少一项；未出现的池不会凭空补 0 项）。 */
-  pools: TraeCnCreditPool[]
-  /** Work 池（endpoint=1）余额；没有 Work 礼包时为 0。 */
-  workTotal: number
-}
+export type TraeCnCreditBalance = CreditBalance
 
 /** 从对象里读第一个存在且可解析的数值；都没有返回 undefined。 */
 function readFirstNumber(
@@ -1194,19 +1182,40 @@ function parseTraeCnPackage(record: Record<string, unknown>): ParsedPackage {
 }
 
 /**
- * 查询账号积分余额（按 `available_endpoint` 分池）。
+ * 查询账号积分余额 —— **只返回 `pool` 那一个池**。
  *
  * 返回 `null` 表示**查不到**（网络 / 信封 / 业务码异常 / 找不到礼包数组），
  * 与「余额为 0」严格区分 —— 失败时 UI 应显示原因而不是 0。
  *
- * `total` = **通用池**（endpoint=0）有效礼包余额之和，是卡片的主数字
- * （本插件能实际用掉的就是它）；Work 池（endpoint=1）走
- * {@link TraeCnCreditBalance.workTotal}，**不并入** total —— 它的可用范围
- * 只在 TraeWork，口径见 {@link TraeCnCreditBalance}。
+ * ## `pool` 由调用方按 **provider（面板 id）** 给出
+ *
+ * 这是本次的语义锚点：**面板显示的数字 = 该 provider 实际能花的池**。
+ *
+ * | provider | 面板 | `pool` | 谁在花它 |
+ * |---|---|---|---|
+ * | `trae-cn` | Trae CN | `TRAE_CN_POOL_UNIVERSAL`（0） | IDE 对话扣的就是它 |
+ * | `trae-cn-work` | Trae CN Work | `TRAE_CN_POOL_WORK`（1） | TraeWork 网页版 |
+ *
+ * 于是两个面板各只显示一个数字与自己那批资源包，界面上不再出现「通用」
+ * 「Work」字样 —— 每个数字都对应一条**能把钱花掉的真实路径**，不存在
+ * 「显示了但花不掉」的那一段。这也让「绝不把两池相加」这条提醒失去对象：
+ * 同一处已经不会再同时出现两个池。
+ *
+ * ⚠️ `pool` **必须取自面板 id（`req.provider`）而不是账号池键**：账号池键把
+ * `trae-cn-work` 映射成了 `trae-cn`（见 `src/jet-hub-rpc.ts` 的
+ * `poolProviderFor()`），拿它去选池会让 Work 面板显示通用池的数字。
+ *
+ * ## 解析一行未动
+ *
+ * 本函数前半段（T7 校准的嵌套口径、候选表 + `available_endpoint` 指纹扫描
+ * 兜底、三级余额回退链）与改动前**逐字节相同** —— 本次只改了「解析完成后的
+ * 池选择与响应构造」。缺 `available_endpoint` 的礼包仍归**通用池**
+ * （见 {@link parseTraeCnPackage}）。
  */
 export async function fetchTraeCnCreditBalance(
   credential: TraeCnCredential,
   product: TraeCnProduct,
+  pool: TraeCnPoolId,
   options: TraeCnCreditsOptions = {},
 ): Promise<TraeCnCreditBalance | null> {
   const result = await postJson(
@@ -1242,35 +1251,29 @@ export async function fetchTraeCnCreditBalance(
   const sources = [...new Set(parsed.map((entry) => entry.source))]
   options.onDebug?.(`[trae-cn] 余额取数口径: ${sources.length === 0 ? '(无条目)' : sources.join(' / ')}（T7 已校准：nested-limit 为主路径）`)
 
+  // 只留本池：另一个池的礼包不在本面板能花的范围内，显示出来只会误导。
+  const inPool = parsed.filter((entry) => entry.endpoint === pool)
   const endpoints = [...new Set(parsed.map((entry) => entry.endpoint))].sort((a, b) => a - b)
-  const pools: TraeCnCreditPool[] = endpoints.map((endpoint) => {
-    const entries = parsed.filter((entry) => entry.endpoint === endpoint)
-    const poolName = traeCnPoolName(endpoint)
-    return {
-      endpoint,
-      name: poolName,
-      total: roundCredits(entries.reduce((sum, entry) => sum + (entry.pkg.active ? entry.pkg.remaining : 0), 0)),
-      packages: entries.map((entry) => ({
-        ...entry.pkg,
-        // 非通用池的包名前缀池名：`packages` 是两池混排的，而 UI 的 tooltip
-        // 直接逐行渲染 `name` —— 不加前缀会让「2000」看起来像通用额度。
-        name: endpoint === TRAE_CN_POOL_UNIVERSAL ? entry.pkg.name : `[${poolName}] ${entry.pkg.name}`,
-      })),
-    }
-  })
+  options.onDebug?.(
+    `[trae-cn] 分池展示: 本池 endpoint=${pool}，取 ${inPool.length}/${parsed.length} 项；`
+    + `响应中出现过的池: ${endpoints.length === 0 ? '(无)' : endpoints.join(',')}`,
+  )
 
-  const universalTotal = pools.find((pool) => pool.endpoint === TRAE_CN_POOL_UNIVERSAL)?.total ?? 0
-  const workTotal = pools.find((pool) => pool.endpoint === TRAE_CN_POOL_WORK)?.total ?? 0
-  // 失效额度单独汇总（跨池），供 UI 提示「另有 N 已失效」。
+  // 只累加**有效**礼包的本池余额：失效包里的额度服务端仍会返回，但不能用于
+  // 扣费，并进总额会让数字虚高。失效额度也**按本池**汇总 —— 包明细已被过滤，
+  // 跨池汇总会得到「tooltip 里一行都没有，却提示另有 N 已失效」的自相矛盾。
+  const total = roundCredits(
+    inPool.reduce((sum, entry) => sum + (entry.pkg.active ? entry.pkg.remaining : 0), 0),
+  )
   const expiredTotal = roundCredits(
-    parsed.reduce((sum, entry) => sum + (entry.pkg.active ? 0 : Math.max(0, entry.pkg.remaining)), 0),
+    inPool.reduce((sum, entry) => sum + (entry.pkg.active ? 0 : Math.max(0, entry.pkg.remaining)), 0),
   )
   return {
-    total: universalTotal,
-    packages: pools.flatMap((pool) => pool.packages),
+    total,
+    // 包名原样透出：分池之后同一个列表里只有本池的包，不再需要「[Work 积分]」
+    // 这类前缀来区分（那前缀本就是为两池混排准备的）。
+    packages: inPool.map((entry) => entry.pkg),
     expiredTotal,
-    pools,
-    workTotal,
   }
 }
 

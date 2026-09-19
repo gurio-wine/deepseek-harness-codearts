@@ -321,19 +321,15 @@ function ClaimNotice({ tone, text, details }) {
  * - 查到了但余额为 0 → 显示 0
  * - 还没有结果 → 显示"读取中"
  *
- * **双池（通用 / Work）**：Trae CN 的余额对象是 `CreditBalance` 的超集，多带一个
- * `workTotal`（见 `src/trae-cn-credits.ts` 的 `TraeCnCreditBalance`）。带该字段时
- * 一行显示两池：`total` 是**通用池**，`workTotal` 是 Work 池。
+ * **单数字**：Trae CN 的两个面板各查各的池（宿主按面板 id 选池，见
+ * `src/jet-hub-rpc.ts` 的 `traeCnPoolFor()`），返回的 `total` 与 `packages`
+ * 都**只含该面板能花的那个池**，故这里就是普通的一个数字，与其他 provider
+ * 走的是同一条渲染路径。
  *
- * 两池**绝不合并成一个数**，因为可用范围不同：Work 专属积分只在 TraeWork
- * （work.trae.cn 网页版 / 桌面版）能花，**本插件走的 IDE 对话只消耗通用积分**
- * （TraeWork 内两类积分按到期时间先后扣，Work 专属仅在到期时间相同时优先；
- * 2026-09 起签到发的是通用积分）。合并会让用户以为那 2000 能用来对话，
- * 于是对「明明显示还有 2000 却说余额不足」感到莫名其妙。因此这里既不求和、
- * 也不把 Work 数字按通用数字的蓝色强调样式渲染（用弱化色，暗示它不可直接用于对话）。
- *
- * 其余 provider 的余额对象没有 `workTotal`，走的仍是原路径 —— 渲染结果与登记
- * 这个能力之前**逐元素一致**（`workTotal` 缺失时不产生任何额外节点）。
+ * 历史上这里消费过一个超集字段 `workTotal` 来渲染「通用 X / Work Y」两段，
+ * **已删除**：那个字段与它所服务的双段渲染一起没了（两个面板各显示两段数字时，
+ * 永远有一段是那个面板花不掉的）。余额对象从此与 `CreditBalance` 逐字段同构，
+ * 本组件不再需要任何 provider 专属分支。
  */
 function CreditBalanceRow({ balance, error, loading }) {
   if (loading) {
@@ -348,10 +344,6 @@ function CreditBalanceRow({ balance, error, loading }) {
         error || '查询失败'));
   }
   const total = formatCredits(balance.total) ?? '0';
-  // 只有**确实带了** workTotal 的 provider 才切双池形态。判据是「字段存在且可解析」，
-  // 而不是「值是 0 就不显示」：Work 池为 0 也是有效信息（该账号没有 Work 积分），
-  // 且此时把主数字标成「通用」反而更清楚 —— 用户不会误以为那 0 是通用余额。
-  const hasWorkPool = typeof balance.workTotal === 'number' && Number.isFinite(balance.workTotal);
   // 明细放进 title，不占版面；账号卡片本身已经信息密集了
   const detail = (balance.packages || []).map(formatPackageLine).join('\n');
   const all = balance.packages || [];
@@ -362,13 +354,7 @@ function CreditBalanceRow({ balance, error, loading }) {
       className: 'dim-jh-creditValue',
       title: detail || undefined,
     },
-    React.createElement('strong', { className: 'dim-jh-creditTotal' },
-      hasWorkPool ? `通用 ${total}` : total),
-    // Work 池单独一项，前缀 `Work` 而非并入主数字。
-    hasWorkPool
-      ? React.createElement('span', { className: 'dim-jh-creditWork' },
-          `Work ${formatCredits(balance.workTotal) ?? '0'}`)
-      : null,
+    React.createElement('strong', { className: 'dim-jh-creditTotal' }, total),
     all.length > 1
       ? React.createElement('span', { className: 'dim-jh-creditPackages' },
           `${activeCount}/${all.length} 个资源包有效`)

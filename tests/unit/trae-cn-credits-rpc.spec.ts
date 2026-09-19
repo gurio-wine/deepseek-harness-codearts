@@ -9,7 +9,8 @@
  *
  * 与 LobsterAI 的差异（本文件的重点）：
  * - Trae 的签到是**两步**（status → 未领则 claim），且 claim 必须带设备头；
- * - 余额**按 `available_endpoint` 分池**，通用池才是主数字。
+ * - 余额**按 provider（面板 id）分池显示**：Trae CN 面板只见通用池、Trae CN
+ *   Work 面板只见 Work 池，两者查的是同一批账号的同一个端点。
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -265,34 +266,68 @@ describe('credits.claimAll 的 trae-cn 分派', () => {
   })
 })
 
-describe('credits.balances 的 trae-cn 分派', () => {
-  it('双池拆分：通用池为主数字，Work 池单独返回', async () => {
+describe('credits.balances 的 trae-cn 分派（按面板 id 选池）', () => {
+  /** 双池响应：通用 154.22 / Work 2000 —— 两个面板查的都是这一份。 */
+  const dualPoolResponse = (): Response => new Response(JSON.stringify({
+    code: 0,
+    data: {
+      packages: [
+        { available_endpoint: 0, name: '通用礼包', remain_amount: 154.22 },
+        { available_endpoint: 1, name: 'Work礼包', remain_amount: 2000 },
+      ],
+    },
+  }), { status: 200 })
+
+  it('provider=trae-cn 时只显示**通用池**（154.22），Work 包不出现在 packages 里', async () => {
     const h = harness({
       accounts: [entry('a')],
       credentials: creds(['A', credentialOf(DEVICE_A, 'A')]),
       responds: (url, call) => {
         expect(url).toContain('/trae/api/v2/pay/web_user_ent_usage')
         expect(call.body).toEqual({ require_usage: true })
-        return new Response(JSON.stringify({
-          code: 0,
-          data: {
-            packages: [
-              { available_endpoint: 0, name: '通用礼包', remain_amount: 154.22 },
-              { available_endpoint: 1, name: 'Work礼包', remain_amount: 2000 },
-            ],
-          },
-        }), { status: 200 })
+        return dualPoolResponse()
       },
     })
     const result = await h.call('credits.balances', { provider: 'trae-cn' })
     expect(result.ok).toBe(true)
     const value = result.value as {
-      accounts: Array<{ balance: { total: number; workTotal: number; pools: Array<{ endpoint: number; total: number }> } | null; error?: string }>
+      accounts: Array<{ balance: { total: number; packages: Array<{ name: string }> } | null; error?: string }>
     }
     expect(value.accounts[0]!.error).toBeUndefined()
     expect(value.accounts[0]!.balance!.total).toBe(154.22)
-    expect(value.accounts[0]!.balance!.workTotal).toBe(2000)
-    expect(value.accounts[0]!.balance!.pools.map((pool) => pool.endpoint)).toEqual([0, 1])
+    // 资源包同样只含本池：Work 那 2000 不该出现在 Trae CN 面板上。
+    expect(value.accounts[0]!.balance!.packages.map((pkg) => pkg.name)).toEqual(['通用礼包'])
+  })
+
+  it('provider=trae-cn-work 时只显示 **Work 池**（2000），通用包不出现在 packages 里', async () => {
+    const h = harness({
+      accounts: [entry('a')],
+      credentials: creds(['A', credentialOf(DEVICE_A, 'A')]),
+      responds: () => dualPoolResponse(),
+    })
+    const result = await h.call('credits.balances', { provider: 'trae-cn-work' })
+    expect(result.ok).toBe(true)
+    const value = result.value as {
+      accounts: Array<{ balance: { total: number; packages: Array<{ name: string }> } | null }>
+    }
+    expect(value.accounts[0]!.balance!.total).toBe(2000)
+    expect(value.accounts[0]!.balance!.packages.map((pkg) => pkg.name)).toEqual(['Work礼包'])
+  })
+
+  it('两个面板拿到的是**同一个账号的同一份响应**，只是显示的池不同', async () => {
+    // 这是「分池」与「分账号」的分界：账号池键仍映射到 trae-cn（同批账号），
+    // 变的只有显示哪个池。若哪天有人把选池也写成 `provider`（映射后的值），
+    // 两个面板会显示同一个数字 —— 这条断言就是那道闸。
+    const accounts = [entry('a')]
+    const credentials = creds(['A', credentialOf(DEVICE_A, 'A')])
+    const universal = await harness({ accounts, credentials, responds: () => dualPoolResponse() })
+      .call('credits.balances', { provider: 'trae-cn' })
+    const work = await harness({ accounts, credentials, responds: () => dualPoolResponse() })
+      .call('credits.balances', { provider: 'trae-cn-work' })
+    const totalOf = (result: { value?: unknown }) =>
+      (result.value as { accounts: Array<{ balance: { total: number } }> }).accounts[0]!.balance.total
+    expect(totalOf(universal)).toBe(154.22)
+    expect(totalOf(work)).toBe(2000)
   })
 
   it('查不到时 balance 为 null + error（不是 0 积分）', async () => {

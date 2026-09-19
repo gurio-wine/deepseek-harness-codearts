@@ -15,11 +15,11 @@ deepseek-harness 插件：执行 CodeArts（华为云）登录流程，默认走
   另支持「一键领取积分」（每日签到）。
 - **trae-cn（Trae CN）** — 见
   [Trae CN provider](#trae-cn-provider字节跳动-trae-国内版)；
-  后端已实现签到与积分余额（双池），前端能力矩阵登记见该节说明。
+  后端已实现签到与积分余额（**积分按 provider 分池显示**），前端能力矩阵登记见该节说明。
 - **trae-cn-work（Trae CN Work）** — Trae CN 的第二条路径（TraeWork 网页协议，
   扣 Work 专属积分池），见
   [Trae CN Work provider](#trae-cn-work-providertraework-网页协议)；Account Hub
-  面板**共用 Trae CN 的账号**，只提供双池积分行与模型开关。
+  面板**共用 Trae CN 的账号**，只提供积分行（**显示 Work 池**）与模型开关。
 
 六个 provider 的 Account Hub 面板都提供「**显示列表**」按钮，可逐个开关模型以控制其
 是否出现在对话框的模型选择里（黑名单制，默认全部显示）——
@@ -540,10 +540,12 @@ replace」，因此账号列表与数据版本号一并携带，不会被写坏�
   POST /trae/api/v2/pay/web_user_ent_usage    body {"require_usage":true}
   ```
 
-  响应里的礼包按 `available_endpoint` **分池**（0=通用积分、1=Work 积分）。
-  `fetchTraeCnCreditBalance` 返回的 `total` 是**通用池**合计（本插件走的 IDE
-  对话消耗的就是它），Work 池走**单独的 `workTotal` 字段**，两者**绝不合并成一个数**
-  —— Work 专属积分只在 TraeWork（`work.trae.cn` 网页版 / 桌面版）能花。
+  响应里的礼包按 `available_endpoint` **分池**（0=通用积分、1=Work 积分），
+  而**每个面板只显示自己那条路径能花的池**：`trae-cn` 面板显示**通用池**
+  （本插件走的 IDE 对话消耗的就是它），`trae-cn-work` 面板显示 **Work 池**
+  —— 两边都是**单数字**，界面上不出现「通用」「Work」字样，资源包列表也
+  只含本池的包。选池由宿主按**面板 id** 完成（`src/jet-hub-rpc.ts` 的
+  `traeCnPoolFor()`），**不是**按账号池键 —— 后者会把两个面板映射到同一个键。
   **不要**用 `ug/activity/info` 的活动口径：实测它写「200 work 积分」而实际到账
   150 通用积分，是口径陷阱。详见 [Trae CN provider](#trae-cn-provider字节跳动-trae-国内版)
   的「签到与积分余额」。
@@ -556,11 +558,10 @@ replace」，因此账号列表与数据版本号一并携带，不会被写坏�
 > 1. `plugin-src/client/credits-capabilities.js` 登记了 `trae-cn`（`balance` ✓、
 >    `dailyCheckin` ✓），`PROVIDERS` 同步加入该 tab —— 面板因此显示「积分」行、
 >    「刷新积分」与「一键领取积分」按钮；
-> 2. `CreditBalanceRow` 见到余额对象带 `workTotal` 时切**双池形态**，显示
->    「通用 154.22 / Work 2000」；两池**绝不合并**，且 Work 用弱化色（Work 专属
->    积分只在 TraeWork 能花，IDE 对话只消耗通用池）。没有 `workTotal` 的 provider
->    渲染**逐元素不变**，由 `tests/unit/jet-hub-credit-balance-row.spec.ts` 用
->    整树深比较守住。
+> 2. `CreditBalanceRow` 只渲染**一个数字**加本池的资源包明细。它不做任何池判断
+>    —— 「显示哪个池」的决定全在宿主侧，组件的输入与其余 provider 逐字段同构，
+>    由 `tests/unit/jet-hub-credit-balance-row.spec.ts` 用整树深比较守住（含
+>    「喂进旧的双池字段也不多渲染一段」）。
 >
 > ✅ 宿主侧接线已完成（`47f253f`）：`account.create` / `account.refresh` /
 > `account-probe.ts` 三处的 `trae-cn` 分支与 `registerJetHubRpc` 的 `traeCn`
@@ -577,11 +578,19 @@ replace」，因此账号列表与数据版本号一并携带，不会被写坏�
 > 「查询失败」。修法是不发起该请求——后端 `productById()` 的拒绝是正确的
 > 契约行为，不该被当作运行时故障展示。
 
-**Trae CN Work 面板显示同一份双池余额**：`credits.balances` 收到 `trae-cn-work`
-时由 `src/jet-hub-rpc.ts` 的 `poolProviderFor()` 映射到 `trae-cn` 的**同一个实现**
-（同批账号、同端点、同 `workTotal` 拆分）。刻意不新写一套 Work 专用逻辑——
-余额是**账号属性**，不是路径属性。Work 面板因此能直接回答它存在的那个问题：
-Work 池还剩多少。
+**Trae CN Work 面板查的是同一批账号的同一个端点，但显示的是另一个池**：
+`credits.balances` 收到 `trae-cn-work` 时由 `src/jet-hub-rpc.ts` 的
+`poolProviderFor()` 映射到 `trae-cn` 的**同一个实现**（同批账号、同端点），
+再由 `traeCnPoolFor()` 把**显示池**选成 Work 池。这两个映射方向相反、缺一不可：
+
+| 问题 | 函数 | `trae-cn` | `trae-cn-work` |
+|---|---|---|---|
+| 查谁的账号 / 打哪个端点 | `poolProviderFor()` | `trae-cn` | `trae-cn`（映射过去） |
+| **显示哪个积分池** | `traeCnPoolFor()` | 通用池（0） | **Work 池（1）** |
+
+刻意不新写一套 Work 专用逻辑 —— 查询是**账号属性**（同批账号、同一个端点），
+只有**显示口径**是路径属性。Work 面板因此直接回答它存在的那个问题：
+**Work 池还剩多少**（而不是把通用池的数字也摆在那里，那是这个面板花不掉的钱）。
 
 **但 Work 面板不显示签到按钮**（矩阵里 `dailyCheckin: false`）：签到是账号级、
 当日一次的操作，两个面板都放按钮必然导致同一账号重复领取。详见
@@ -1579,12 +1588,16 @@ x-app-version: 3.3.102
 这是向服务端追查单次请求的唯一线索。三段链路与取舍见前面的
 「失败诊断的 logid 透传」。
 
-**余额按 `available_endpoint` 分池**：
+**余额按 `available_endpoint` 分池显示（一个面板一个池）**：
 
-| 池 | `available_endpoint` | 返回字段 | 展示 |
+| provider | 面板 | `available_endpoint` | 谁在花这个池 |
 |---|---|---|---|
-| 通用积分 | `0` | `total` | **主数字**（本插件能实际用掉的就是它） |
-| Work 积分 | `1` | `workTotal` | 单独一项（如「通用 154.22 / Work 2000」） |
+| `trae-cn` | Trae CN | `0`（通用积分） | **IDE 对话**（本插件主路径） |
+| `trae-cn-work` | Trae CN Work | `1`（Work 积分） | **TraeWork**（`work.trae.cn` 网页版 / 桌面版） |
+
+**语义锚点：面板显示的数字 = 该 provider 实际能花的池**。两个池**互不通用**，
+各自只有一条路径能花掉它 —— 所以每个面板只显示自己那一个数字与自己那批资源包，
+界面上不出现「通用」「Work」字样。
 
 **Work 积分的准确口径**（取代早先「chat 只扣通用池」的简写）：
 
@@ -1593,16 +1606,22 @@ x-app-version: 3.3.102
 - 在 TraeWork 中两类积分按**到期时间先后**扣，Work 专属**仅在到期时间相同时**优先；
 - **2026-09 起签到发的是通用积分**（不是 Work 专属）。
 
-**两池绝不合并成一个数**：合并会让用户以为 Work 的额度可以用来对话，
-从而对「明明显示还有 2000 却说余额不足」感到莫名其妙。返回类型是
-`CreditBalance` 的**超集** `TraeCnCreditBalance`（多出 `pools` 与 `workTotal`），
-故 `collectCreditBalances` 能直接复用；非通用池的包名在 `packages` 里带
-`[Work 积分]` 前缀，避免明细里那个 2000 看起来像通用额度。
+选池由宿主按**面板 id** 完成（`src/jet-hub-rpc.ts` 的 `traeCnPoolFor()`），
+`fetchTraeCnCreditBalance` 的第三个参数就是它；返回的 `total` 与 `packages`
+**只含那一个池**（另一个池的礼包被过滤掉，`expiredTotal` 也按本池汇总）。
+`TraeCnCreditBalance` 因此与共用的 `CreditBalance` **逐字段同构**，
+`collectCreditBalances` 直接复用。
 
-> ✅ **UI 已消费 `workTotal`**：`CreditBalanceRow` 在该字段存在且可解析时渲染
-> 「通用 X / Work Y」两段，Work 用弱化色且**绝不与通用相加**。其余 provider 的
-> 余额对象没有该字段，渲染逐元素不变（`tests/unit/jet-hub-credit-balance-row.spec.ts`）。
-> 改动前端后必须 `pnpm build:all` 重建客户端 bundle 才生效。
+> ⚠️ **`pool` 必须取自面板 id，不是映射后的账号池键**。`poolProviderFor()` 把
+> `trae-cn-work` 映射成了 `trae-cn`（账号是同一批），拿它去选池会让两个面板都
+> 显示通用池 —— 不报错，只是 Work 面板的数字根本不是它能花的钱。
+
+> ✅ **前端只渲染一个数字**：`CreditBalanceRow` 不做任何池判断（它的输入与其余
+> provider 逐字段同构）。历史上那套「双池超集 + `workTotal` 两段渲染」已随分池
+> 一并删除 —— 同一处显示两个池时，永远有一段是那个面板花不掉的；合并的前提
+> 消失后，「绝不把两池相加」这条提醒也就不再有对象。
+> `tests/unit/jet-hub-credit-balance-row.spec.ts` 用整树深比较守住，含「喂进旧的
+> 双池字段也不多渲染一段」。改动前端后必须 `pnpm build:all` 重建客户端 bundle。
 
 **判定一律以 body `code` 为准，不看 HTTP 状态**（对齐 Buddy 系既有约定）：
 无 auth 时服务端返回的是 **HTTP 200 + `code:1001` + `enable:false`**，按状态码判
@@ -1637,9 +1656,10 @@ x-app-version: 3.3.102
 ### 为什么需要它：两个池、两套模型、两条协议
 
 Trae CN 账号的积分**分两个互不通用的池**，而**只有 Work 池能在 TraeWork 里花**
-（见上文「余额按 `available_endpoint` 分池」）。IDE 路径只扣通用池，因此当
+（见上文「余额按 `available_endpoint` 分池显示」）。IDE 路径只扣通用池，因此当
 **通用池耗尽而 Work 池仍有额度**时，IDE 路径必回 `4008`，而 Work 路径正常扣费 ——
-两条路径的可用性**互相独立**。
+两条路径的可用性**互相独立**。两个面板因此各显示自己那个池：Trae CN 面板显示
+通用池、Trae CN Work 面板显示 Work 池。
 
 | | `trae-cn`（IDE 路径） | `trae-cn-work`（本 provider） |
 |---|---|---|
@@ -1962,7 +1982,7 @@ Work 的码表**没有任何实测样本**（真机两轮全绿，一帧错误�
 | 项 | Trae CN Work 面板 |
 |---|---|
 | 账号列表 | **与 Trae CN 完全相同**（同批 `TRAE_CN_ACCOUNT_*`、同一套限流切换） |
-| 积分行 | ✓ 双池「通用 X / Work Y」（同一个端点、同一份返回） |
+| 积分行 | ✓ **只显示 Work 池**的单个数字与 Work 池的资源包（同一端点、同一批账号） |
 | 「刷新积分」 | ✓ |
 | 「一键领取积分」 | ✗ **刻意不渲染** —— 签到留在 Trae CN 面板 |
 | 「+ 新建账号」 | ✗ **刻意不渲染** —— 改为一行提示「与 Trae CN 共用账号，请在 Trae CN 面板登录」 |
@@ -1982,6 +2002,11 @@ Work 的码表**没有任何实测样本**（真机两轮全绿，一帧错误�
 取代了积分三端点里原本硬编码的 `req.provider === TRAE_CN.id`。客户端**发的是面板
 id**、不做任何映射 —— 若在客户端映射，宿主那几个按池过滤的分支就必须跟着改，
 同一件事写两遍且可能分叉。
+
+**但余额还多一层、方向相反的映射**：`traeCnPoolFor()` 决定**显示哪个积分池**
+（`trae-cn` → 通用池、`trae-cn-work` → Work 池）。它与 `poolProviderFor()` 是
+两个不同的问题（查谁的账号 vs 显示哪个池），**不可互相顶替**：用池键选池会让
+两个面板都显示通用池，用面板 id 查账号会让面板空白 —— 两者都不报错。
 
 刻意**不**映射的两个入口：`account.create`（映射会让二次点击给同一份凭据建出
 第二个占位账号）与 `model.list` / `model.setDisabled`（黑名单按 provider id 存，

@@ -22,7 +22,6 @@ import {
   isTraeCnClaimRetryable,
   traeCnCreditsHeaders,
   traeCnOsVersion,
-  traeCnPoolName,
 } from '../../src/trae-cn-credits.js'
 import { TRAE_CN, TRAE_CN_LOGIN_OS_VERSION } from '../../src/trae-cn-product.js'
 import { TRAE_CN_BACKOFF_CODES, recordsTraeCnCooldown } from '../../src/trae-cn-errors.js'
@@ -692,7 +691,7 @@ describe('9074 不记冷却徽章（定性已改为设备身份）', () => {
 })
 
 // ─────────────────────────────────────────────────────────────
-// 积分余额（双池）
+// 积分余额（按 provider 分池：一个面板只显示自己那个池）
 // ─────────────────────────────────────────────────────────────
 
 /** 构造一个礼包条目。 */
@@ -716,58 +715,116 @@ function balanceFetch(gifts: Record<string, unknown>[], wrap: (gifts: unknown[])
 describe('fetchTraeCnCreditBalance', () => {
   it('请求体是 {"require_usage":true}，端点为 web_user_ent_usage', async () => {
     const { fetcher, calls } = balanceFetch([gift()])
-    await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(new URL(calls[0]!.url).pathname).toBe(TRAE_CN_USER_ENT_USAGE_PATH)
     expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ require_usage: true })
     expect(calls[0]!.init!.method).toBe('POST')
   })
 
-  it('双池拆分：通用池之和为主数字，Work 池单独给 workTotal', async () => {
+  it('Trae CN 面板（通用池）：只有通用包与通用 total，Work 包被过滤掉', async () => {
     const { fetcher } = balanceFetch([
       gift({ available_endpoint: TRAE_CN_POOL_UNIVERSAL, remain_amount: 54.22, name: '礼包A' }),
       gift({ available_endpoint: TRAE_CN_POOL_UNIVERSAL, remain_amount: 100, name: '礼包B' }),
       gift({ available_endpoint: TRAE_CN_POOL_WORK, remain_amount: 2000, name: 'Work礼包' }),
     ])
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher },
+    )
     expect(balance).not.toBeNull()
-    // 主数字**只**是通用池：154.22，不是 2154.22。
+    // 数字只含通用池（54.22 + 100），既不是 2154.22 也不是 2000。
     expect(balance!.total).toBe(154.22)
-    expect(balance!.workTotal).toBe(2000)
-    expect(balance!.pools).toHaveLength(2)
-    expect(balance!.pools.find((pool) => pool.endpoint === TRAE_CN_POOL_UNIVERSAL)!.total).toBe(154.22)
-    expect(balance!.pools.find((pool) => pool.endpoint === TRAE_CN_POOL_WORK)!.total).toBe(2000)
+    // 资源包列表同样只含通用包 —— Work 包不出现在 Trae CN 面板上。
+    expect(balance!.packages.map((pkg) => pkg.name)).toEqual(['礼包A', '礼包B'])
   })
 
-  it('两池名字可读（供 UI 显示「通用 154.22 / Work 2000」）', () => {
-    expect(traeCnPoolName(TRAE_CN_POOL_UNIVERSAL)).toBe('通用积分')
-    expect(traeCnPoolName(TRAE_CN_POOL_WORK)).toBe('Work 积分')
-    expect(traeCnPoolName(7)).toContain('7')
-  })
-
-  it('packages 是两池混排的扁平明细（CreditBalance 契约）', async () => {
+  it('Trae CN Work 面板（Work 池）：只有 Work 包与 Work total，通用包被过滤掉', async () => {
     const { fetcher } = balanceFetch([
-      gift({ available_endpoint: TRAE_CN_POOL_UNIVERSAL, name: '通用包' }),
-      gift({ available_endpoint: TRAE_CN_POOL_WORK, name: 'Work包' }),
+      gift({ available_endpoint: TRAE_CN_POOL_UNIVERSAL, remain_amount: 54.22, name: '礼包A' }),
+      gift({ available_endpoint: TRAE_CN_POOL_UNIVERSAL, remain_amount: 100, name: '礼包B' }),
+      gift({ available_endpoint: TRAE_CN_POOL_WORK, remain_amount: 2000, name: 'Work礼包' }),
     ])
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
-    expect(balance!.packages).toHaveLength(2)
-    // 非通用池的包名带池前缀：tooltip 是逐行渲染的，不带前缀会让 2000
-    // 看起来像通用额度。
-    expect(balance!.packages.map((pkg) => pkg.name)).toEqual(['通用包', '[Work 积分] Work包'])
+    const balance = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_WORK, { fetcher },
+    )
+    expect(balance!.total).toBe(2000)
+    expect(balance!.packages.map((pkg) => pkg.name)).toEqual(['Work礼包'])
+    // 包名原样透出：`[Work 积分]` 前缀是为两池混排准备的，分池后已无意义。
+    expect(balance!.packages[0]!.name).not.toContain('[Work')
   })
 
-  it('缺 available_endpoint 的礼包归入通用池', async () => {
+  it('另一池整个为空时该面板显示 0（不是 null）—— 池为空 ≠ 查不到', async () => {
+    // 真实场景：账号只有通用积分、一分 Work 积分都没有。此时 Work 面板该显示
+    // 「0」，而不是「余额查询失败」—— 服务端确实回了、只是本池一个包都没有。
+    const { fetcher } = balanceFetch([
+      gift({ available_endpoint: TRAE_CN_POOL_UNIVERSAL, remain_amount: 30, name: '通用包' }),
+    ])
+    const work = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_WORK, { fetcher },
+    )
+    expect(work).not.toBeNull()
+    expect(work!.total).toBe(0)
+    expect(work!.packages).toEqual([])
+  })
+
+  it('响应里**没有** available_endpoint 字段时不崩（老响应形态）', async () => {
     const { fetcher } = balanceFetch([{ name: '无名池', remain_amount: 30 }])
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
-    expect(balance!.total).toBe(30)
-    expect(balance!.pools).toHaveLength(1)
-    expect(balance!.pools[0]!.endpoint).toBe(TRAE_CN_POOL_UNIVERSAL)
+    const universal = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher },
+    )
+    // 缺 endpoint 的礼包归通用池（见 parseTraeCnPackage），故通用面板看得见它。
+    expect(universal!.total).toBe(30)
+    expect(universal!.packages).toHaveLength(1)
+  })
+
+  it('调试行如实报出「本池取了几项 / 响应里有哪些池」（真机校准靠它）', async () => {
+    const debug: string[] = []
+    const { fetcher } = balanceFetch([
+      gift({ available_endpoint: TRAE_CN_POOL_UNIVERSAL, remain_amount: 10 }),
+      gift({ available_endpoint: TRAE_CN_POOL_WORK, remain_amount: 20 }),
+      gift({ available_endpoint: 7, remain_amount: 30 }),
+    ])
+    await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_WORK, {
+      fetcher, onDebug: (message) => debug.push(message),
+    })
+    const joined = debug.join('\n')
+    expect(joined).toContain('分池展示')
+    expect(joined).toContain('本池 endpoint=1，取 1/3 项')
+    // 未知池（endpoint=7）也要被报出来：它既不属于本池也不属于另一池，
+    // 真机校准时这是「服务端加了新池」的唯一线索。
+    expect(joined).toContain('0,1,7')
+    // 只输出池号与条数，不输出金额。
+    expect(joined).not.toContain('30')
+  })
+
+  it('失效额度按**本池**汇总（不跨池，否则会出现「明细里没有却提示已失效」）', async () => {
+    const past = new Date(Date.now() - 86_400_000).toISOString()
+    const { fetcher } = balanceFetch([
+      gift({ available_endpoint: TRAE_CN_POOL_UNIVERSAL, name: '通用过期', remain_amount: 99, expire_time: past }),
+      gift({ available_endpoint: TRAE_CN_POOL_WORK, name: 'Work过期', remain_amount: 7, expire_time: past }),
+    ])
+    const universal = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher },
+    )
+    expect(universal!.expiredTotal).toBe(99)
+    expect(universal!.packages.map((pkg) => pkg.name)).toEqual(['通用过期'])
+  })
+
+  it('缺 available_endpoint 的礼包归入通用池（故通用面板看得见、Work 面板看不见）', async () => {
+    const { fetcher } = balanceFetch([{ name: '无名池', remain_amount: 30 }])
+    const universal = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher },
+    )
+    expect(universal!.total).toBe(30)
+    const work = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_WORK, { fetcher },
+    )
+    expect(work!.total).toBe(0)
   })
 
   it('余额字段候选表：remain 类字段优先', async () => {
     for (const field of ['remain_amount', 'remaining_amount', 'remain', 'balance']) {
       const { fetcher } = balanceFetch([{ available_endpoint: 0, name: 'x', [field]: 12.5 }])
-      const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+      const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
       expect(balance!.total, field).toBe(12.5)
     }
   })
@@ -776,14 +833,14 @@ describe('fetchTraeCnCreditBalance', () => {
     const { fetcher } = balanceFetch([{
       available_endpoint: 0, name: 'x', total_amount: 4500, used_amount: 300,
     }])
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(balance!.packages[0]!.remaining).toBe(4200)
     expect(balance!.packages[0]!.total).toBe(4500)
   })
 
   it('字段容错：只有 total_amount 时按余额计，且 total 置 0（不伪装成 1:1）', async () => {
     const { fetcher } = balanceFetch([{ available_endpoint: 0, name: 'x', total_amount: 4650 }])
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(balance!.packages[0]!.remaining).toBe(4650)
     expect(balance!.packages[0]!.total).toBe(0)
   })
@@ -793,7 +850,7 @@ describe('fetchTraeCnCreditBalance', () => {
       code: 0,
       data: { usage: { detail: { mystery_array: [{ available_endpoint: 0, remain_amount: 42 }] } } },
     }))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(balance!.total).toBe(42)
   })
 
@@ -808,9 +865,11 @@ describe('fetchTraeCnCreditBalance', () => {
         gift_list: [{ available_endpoint: 0, remain_amount: 42 }],
       },
     }))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
-      fetcher, onDebug: (message) => debug.push(message),
-    })
+    const balance = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, {
+        fetcher, onDebug: (message) => debug.push(message),
+      },
+    )
     expect(balance!.total).toBe(42)
     expect(debug.some((line) => line.includes('data.gift_list') && line.includes('已按分池指纹确认'))).toBe(true)
   })
@@ -821,19 +880,21 @@ describe('fetchTraeCnCreditBalance', () => {
       code: 0,
       data: { packages: [{ name: 'x', remain_amount: 7 }] },
     }))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
-      fetcher, onDebug: (message) => debug.push(message),
-    })
+    const balance = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, {
+        fetcher, onDebug: (message) => debug.push(message),
+      },
+    )
     expect(balance!.total).toBe(7)
     expect(debug.some((line) => line.includes('未确认'))).toBe(true)
   })
 
   it('名字命中空数组时返回 0（服务端明确说没有礼包）而不是 null', async () => {
     const { fetcher } = balanceFetch([], () => ({ code: 0, data: { packages: [] } }))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(balance).not.toBeNull()
     expect(balance!.total).toBe(0)
-    expect(balance!.pools).toEqual([])
+    expect(balance!.packages).toEqual([])
   })
 
   it('多包浮点相加规整为两位小数', async () => {
@@ -841,13 +902,13 @@ describe('fetchTraeCnCreditBalance', () => {
       { available_endpoint: 0, remain_amount: 55.67000031 },
       { available_endpoint: 0, remain_amount: 99.99999999 },
     ])
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(balance!.total).toBe(155.67)
   })
 
   it('负余额 clamp 到 0（不显示 -12.5 积分）', async () => {
     const { fetcher } = balanceFetch([{ available_endpoint: 0, remain_amount: -12.5 }])
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(balance!.total).toBe(0)
     expect(balance!.packages[0]!.remaining).toBe(0)
   })
@@ -858,7 +919,7 @@ describe('fetchTraeCnCreditBalance', () => {
       { available_endpoint: 0, name: '有效', remain_amount: 10 },
       { available_endpoint: 0, name: '过期', remain_amount: 99, expire_time: past },
     ])
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(balance!.total).toBe(10)
     expect(balance!.expiredTotal).toBe(99)
     expect(balance!.packages.find((pkg) => pkg.name === '过期')!.active).toBe(false)
@@ -868,37 +929,47 @@ describe('fetchTraeCnCreditBalance', () => {
     // 调研给出的唯一可核对数字：签到后总额抬升 150。
     const before = balanceFetch([{ available_endpoint: 0, total_amount: 4500 }])
     const after = balanceFetch([{ available_endpoint: 0, total_amount: 4650 }])
-    const b1 = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher: before.fetcher })
-    const b2 = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher: after.fetcher })
+    const b1 = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher: before.fetcher },
+    )
+    const b2 = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher: after.fetcher },
+    )
     expect(b2!.total - b1!.total).toBe(150)
   })
 
   it('查不到（找不到礼包数组）返回 null + 调试行，**不是** 0 积分', async () => {
     const debug: string[] = []
     const { fetcher } = balanceFetch([], () => ({ code: 0, data: { unrelated: 1 } }))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
-      fetcher, onDebug: (message) => debug.push(message),
-    })
+    const balance = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, {
+        fetcher, onDebug: (message) => debug.push(message),
+      },
+    )
     expect(balance).toBeNull()
     expect(debug.some((line) => line.includes('找不到礼包数组'))).toBe(true)
   })
 
   it('网络失败返回 null', async () => {
     const fetcher = vi.fn(async () => { throw new Error('timeout') }) as unknown as typeof fetch
-    expect(await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })).toBeNull()
+    expect(await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher },
+    )).toBeNull()
   })
 
   it('code:1001 返回 null（凭据失效 = 查不到，不显示成 0）', async () => {
     const { fetcher } = stubFetch(() => new Response(JSON.stringify({
       code: TRAE_CN_CODE_CREDENTIAL_INVALID,
     }), { status: 200 }))
-    expect(await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })).toBeNull()
+    expect(await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher },
+    )).toBeNull()
   })
 
   it('调试行只输出键名，不输出金额', async () => {
     const debug: string[] = []
     const { fetcher } = balanceFetch([{ available_endpoint: 0, remain_amount: 1234.56, secret: 'SK' }])
-    await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
+    await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, {
       fetcher, onDebug: (message) => debug.push(message),
     })
     const joined = debug.join('\n')
@@ -969,47 +1040,62 @@ describe('fetchTraeCnCreditBalance —— 真机样例（2026-09-18 校准）', 
     const { fetcher } = stubFetch(() => new Response(
       JSON.stringify(realDeviceBalanceResponse()), { status: 200 },
     ))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
-      fetcher, onDebug: (message) => debug.push(message),
-    })
+    const balance = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, {
+        fetcher, onDebug: (message) => debug.push(message),
+      },
+    )
     expect(balance).not.toBeNull()
     // 原缺陷的原文案绝不能出现 —— 那正是「余额恒失败」的直接原因。
     expect(debug.join('\n')).not.toContain('响应缺少 code 字段')
     expect(debug.join('\n')).not.toContain('余额查询失败')
   })
 
-  it('真机样例：通用池 0 / Work 池 2000（双池不合并）', async () => {
+  it('真机样例 —— Trae CN 面板只见通用池 0（Work 包的 2000 不进这个数字）', async () => {
     const { fetcher } = stubFetch(() => new Response(
       JSON.stringify(realDeviceBalanceResponse()), { status: 200 },
     ))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(balance).not.toBeNull()
-    // endpoint=0 包 limit 2000 − consumed 2000 = 0；endpoint=1 包 limit 2000 − 0 = 2000。
+    // endpoint=0 包 limit 2000 − consumed 2000 = 0；endpoint=1 包（2000）被过滤掉。
     expect(balance!.total).toBe(0)
-    expect(balance!.workTotal).toBe(2000)
-    // 主数字**只**是通用池：合并会得到 2000，让用户以为 Work 额度能用于对话。
-    expect(balance!.total).not.toBe(balance!.total + balance!.workTotal)
-    expect(balance!.pools.map((pool) => pool.endpoint)).toEqual([TRAE_CN_POOL_UNIVERSAL, TRAE_CN_POOL_WORK])
+    expect(balance!.packages).toHaveLength(1)
+    expect(balance!.packages[0]!.remaining).toBe(0)
   })
 
-  it('嵌套口径生效：credits_limit 与 credits_amount 都被读到', async () => {
+  it('真机样例 —— Trae CN Work 面板只见 Work 池 2000（通用包的 0 不进这个数字）', async () => {
     const { fetcher } = stubFetch(() => new Response(
       JSON.stringify(realDeviceBalanceResponse()), { status: 200 },
     ))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
-    // 按 endpoint 定位（包名字段未在校准结论中，不做名字断言）。
-    const universal = balance!.pools.find((pool) => pool.endpoint === TRAE_CN_POOL_UNIVERSAL)!
-      .packages[0]!
-    expect(universal.total).toBe(2000)
-    expect(universal.used).toBe(2000)
-    expect(universal.remaining).toBe(0)
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_WORK, { fetcher })
+    expect(balance).not.toBeNull()
+    // endpoint=1 包 limit 2000 − 0（`usage:{}`）= 2000。
+    expect(balance!.total).toBe(2000)
+    expect(balance!.packages).toHaveLength(1)
+    expect(balance!.packages[0]!.remaining).toBe(2000)
+  })
 
-    const work = balance!.pools.find((pool) => pool.endpoint === TRAE_CN_POOL_WORK)!
-      .packages[0]!
+  it('嵌套口径生效：credits_limit 与 credits_amount 都被读到（两个池各查一次）', async () => {
+    const { fetcher } = stubFetch(() => new Response(
+      JSON.stringify(realDeviceBalanceResponse()), { status: 200 },
+    ))
+    const universal = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher },
+    )
+    // 分池后 `packages` 里只有本池那一个包（包名字段未在校准结论中，不做名字断言）。
+    const universalPkg = universal!.packages[0]!
+    expect(universalPkg.total).toBe(2000)
+    expect(universalPkg.used).toBe(2000)
+    expect(universalPkg.remaining).toBe(0)
+
+    const work = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_WORK, { fetcher },
+    )
+    const workPkg = work!.packages[0]!
     // usage:{} ⇒ 已用按 0（不是「查不到」）。
-    expect(work.total).toBe(2000)
-    expect(work.used).toBe(0)
-    expect(work.remaining).toBe(2000)
+    expect(workPkg.total).toBe(2000)
+    expect(workPkg.used).toBe(0)
+    expect(workPkg.remaining).toBe(2000)
   })
 
   it('礼包数组从根层 user_entitlement_pack_list 定位，且按分池指纹确认为可信', async () => {
@@ -1017,7 +1103,7 @@ describe('fetchTraeCnCreditBalance —— 真机样例（2026-09-18 校准）', 
     const { fetcher } = stubFetch(() => new Response(
       JSON.stringify(realDeviceBalanceResponse()), { status: 200 },
     ))
-    await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
+    await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, {
       fetcher, onDebug: (message) => debug.push(message),
     })
     const joined = debug.join('\n')
@@ -1043,7 +1129,7 @@ describe('fetchTraeCnCreditBalance —— 真机样例（2026-09-18 校准）', 
         usage: { credits_amount: 500 },
       }],
     }), { status: 200 }))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(balance!.packages[0]!.total).toBe(2000)
     expect(balance!.total).toBe(1500)
   })
@@ -1055,7 +1141,7 @@ describe('fetchTraeCnCreditBalance —— 真机样例（2026-09-18 校准）', 
         usage: { credits_amount: 300 },
       }],
     }), { status: 200 }))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(balance!.total).toBe(500)
     expect(balance!.packages[0]!.total).toBe(800)
   })
@@ -1069,7 +1155,7 @@ describe('fetchTraeCnCreditBalance —— 真机样例（2026-09-18 校准）', 
         },
       }],
     }), { status: 200 }))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, { fetcher })
+    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, { fetcher })
     expect(balance!.total).toBe(2000)
     expect(balance!.packages[0]!.used).toBe(0)
   })
@@ -1082,9 +1168,11 @@ describe('fetchTraeCnCreditBalance —— 真机样例（2026-09-18 校准）', 
       is_credits_billing: true,
       usage_summary: { consumed_amount: 2650, total_amount: 4650 },
     }), { status: 200 }))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
-      fetcher, onDebug: (message) => debug.push(message),
-    })
+    const balance = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, {
+        fetcher, onDebug: (message) => debug.push(message),
+      },
+    )
     expect(balance).toBeNull()
     expect(debug.join('\n')).toContain('找不到礼包数组')
     expect(debug.join('\n')).not.toContain('响应缺少 code 字段')
@@ -1097,9 +1185,11 @@ describe('fetchTraeCnCreditBalance —— 真机样例（2026-09-18 校准）', 
       user_entitlement_pack_list: [],
     }), { status: 200 }))
     const debug: string[] = []
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
-      fetcher, onDebug: (message) => debug.push(message),
-    })
+    const balance = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, {
+        fetcher, onDebug: (message) => debug.push(message),
+      },
+    )
     expect(balance).toBeNull()
     expect(debug.join('\n')).toContain('余额查询失败')
   })
@@ -1109,9 +1199,11 @@ describe('fetchTraeCnCreditBalance —— 真机样例（2026-09-18 校准）', 
     const { fetcher } = stubFetch(() => new Response(JSON.stringify({
       mystery: 'payload',
     }), { status: 200 }))
-    const balance = await fetchTraeCnCreditBalance(makeCredential(), TRAE_CN, {
-      fetcher, onDebug: (message) => debug.push(message),
-    })
+    const balance = await fetchTraeCnCreditBalance(
+      makeCredential(), TRAE_CN, TRAE_CN_POOL_UNIVERSAL, {
+        fetcher, onDebug: (message) => debug.push(message),
+      },
+    )
     expect(balance).toBeNull()
     expect(debug.join('\n')).toContain('无余额信封特征字段')
   })

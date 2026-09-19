@@ -77,10 +77,9 @@ const STYLES = `
    数值 + 次要说明，而 dd 默认样式是为单行截断文本准备的。 */
 .dim-jh-metaRow dd.dim-jh-creditValue { display: flex; flex-direction: row; align-items: baseline; gap: 6px; overflow: visible; }
 .dim-jh-creditTotal { font-size: 13px; font-weight: 600; color: #1677ff; font-variant-numeric: tabular-nums; }
-/* Work 积分池：刻意用**弱化**色而不是主数字的蓝色 —— Work 专属积分只在
-   TraeWork 里能花，IDE 对话只消耗通用积分；把 Work 也渲染成高亮蓝会让用户
-   以为它同样可用于对话。 */
-.dim-jh-creditWork { font-size: 12px; color: var(--dsw-alias-label-secondary, #646a73); font-variant-numeric: tabular-nums; }
+/* 曾经有一个 `.dim-jh-creditWork`（Work 池的弱化色数字），随「通用 X / Work Y」
+   两段式渲染一起删除：分池后每个面板只显示自己那一个池，同一处不会再出现
+   两个池的数字，也就没有「哪个数字该弱化」的问题。 */
 .dim-jh-creditPackages { font-size: 11px; color: var(--dsw-alias-label-tertiary, #8f959e); }
 /* 已失效额度：弱化的橙色提示，与主数值的蓝色明确区分 */
 .dim-jh-creditExpired { font-size: 11px; color: #b45309; }

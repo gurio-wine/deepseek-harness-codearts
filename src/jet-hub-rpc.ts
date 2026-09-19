@@ -43,9 +43,12 @@ import { isTraeCnJunkModelId } from './trae-cn-models.js'
 import type { TraeCnCredential, TraeCnPendingLogin } from './trae-cn-oauth.js'
 import type { TraeCnProduct } from './trae-cn-product.js'
 import {
+  TRAE_CN_POOL_UNIVERSAL,
+  TRAE_CN_POOL_WORK,
   claimTraeCnDailyCheckin,
   fetchTraeCnCheckinStatus,
   fetchTraeCnCreditBalance,
+  type TraeCnPoolId,
 } from './trae-cn-credits.js'
 import {
   resetAccount,
@@ -163,6 +166,36 @@ export function accountCredentialRefName(provider: string, suffix: string): stri
 export function poolProviderFor(provider: string): string {
   if (provider === TRAE_CN_WORK.id) return TRAE_CN_WORK.poolProviderId
   return provider
+}
+
+/**
+ * 面板 id → **积分池**（余额显示口径；未映射的 provider 取通用池）。
+ *
+ * ## 与 {@link poolProviderFor} 是**两个不同的问题**，不要合并
+ *
+ * | 问题 | 函数 | `trae-cn` | `trae-cn-work` |
+ * |---|---|---|---|
+ * | **查谁的账号 / 打哪个端点** | {@link poolProviderFor} | `trae-cn` | `trae-cn`（映射过去） |
+ * | **显示哪个积分池** | 本函数 | 通用池（0） | Work 池（1） |
+ *
+ * 前者必须把两个面板映射到**同一个键**（它们查的就是同一批账号与同一个端点），
+ * 后者必须把它们**分成两个池**（各自只能花自己那个）。把两者混为一谈，就会
+ * 出现「两个面板显示同一个池」——而且**不报错**：数字看着正常，只是 Work 面板
+ * 显示的是它花不掉的那笔钱。
+ *
+ * ## 语义锚点
+ *
+ * **面板显示的数字 = 该 provider 实际能花的池**：Trae CN 面板显示通用池
+ * （IDE 对话扣的），Trae CN Work 面板显示 Work 池（TraeWork 网页版能花的）。
+ * 两个池互不通用，故各自只显示自己那一个。
+ *
+ * 取通用池是**默认值而非兜底猜测**：本函数目前只被 Trae 的余额分支调用，
+ * 而该分支的守卫是 `provider === TRAE_CN.id`，即调用方只可能是 `trae-cn` 或
+ * `trae-cn-work`；写成「非 Work 即通用」使将来新增的 Trae 路径默认看到
+ * IDE 那个池（本插件主路径消耗的池），而不是看到一个空池。
+ */
+export function traeCnPoolFor(provider: string): TraeCnPoolId {
+  return provider === TRAE_CN_WORK.id ? TRAE_CN_POOL_WORK : TRAE_CN_POOL_UNIVERSAL
 }
 
 /** 解析 Buddy 凭据 JSON；解析失败返回 undefined。 */
@@ -1067,8 +1100,8 @@ function registerJetHubEndpoints(
       case 'credits.balances': {
         const req = payload as RpcCreditsBalancesRequest
         // **Account Hub 的 Work 面板就靠这一行拿到余额**：`trae-cn-work` →
-        // `trae-cn`，同一批账号、同一个端点、同一份双池返回。刻意不新写一套
-        // Work 专用逻辑 —— 余额是账号属性，不是路径属性。
+        // `trae-cn`，同一批账号、同一个端点。刻意不新写一套 Work 专用逻辑
+        // —— 余额**账号**属性是共用的，但**显示哪个池**是路径属性，见下。
         const provider = poolProviderFor(req.provider)
         const accounts = await pool.listAccounts(provider)
         if (provider === LOBSTERAI.id) {
@@ -1080,12 +1113,16 @@ function registerJetHubEndpoints(
           return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
         }
         if (provider === TRAE_CN.id) {
+          // ⚠️ 选池用 **`req.provider`（面板 id）而不是上面映射后的 `provider`**：
+          // 两个面板查的是同一份响应，但**显示的是各自能花的池** —— Trae CN 面板
+          // 显示通用池（IDE 对话扣的），Trae CN Work 面板显示 Work 池（TraeWork
+          // 能花的）。若误用 `provider`，两个面板都会显示通用池，而 Work 面板
+          // 的数字将永远不是它实际能花的钱（静默且方向一致地错）。
+          const pool = traeCnPoolFor(req.provider)
           const values = await collectCreditBalances<TraeCnCredential, TraeCnProduct>(accounts, TRAE_CN, {
             resolve: (ref) => ctx.credentials.resolve(ref),
-            // 双池拆分（通用 / Work）由 fetchTraeCnCreditBalance 完成：它的
-            // 返回值是 `CreditBalance` 的超集，故能直接喂给共用的收集器与卡片。
             fetchBalance: (credential, product) =>
-              fetchTraeCnCreditBalance(credential, product, { onDebug: (msg) => ctx.logger?.info?.(msg) }),
+              fetchTraeCnCreditBalance(credential, product, pool, { onDebug: (msg) => ctx.logger?.info?.(msg) }),
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
           return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }

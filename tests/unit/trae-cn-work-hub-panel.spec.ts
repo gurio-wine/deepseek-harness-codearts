@@ -17,6 +17,19 @@
  * `registerJetHubRpc` 注册出来的 HTTP 处理器来断言**真实分派行为**，而不是
  * 断言源码里出现过某个字符串。
  *
+ * ## 余额上挂着**两个方向相反**的映射
+ *
+ * `credits.balances` 是唯一同时需要两者的端点：
+ *
+ * | 问题 | 函数 | `trae-cn` | `trae-cn-work` |
+ * |---|---|---|---|
+ * | 查谁的账号 / 打哪个端点 | `poolProviderFor` | `trae-cn` | `trae-cn`（映射过去） |
+ * | 显示哪个积分池 | `traeCnPoolFor` | 通用池（0） | Work 池（1） |
+ *
+ * 前者要「合」（同批账号），后者要「分」（各显示自己花得掉的那笔）。写反任何
+ * 一个都不报错：账号查不到是面板空白，池选错是数字看着正常但根本不是这个面板
+ * 能花的钱。故下面两组断言成对出现，锁死「两个映射各管一件事」。
+ *
  * ## 另外两个反向断言
  *
  * 「映射到位」与「映射过头」只差一行，故同时钉死：
@@ -27,8 +40,14 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { registerJetHubRpc, accountCredentialRefName, poolProviderFor } from '../../src/jet-hub-rpc.js'
+import {
+  registerJetHubRpc,
+  accountCredentialRefName,
+  poolProviderFor,
+  traeCnPoolFor,
+} from '../../src/jet-hub-rpc.js'
 import { TRAE_CN_WORK } from '../../src/trae-cn-work-product.js'
+import { TRAE_CN_POOL_UNIVERSAL, TRAE_CN_POOL_WORK } from '../../src/trae-cn-credits.js'
 import type { ProviderAccountEntry } from '../../src/types.js'
 import type { TraeCnCredential } from '../../src/trae-cn-oauth.js'
 
@@ -199,6 +218,29 @@ describe('poolProviderFor：面板 id → 账号池键的唯一收敛点', () =>
   })
 })
 
+describe('traeCnPoolFor：面板 id → 积分池（与池键映射**方向相反**）', () => {
+  it('trae-cn → 通用池，trae-cn-work → Work 池', () => {
+    expect(traeCnPoolFor('trae-cn')).toBe(TRAE_CN_POOL_UNIVERSAL)
+    expect(traeCnPoolFor('trae-cn-work')).toBe(TRAE_CN_POOL_WORK)
+    // 两个池必须是不同的值 —— 写成同一个常量（如复制粘贴漏改）会让两个面板
+    // 显示同一个数字，且**不报错**。
+    expect(TRAE_CN_POOL_UNIVERSAL).not.toBe(TRAE_CN_POOL_WORK)
+  })
+
+  it('这两个映射是**两个不同的问题**，不能互相顶替', () => {
+    // 同一个面板 id 在两个函数下得到**不同**的答案，这正是它们必须分开的理由：
+    //   - `poolProviderFor` 答「查谁的账号」（两个面板同一个答案）；
+    //   - `traeCnPoolFor`   答「显示哪个池」（两个面板必须是不同答案）。
+    // 若有人「顺手统一」成一个函数，必然有一边错，而且是静默的。
+    expect(poolProviderFor('trae-cn-work')).toBe('trae-cn')
+    expect(traeCnPoolFor('trae-cn-work')).toBe(TRAE_CN_POOL_WORK)
+    expect(traeCnPoolFor('trae-cn-work')).not.toBe(traeCnPoolFor('trae-cn'))
+    // 未映射的 provider 取通用池：本函数只被 Trae 余额分支调用（守卫是
+    // `provider === TRAE_CN.id`），默认落在本插件主路径消耗的那个池上。
+    expect(traeCnPoolFor('mystery')).toBe(TRAE_CN_POOL_UNIVERSAL)
+  })
+})
+
 describe('Work 面板列出的 Trae CN 账号', () => {
   it('account.list 用 `trae-cn-work` 请求，返回的是 provider=trae-cn 的那批账号', async () => {
     const h = makeHarness([entry('a'), entry('b', false)])
@@ -281,19 +323,34 @@ describe('Work 面板的积分余额', () => {
     }), { status: 200 })
   }
 
-  it('credits.balances 收到 trae-cn-work 时返回**同一批账号**的双池余额', async () => {
+  it('credits.balances 收到 trae-cn-work 时返回**同一批账号**的 **Work 池**余额', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: unknown) => respond(String(url))))
     const h = makeHarness([entry('a')])
     const result = await h.call('credits.balances', { provider: 'trae-cn-work' })
     expect(result.ok, result.error?.message).toBe(true)
     const value = result.value as {
-      accounts: Array<{ accountId: string; balance: { total: number; workTotal: number } | null }>
+      accounts: Array<{ accountId: string; balance: { total: number; packages: Array<{ name: string }> } | null }>
     }
     // 映射生效的证据：账号确实查到了（没映射的话这里是空数组）。
     expect(value.accounts).toHaveLength(1)
     expect(value.accounts[0]!.accountId).toBe('a')
-    expect(value.accounts[0]!.balance!.total).toBe(154.22)
-    expect(value.accounts[0]!.balance!.workTotal).toBe(2000)
+    // ⚠️ 数字是 **Work 池**（2000），不是通用池的 154.22 —— Work 面板显示的是
+    // 它自己那条路径实际能花的钱。资源包同样只含本池。
+    expect(value.accounts[0]!.balance!.total).toBe(2000)
+    expect(value.accounts[0]!.balance!.packages.map((pkg) => pkg.name)).toEqual(['Work礼包'])
+    expect(h.listAccountsCalls).toEqual(['trae-cn'])
+  })
+
+  it('同一份响应在 Trae CN 面板上显示的是通用池（选池用面板 id、不是映射后的池键）', async () => {
+    // `credits.balances` 上挂着两个**方向不同**的映射：账号池键要映射
+    // （`trae-cn-work` → `trae-cn`，否则查不到账号），显示池**不能**用映射后的
+    // 值（否则两个面板都显示通用池，Work 面板的数字永远不是它能花的钱）。
+    // 这条与上一条成对：它们一起把「两个映射各管一件事」钉死。
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => respond(String(url))))
+    const h = makeHarness([entry('a')])
+    const result = await h.call('credits.balances', { provider: 'trae-cn' })
+    const value = result.value as { accounts: Array<{ balance: { total: number } }> }
+    expect(value.accounts[0]!.balance.total).toBe(154.22)
     expect(h.listAccountsCalls).toEqual(['trae-cn'])
   })
 

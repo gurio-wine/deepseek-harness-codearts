@@ -72,13 +72,22 @@ Work **没有独立登录**：账号、凭据（`TRAE_CN_ACCOUNT_*`）、限流�
 | 项 | Trae CN Work 面板 |
 |---|---|
 | 账号列表 | **与 Trae CN 完全相同**（同批 `TRAE_CN_ACCOUNT_*`、同一套限流切换） |
-| 积分行 / 「刷新积分」 | ✓ 双池「通用 X / Work Y」（同一端点、同一份返回） |
+| 积分行 / 「刷新积分」 | ✓ **只显示 Work 池**的单个数字与 Work 池资源包（同一端点、同一批账号） |
 | 「一键领取积分」 | ✗ **刻意不渲染** —— 签到留在 Trae CN 面板 |
 | 「+ 新建账号」 | ✗ **刻意不渲染** —— 改为一常驻提示行（`PROVIDERS` 条目的可选字段 `loginHint`） |
 | 卡片操作（刷新 / 删除 / 启停 / 重测 / 重置） | ✓ 照常（按 accountId / credentialRef 操作，与面板 id 无关） |
 | 「显示列表」 | ✓ 作用于 **`trae-cn-work` 键**（两池模型不重合，黑名单必须分开） |
 
 **面板 id → 账号池键的映射收敛在 `src/jet-hub-rpc.ts` 的 `poolProviderFor()` 一处**（客户端不做映射，发的就是面板 id）。它取代了积分三端点原先硬编码的 `req.provider === TRAE_CN.id`，取值引用 `TraeCnWorkProduct.poolProviderId` 而**不是**再抄一份 `'trae-cn'` 字面量。应用点六处：`account.list` / `account.retestAll` / `account.resetAll` / `credits.status` / `credits.claimAll` / `credits.balances`。
+
+⚠️ **`credits.balances` 上还挂着第二个、方向相反的映射 `traeCnPoolFor()`**（同文件）：它按**面板 id** 决定**显示哪个积分池**（`trae-cn` → 通用池 0、`trae-cn-work` → Work 池 1），是 `fetchTraeCnCreditBalance` 的第三个实参。两个映射答的是**两个不同的问题**，不可互相顶替、更不可合并：
+
+| 问题 | 函数 | `trae-cn` | `trae-cn-work` |
+|---|---|---|---|
+| 查谁的账号 / 打哪个端点 | `poolProviderFor()` | `trae-cn` | `trae-cn`（映射过去） |
+| **显示哪个积分池** | `traeCnPoolFor()` | 通用池（0） | Work 池（1） |
+
+用池键（映射后的 `provider`）选池 → 两个面板都显示通用池，Work 面板的数字永远不是它能花的钱；用面板 id 查账号 → 面板空白。**两个方向都不报错**。
 
 ⚠️ **刻意不映射的两个入口**，改错都是静默的：
 
@@ -275,10 +284,11 @@ Work **没有独立登录**：账号、凭据（`TRAE_CN_ACCOUNT_*`）、限流�
 - **LobsterAI**：`GET /api/user/profile-summary` → `data.totalCreditsRemaining`；**不要**用 `/api/user/quota`（只有 `freeCreditsTotal=300`，不含活动积分，实测某账号 profile-summary 有 5297.72 而 quota 只有 300）
 - **Trae CN**：`POST /trae/api/v2/pay/web_user_ent_usage`，body `{"require_usage":true}`
   - 礼包按 **`available_endpoint` 分池**：`0`=通用积分、`1`=Work 积分
-  - **展示口径**：通用池（endpoint=0）之和是**主数字**（`total`）；Work 池走**单独的 `workTotal` 字段**，**绝不合并**。**Work 积分的准确口径**：Work 专属积分**只在 TraeWork（`work.trae.cn` 网页版 / 桌面版）能花**；TraeCode / IDE 对话（即本插件走的路径）**只消耗通用积分**；在 TraeWork 中两类积分按**到期时间先后**扣，Work 专属**仅在到期时间相同时**优先；**2026-09 起签到发的是通用积分**。合并两池会让用户以为 Work 额度能用来对话
-  - 返回类型 `TraeCnCreditBalance` 是 `CreditBalance` 的**超集**（多 `pools` / `workTotal`），故收集器能直接复用。**前端已消费 `workTotal`**：`CreditBalanceRow` 在该字段存在且可解析时渲染「通用 X / Work Y」两段（Work 用弱化色，绝不与通用相加）；其余 provider 的余额对象没有该字段，渲染逐元素不变，由 `tests/unit/jet-hub-credit-balance-row.spec.ts` 的整树深比较守住。改前端后须 `pnpm build:all` 重建 bundle
+  - **展示口径 = 按 provider 分池，一个面板一个池**：宿主按**面板 id** 选池（`src/jet-hub-rpc.ts` 的 `traeCnPoolFor()`），`fetchTraeCnCreditBalance(credential, product, pool)` 的第三个实参就是它，返回的 `total` / `packages` / `expiredTotal` **只含那一个池**（另一个池的礼包被过滤掉）。**Trae CN 面板 → 通用池（0）**、**Trae CN Work 面板 → Work 池（1）**，两边都是**单数字**，界面上不出现「通用」「Work」字样。语义锚点：**面板显示的数字 = 该 provider 实际能花的池**。⚠️ **选池必须用 `req.provider` 而不是 `poolProviderFor()` 映射后的账号池键** —— 后者把两个面板都映射到 `trae-cn`，拿它选池会让两个面板显示同一个池（不报错，但 Work 面板的数字不是它能花的钱）；两个映射方向相反、缺一不可，见上文「Trae CN Work」一节的对照表
+  - **Work 积分的准确口径**：Work 专属积分**只在 TraeWork（`work.trae.cn` 网页版 / 桌面版）能花**；TraeCode / IDE 对话（即本插件走的路径）**只消耗通用积分**；在 TraeWork 中两类积分按**到期时间先后**扣，Work 专属**仅在到期时间相同时**优先；**2026-09 起签到发的是通用积分**
+  - `TraeCnCreditBalance` 与共用的 `CreditBalance` **逐字段同构**（`type TraeCnCreditBalance = CreditBalance`），故收集器与卡片直接复用、无需任何 provider 分支。⚠️ **曾经的超集字段 `pools` / `workTotal` 与 `[Work 积分]` 包名前缀已随分池一并删除**（`traeCnPoolName()` 也删了 —— 分池后池名没有任何消费者）；前端那套「通用 X / Work Y」两段渲染同步删除，`CreditBalanceRow` 不做任何池判断，由 `tests/unit/jet-hub-credit-balance-row.spec.ts` 的整树深比较守住（含「喂进旧的双池字段也不多渲染一段」）。改前端后须 `pnpm build:all` 重建 bundle
   - **不要**用 `ug/activity/info` 的活动口径（写 200 work 实到 150 通用，口径陷阱）
-  - 包名回退链：`name` → `package_name` → `gift_name` → …（`BALANCE_NAME_FIELDS`）；非通用池的包名在 `packages` 里带 `[Work 积分]` 前缀
+  - 包名回退链：`name` → `package_name` → `gift_name` → …（`BALANCE_NAME_FIELDS`）；包名**原样透出**（分池后同一个列表里只有本池的包，曾经的 `[Work 积分]` 前缀已删除）
   - ✅ **T7 已按真机校准（2026-09-18）**：该端点响应**没有 `code` 信封**（顶层是 `is_credits_billing` / `usage_summary` / `user_entitlement_pack_list`），沿用 code 信封会让余额**恒失败**；礼包数组在**根层** `user_entitlement_pack_list`，额度嵌在 `entitlement_base_info.product_extra.package_extra.quota.credits_limit`（回退 `entitlement_base_info.quota`）减 `usage.credits_amount`（可为 `{}`，按 0 计），`available_endpoint` 也在 `entitlement_base_info` 里。候选表 + 指纹扫描 + 三级回退**全部保留作兜底**，但主路径是嵌套口径
   - ⚠️ **T8 仍待校准**：领取响应里「本次获得积分」的字段名（`TRAE_CN_CLAIM_CREDIT_FIELDS`），未命中时按 0 计并输出只含键名的调试行
 - 累加后一律 `roundCredits` 规整两位小数（多包浮点噪声会放大成 655.67000031）
@@ -298,8 +308,8 @@ Work **没有独立登录**：账号、凭据（`TRAE_CN_ACCOUNT_*`）、限流�
 | `buddy-cn` | ✓ | ✓ |
 | `buddy` | ✓ | ✗（国际版后端无签到接口） |
 | `lobsterai` | ✓ | ✓（`client-activities` 三步流程） |
-| `trae-cn` | ✓（双池，见下） | ✓（`checkin_credits` 两步 + 设备头） |
-| `trae-cn-work` | ✓（双池，与 `trae-cn` 同一批账号、同一个实现） | ✗（签到留在 Trae CN 面板，避免同账号重复领取） |
+| `trae-cn` | ✓ 通用池（IDE 路径能花的，见下） | ✓（`checkin_credits` 两步 + 设备头） |
+| `trae-cn-work` | ✓ Work 池（TraeWork 能花的；同一批账号、同一个查询实现，只是**显示另一个池**） | ✗（签到留在 Trae CN 面板，避免同账号重复领取） |
 
 > ⚠️ **改名的语义翻转点就在这里**：矩阵里 `buddy` 这个键**换了主人** ——
 > 旧 `buddy`（中国版，✓✓）让位给 `buddy-cn`，旧 `workbuddy`（国际版，✓✗）
@@ -311,7 +321,7 @@ Work **没有独立登录**：账号、凭据（`TRAE_CN_ACCOUNT_*`）、限流�
 
 - **默认关闭**：未登记的 provider 视为两项全无。新增 provider 忘登记时，最坏结果是暂时看不到积分，而不是每次打开面板都发一个必然失败的请求
 - **`trae-cn` 已登记**：全部就绪（`src/trae-cn-credits.ts` + `jet-hub-rpc.ts` 分发与三处宿主分支 + 客户端能力矩阵与 `PROVIDERS` 条目），面板显示积分行与两个积分按钮，可新建账号（`47f253f` 补齐接线）
-- **`trae-cn` 的 `balance` 是双池**：`total` 是通用池（IDE 对话实际扣的），Work 池走超集字段 `workTotal`，`CreditBalanceRow` 在该字段存在且可解析时渲染「通用 X / Work Y」，**绝不合并**（Work 专属积分只在 TraeWork 能花，合并会让用户以为它能用于对话）。其余 provider 的余额对象没有该字段，渲染路径完全不变
+- **`trae-cn` 与 `trae-cn-work` 的 `balance` 各显示自己那个池**：宿主按面板 id 选池（`traeCnPoolFor()`），Trae CN 面板显示通用池（IDE 对话实际扣的）、Trae CN Work 面板显示 Work 池（TraeWork 能花的）。两边都是**单数字**，`CreditBalanceRow` 不做任何池判断（输入与其余 provider 逐字段同构），**没有「合并两池」这个概念了** —— 同一处不会再同时出现两个池的数字
 - **门控在发请求之前**，不是在 UI 上吞错误：`loadCredits` / `claimCredits` 函数内部各有一道守卫（按钮不渲染只是 UI 便利，不是安全边界），`AccountCard` 的积分行与「刷新积分」按钮也按能力渲染
 - **历史缺陷**（用户报障）：客户端在面板挂载时对所有 provider 无条件调用 `credits.balances`，CodeArts 面板每次打开都在控制台报 `unsupported provider: codearts`，并把账号卡片的「积分」渲染成「查询失败」。后端 `productById()` 的拒绝是正确契约，不该被当成运行时故障
 - 改动能力矩阵后必须同步 `PROVIDERS` 列表：`tests/unit/credits-capabilities.spec.ts` 有一条断言锁死两者条目集合相等。**该断言的匹配器必须写成 `[a-z-]+` 而不是 `[a-z]+`** —— 后者会让带连字符的 id（`trae-cn`）在 `PROVIDERS` 里隐形，漏登记时断言反而是绿的

@@ -1,13 +1,14 @@
 /**
- * `CreditBalanceRow` 双池（通用 / Work）渲染的回归测试。
+ * `CreditBalanceRow` 渲染的回归测试。
  *
  * ## 为什么不沿用源码级断言
  *
  * 本仓库既有的前端测试都是「读源码、正则断言」（`credits-capabilities.spec.ts`、
  * `jet-hub-rpc-account-create.spec.ts`），理由是 react 不在依赖里、组件渲染不了。
- * 但**正则断言恰好无法验证本次要证明的东西**：本次的核心命题是「没有 `workTotal`
- * 的 provider 渲染逐字节不变，有的才多一项」，这是**条件分支的输出差异**，
- * 用 `toMatch(/workTotal/)` 只能证明提到过这个名字，证明不了分支正确。
+ * 但**正则断言恰好无法验证本次要证明的东西**：本次的核心命题是「余额对象里
+ * 出现任何 Trae 专属字段都不改变渲染 —— 一行永远只有一个数字」，这是**分支
+ * 是否还存在的输出差异**，用 `toMatch(/workTotal/)` 只能证明提到过这个名字，
+ * 证明不了分支已经删掉。
  *
  * 因此这里换一条路：把插件源码里的 `react` 与 `./credits-capabilities.js` 换成
  * **占位模块**后加载，直接调用纯函数 `CreditBalanceRow`。该组件的产物是一棵
@@ -151,7 +152,7 @@ function ddParts(balance: Record<string, unknown>): string[][] {
     .map(textOf)
 }
 
-/** 一个不带 Work 池的余额对象（Buddy 系 / LobsterAI 的形态）。 */
+/** 一个余额对象（所有 provider 的形态，分池后 Trae 也走这一份）。 */
 function legacyBalance(overrides: Record<string, unknown> = {}) {
   return {
     total: 247.87,
@@ -182,52 +183,69 @@ describe('CreditBalanceRow 的三种基础状态（回归护栏，非本次改�
   })
 })
 
-describe('CreditBalanceRow 的双池形态（Trae CN）', () => {
-  it('**有** workTotal 时显示「通用 X / Work Y」，且两个数不合并', () => {
-    const parts = ddParts(legacyBalance({ total: 154.22, workTotal: 2000 }))
-    // dd 的子元素依次为：通用主数字、Work 项
-    expect(parts[0]).toEqual(['通用 154.22'])
-    expect(parts[1]).toEqual(['Work 2000'])
-    // **绝不合并**：任何位置都不得出现两数之和（2154.22）。
-    // 合并会让用户以为 Work 额度能用来对话，正是本次要防的口径陷阱。
-    const all = parts.flat().join(' ')
-    expect(all).not.toContain('2154')
-    expect(all).not.toContain('2,154')
-  })
-
-  it('workTotal 为 0 也算「有 Work 池」：显示「通用 X / Work 0」，主数字明确标为通用', () => {
-    // 0 是有效信息（该账号没有 Work 积分），不是缺失。此时把主数字标成「通用」
-    // 反而更清楚，避免用户把那 0 误读成通用余额。
-    const parts = ddParts(legacyBalance({ total: 10, workTotal: 0 }))
-    expect(parts[0]).toEqual(['通用 10'])
-    expect(parts[1]).toEqual(['Work 0'])
-  })
-
-  it('workTotal 为 null / undefined / NaN 时**不**切双池（判据是字段可解析）', () => {
-    for (const absent of [undefined, null, Number.NaN]) {
-      const parts = ddParts(legacyBalance({ total: 88, workTotal: absent }))
-      // 只有主数字，既没有 Work 项，主数字也不加「通用」前缀 —— 与登记前一致。
-      expect(parts, String(absent)).toEqual([['88']])
+describe('CreditBalanceRow 永远是单数字（分池后无 provider 专属分支）', () => {
+  it('余额对象带 Trae 的旧双池字段时**不**多渲染任何一段，仍是一个数字', () => {
+    // 分池后 `fetchTraeCnCreditBalance` 只返回本池，`workTotal` / `pools` 已从
+    // 返回类型里删除。这条断言用**旧字段强行喂进来**：组件若还残留任何
+    // `workTotal` 分支，这里就会多出「通用 X」前缀与「Work Y」那一段。
+    for (const stale of [
+      { workTotal: 2000 },
+      { workTotal: 0 },
+      { workTotal: 2000, pools: [{ endpoint: 0, name: '通用积分', total: 247.87, packages: [] }] },
+    ]) {
+      const parts = ddParts(legacyBalance(stale))
+      expect(parts, JSON.stringify(stale)).toEqual([['247.87']])
     }
   })
 
-  it('Work 项用独立 class，不套用通用主数字的高亮样式', () => {
-    // Work 专属积分只在 TraeWork 能花（IDE 对话只消耗通用池）；
-    // Work 若也渲染成高亮蓝，用户会以为它同样可用于对话。
-    const node = CreditBalanceRow({
-      balance: legacyBalance({ total: 1, workTotal: 2 }),
-    }) as RowNode
-    const dd = node.children[1] as RowNode
-    const work = dd.children[1] as RowNode
-    expect(work.type).toBe('span')
-    expect(work.props.className).toBe('dim-jh-creditWork')
-    // 主数字仍是通用的高亮样式，两者在样式上就是分开的。
-    expect((dd.children[0] as RowNode).props.className).toBe('dim-jh-creditTotal')
+  it('无论余额是哪个池的数字，渲染都逐元素相同（渲染层不知道池的存在）', () => {
+    // Trae CN 面板拿到的是通用池之和、Trae CN Work 面板拿到的是 Work 池之和，
+    // 两者在**渲染层**是完全同构的输入 —— 「显示哪个池」的决定在宿主侧的
+    // `traeCnPoolFor()`，组件不做也不该做任何池判断。
+    const universal = snapshot(CreditBalanceRow({ balance: legacyBalance({ total: 154.22 }) }))
+    const work = snapshot(CreditBalanceRow({ balance: legacyBalance({ total: 154.22 }) }))
+    expect(work).toEqual(universal)
+    expect(JSON.stringify(universal)).not.toContain('通用')
+    expect(JSON.stringify(universal)).not.toContain('Work')
+  })
+
+  it('资源包列表只渲染传进来的那些包（过滤在宿主侧完成）', () => {
+    // 分池后 `packages` 只含本池的包，且包名**不带** `[Work 积分]` 前缀
+    // （那个前缀是为两池混排准备的，已随分池删除）。这里钉死渲染层不加料：
+    // 名字原样显示、条数就是数组长度。
+    const parts = ddParts(legacyBalance({
+      total: 30,
+      packages: [
+        { name: 'Work礼包', remaining: 20, total: 50, active: true, cycleEndTime: '' },
+        { name: 'Work礼包B', remaining: 10, total: 50, active: true, cycleEndTime: '' },
+      ],
+    }))
+    expect(parts[0]).toEqual(['30'])
+    // 第二段是「2/2 个资源包有效」—— 计数用的就是传进来的数组
+    expect(parts[1]).toEqual(['2/2 个资源包有效'])
+  })
+
+  it('Work 项的独立 class 已随两段式渲染一并删除（样式表里不得残留死类）', () => {
+    // `dim-jh-creditWork` 曾经是 Work 数字的弱化色。留着它等于留着一个
+    // 再无引用的死类，而那正是「哪天有人照着旧代码把双池加回来」的邀请。
+    const clientSource = readFileSync(
+      resolve(here, '../../plugin-src/client/jet-hub.js'), 'utf8',
+    )
+    const stylesSource = readFileSync(
+      resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8',
+    )
+    // 正文里不得出现该 class 的**使用**（注释中叙述历史是允许的）。
+    const codeLines = clientSource
+      .split('\n')
+      .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+      .join('\n')
+    expect(codeLines).not.toContain('dim-jh-creditWork')
+    expect(stylesSource).not.toMatch(/\.dim-jh-creditWork\s*\{/)
   })
 })
 
-describe('CreditBalanceRow 对其他 provider 是纯增量', () => {
-  it('余额对象**没有** workTotal 时，渲染结果与登记前逐元素一致', () => {
+describe('CreditBalanceRow 的基础渲染（回归护栏）', () => {
+  it('余额对象不带任何 Trae 字段时，渲染结果逐元素不变', () => {
     // 这是「别动其他 provider 的渲染」这条约束的可执行形式：期望值写死成
     // 改动前的树，任何意外新增的节点都会让这条断言失败。
     expect(snapshot(CreditBalanceRow({
