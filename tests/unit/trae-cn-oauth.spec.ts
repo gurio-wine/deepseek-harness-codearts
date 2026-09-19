@@ -30,6 +30,7 @@ import {
   serializeTraeCnCredential,
   TRAE_CN_CALLBACK_CORS_HEADERS,
   traeCnAccessHeaders,
+  traeCnCheckinDeviceId,
   traeCnCredentialExpiresAtMs,
   type TraeCnCredential,
   type TraeCnLoginPrepareOptions,
@@ -271,14 +272,14 @@ describe('设备标识生成（形态即风控）', () => {
     // 真机形态：2996599860772203。**不能用 hex32/UUID**。
     //
     // ⚠️ 本断言测的是**登录 URL 的 `device_id`**（`generateTraeCnDeviceId`）——
-    // 那个字段进授权页与 authCode 交换，形态由**登录握手**要求。它与签到头
-    // `x-device-id`（凭据里的 `BoundDeviceID`）是**两个位置**：后者服务端
-    // **不校验形态**（T9 实测，见 `tests/unit/trae-cn-credits.spec.ts`）。
+    // 那个字段进授权页与 authCode 交换，形态由**登录握手**要求。
     //
-    // 另：早先这条注释把「形态不符」的后果记成「会触发 9074 风控」，**归因错误**
-    // —— 9074 的成因与设备号形态无关（2026-09-20 重新定性为**活动级当日名额
-    // 限制或账号侧风控**，见 `src/trae-cn-errors.ts` 的 `TRAE_CN_BACKOFF_CODES`）。
-    // 断言本身没变（登录 URL 的 16 位形态要求仍然成立），只修了注释语义。
+    // ⚠️ **2026-09-20 修正**：它**同时就是签到认的设备身份** —— 该号现在会被
+    // 持久化进凭据的 `checkin_device_id`（见 `traeCnCheckinDeviceId`）。早先把
+    // 它说成「只是登录握手参数、与签到头无关」是**错的**，也正是 9074 的根因
+    // （签到发了 exchange 返回的 `BoundDeviceID`，与登录注册的设备不同源）。
+    //
+    // 断言本身没变（16 位形态要求仍然成立），改的是它承载的语义。
     expect(generateTraeCnDeviceId()).toMatch(/^\d{16}$/)
   })
 
@@ -540,6 +541,7 @@ describe('凭据五件套：序列化往返与判定', () => {
     user_id: '1435281906741923',
     client_id: 'ono9krqynydwx5',
     device_id: REAL_BOUND_DEVICE_ID,
+    checkin_device_id: REAL_DEVICE_ID,
     machine_id: REAL_MACHINE_ID,
     device_id_source: 'exchange-bound-device-id',
     expires_at: String(Date.now() + 7200_000),
@@ -557,6 +559,15 @@ describe('凭据五件套：序列化往返与判定', () => {
       device_id: REAL_BOUND_DEVICE_ID,
       machine_id: REAL_MACHINE_ID,
     })
+  })
+
+  it('checkin_device_id 经 JSON 往返后不变（签到设备身份必须持久化）', () => {
+    // 9074 真根因修复：该字段是「登录时注册的 16 位设备号」，一旦丢失就无法
+    // 恢复（生成器随机、服务端不回传），故往返必须逐字保持。
+    const parsed = parseTraeCnCredential(serializeTraeCnCredential(credential))
+    expect(parsed!.checkin_device_id).toBe(REAL_DEVICE_ID)
+    // 两个设备号**刻意不同值**：用例必须能区分「发了哪一个」。
+    expect(parsed!.checkin_device_id).not.toBe(parsed!.device_id)
   })
 
   it('access_token 是账号池反查身份所需的字段（缺它判为损坏）', () => {
@@ -601,6 +612,86 @@ describe('凭据五件套：序列化往返与判定', () => {
 
   it('已过期凭据判定为过期', () => {
     expect(isTraeCnExpired({ ...credential, expires_at: String(Date.now() - 1000) })).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// 签到设备号解析（9074 真根因修复，2026-09-20）
+// ─────────────────────────────────────────────────────────────
+
+describe('traeCnCheckinDeviceId（签到头 x-device-id 的来源）', () => {
+  const base: TraeCnCredential = {
+    access_token: 'AT',
+    refresh_token: 'RT',
+    user_id: 'u-1',
+    client_id: 'ono9krqynydwx5',
+    device_id: REAL_BOUND_DEVICE_ID,
+    checkin_device_id: REAL_DEVICE_ID,
+    machine_id: REAL_MACHINE_ID,
+    device_id_source: 'exchange-bound-device-id',
+  }
+
+  it('优先取 checkin_device_id（登录时注册的 16 位号）', () => {
+    expect(traeCnCheckinDeviceId(base)).toBe(REAL_DEVICE_ID)
+    expect(traeCnCheckinDeviceId(base)).toMatch(/^\d{16}$/)
+  })
+
+  it('旧凭据（字段缺失 / 空串）降级为 BoundDeviceID —— 如实降级不伪造', () => {
+    // 该字段引入前落盘的 JSON 里根本没有这个键（运行时是 undefined，
+    // 尽管类型标注为 string）—— 这是**最容易写错**的一种：
+    // 按 `!== undefined` 判会把 undefined 当成有效值发出去。
+    const missingKey = { ...base } as Partial<TraeCnCredential>
+    delete missingKey.checkin_device_id
+    expect(traeCnCheckinDeviceId(missingKey as TraeCnCredential)).toBe(REAL_BOUND_DEVICE_ID)
+
+    expect(traeCnCheckinDeviceId({ ...base, checkin_device_id: '' })).toBe(REAL_BOUND_DEVICE_ID)
+    expect(traeCnCheckinDeviceId({ ...base, checkin_device_id: undefined as unknown as string }))
+      .toBe(REAL_BOUND_DEVICE_ID)
+  })
+
+  it('两者都缺时返回空串（如实留空，不发明值）', () => {
+    expect(traeCnCheckinDeviceId({ ...base, checkin_device_id: '', device_id: '' })).toBe('')
+    // 反向护栏：绝不拿 machine_id 折算一个假的 16 位号（README 禁止伪造设备身份）。
+    expect(traeCnCheckinDeviceId({ ...base, checkin_device_id: '', device_id: '' }))
+      .not.toBe(REAL_MACHINE_ID.slice(0, 16))
+  })
+})
+
+describe('buildTraeCnCredential 的签到设备号落盘', () => {
+  it('传入 checkinDeviceId 时原样落盘', () => {
+    const credential = buildTraeCnCredential({
+      accessToken: 'AT', refreshToken: 'RT', userId: 'u-1', clientId: 'cid',
+      deviceId: REAL_BOUND_DEVICE_ID, deviceIdSource: 'exchange-bound-device-id',
+      machineId: REAL_MACHINE_ID, checkinDeviceId: REAL_DEVICE_ID,
+    })
+    expect(credential.checkin_device_id).toBe(REAL_DEVICE_ID)
+    expect(credential.device_id).toBe(REAL_BOUND_DEVICE_ID)
+  })
+
+  it('未传 checkinDeviceId 时留空串（键存在，便于与老凭据区分）', () => {
+    // 「粘贴 refreshToken」这类没有登录 URL 的入口属于此列：它拿不到那个号。
+    const credential = buildTraeCnCredential({
+      accessToken: 'AT', refreshToken: 'RT', userId: 'u-1', clientId: 'cid',
+      deviceId: REAL_BOUND_DEVICE_ID, deviceIdSource: 'exchange-bound-device-id',
+      machineId: REAL_MACHINE_ID,
+    })
+    expect(credential.checkin_device_id).toBe('')
+    // 键必须**存在**（不是 undefined）：让「本字段为空」与「老凭据没这个键」
+    // 在存储层可区分，也让 JSON 往返形态稳定。
+    expect(Object.prototype.hasOwnProperty.call(credential, 'checkin_device_id')).toBe(true)
+  })
+
+  it('续期不覆盖已有签到设备号（身份字段一律沿用旧值）', () => {
+    const previous = buildTraeCnCredential({
+      accessToken: 'AT', refreshToken: 'RT', userId: 'u-1', clientId: 'cid',
+      deviceId: REAL_BOUND_DEVICE_ID, deviceIdSource: 'exchange-bound-device-id',
+      machineId: REAL_MACHINE_ID, checkinDeviceId: REAL_DEVICE_ID,
+    })
+    const next = applyTraeCnRefresh(previous, {
+      accessToken: futureJwt(), refreshToken: 'RT-2', userId: '', deviceId: '', nickname: '',
+    })
+    // 续期响应只带令牌，不含设备号 —— 丢了它等于把 9074 修复倒退回去。
+    expect(next.checkin_device_id).toBe(REAL_DEVICE_ID)
   })
 })
 
@@ -1067,6 +1158,8 @@ describe('completeTraeCnCallback（回调 → 凭据）', () => {
       user_id: '1435281906741923',
       client_id: 'ono9krqynydwx5',
       device_id: REAL_BOUND_DEVICE_ID,
+      // ⚠️ **签到设备号反过来**：它就是登录 URL 里的那个 16 位号（9074 修复）。
+      checkin_device_id: REAL_DEVICE_ID,
       machine_id: REAL_MACHINE_ID,
       device_id_source: 'exchange-bound-device-id',
       nickname: '河童',
@@ -1102,6 +1195,10 @@ describe('completeTraeCnCallback（回调 → 凭据）', () => {
     // 该分支没有 exchange 响应 ⇒ 没有 BoundDeviceID ⇒ 如实留空。
     // 回归点：早先实现会拿 machine_id 折算一个假的 16 位号顶上（伪造设备身份）。
     expect(credential.device_id).toBe('')
+    // ⚠️ 但**签到设备号照常落盘**：它来自本次登录 URL，本分支同样拿得到。
+    // 两条信息互不依赖 —— 这正是「设备身份」与「服务端绑定标识」的分野。
+    expect(credential.checkin_device_id).toBe(session.deviceId)
+    expect(credential.checkin_device_id).toMatch(/^\d{16}$/)
   })
 
   it('两条分支都不带时抛错，错误里带脱敏后的实际参数', async () => {
@@ -1201,6 +1298,10 @@ describe('prepareTraeCnLogin / awaitCredential（两段式）', () => {
     expect(credential.machine_id).toBe(loginParam(session.loginUrl, 'machine_id'))
     expect(credential.machine_id).toMatch(/^[0-9a-f]{64}$/)
     expect(loginParam(session.loginUrl, 'device_id')).toMatch(/^\d{16}$/)
+    // ⚠️ **签到设备号 = 登录 URL 里的那个 16 位号**（9074 真根因修复）：
+    // 它是活动系统认的设备身份，必须与登录注册值逐字一致地落盘。
+    expect(credential.checkin_device_id).toBe(loginParam(session.loginUrl, 'device_id'))
+    expect(credential.checkin_device_id).not.toBe(REAL_BOUND_DEVICE_ID)
   })
 
   it('回调返回 CORS 头（浏览器跨域回调时不被静默丢弃）', async () => {

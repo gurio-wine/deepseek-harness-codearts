@@ -29,14 +29,18 @@ import { TRAE_CN_BACKOFF_CODES, recordsTraeCnCooldown } from '../../src/trae-cn-
 import type { TraeCnCredential } from '../../src/trae-cn-oauth.js'
 
 /**
- * 设备号（签到 `x-device-id` 的来源）。
+ * 签到设备号（`x-device-id` 的来源）——**登录时注册的 16 位号**。
  *
- * ✅ **T9 已校准（2026-09-18）**：服务端**不校验设备号形态** —— 16 位十进制号、
- * `BoundDeviceID`（14 位字母数字）、空串返回逐字节相同，只有完全不带设备头时
- * 才 `did_checked_in:false`。故本用例只断言「凭据里的值被原样发出去」，
- * 不假设服务端接受哪种形态。
+ * ⚠️ **T9 第三次修正（2026-09-20）**：T9 原结论「服务端不校验设备号形态」观测
+ * 成立但**推论错了** —— 不校验**形态** ≠ 不校验**设备**。服务端按 `x-device-id`
+ * 做设备维度记账，只有登录时注册的那台设备被认可（单变量 A/B：仅换该头即让
+ * `did_checked_in` 由 false 翻转为 true）。故本常量现在模拟
+ * `checkin_device_id`，与 `device_id`（`BoundDeviceID`）**刻意不同值** ——
+ * 用例要能区分「发了哪一个」。
  */
-const DEVICE_ID = '7212345678901234'
+const CHECKIN_DEVICE_ID = '2996599860772203'
+/** 服务端绑定标识（`BoundDeviceID`，14 位字母数字）——**不再**用作签到头。 */
+const BOUND_DEVICE_ID = 'kxrq746j3w0l86'
 
 function makeCredential(overrides: Partial<TraeCnCredential> = {}): TraeCnCredential {
   return {
@@ -44,7 +48,8 @@ function makeCredential(overrides: Partial<TraeCnCredential> = {}): TraeCnCreden
     refresh_token: 'RT',
     user_id: 'uid-1',
     client_id: 'ono9krqynydwx5',
-    device_id: DEVICE_ID,
+    device_id: BOUND_DEVICE_ID,
+    checkin_device_id: CHECKIN_DEVICE_ID,
     machine_id: 'a'.repeat(32),
     device_id_source: 'exchange-bound-device-id',
     nickname: '测试',
@@ -159,13 +164,17 @@ describe('Trae CN 签到端点常量', () => {
   })
 })
 
-describe('traeCnCreditsHeaders（设备头构造）', () => {
-  it('x-device-id 来自凭据里的 Aha 设备号', () => {
+describe('traeCnCreditsHeaders（设备头与官方头集对齐）', () => {
+  it('x-device-id 用登录时注册的 16 位号，**不是** BoundDeviceID', () => {
     const headers = traeCnCreditsHeaders(makeCredential(), TRAE_CN)
-    expect(headers['x-device-id']).toBe(DEVICE_ID)
+    expect(headers['x-device-id']).toBe(CHECKIN_DEVICE_ID)
+    // 反向护栏：BoundDeviceID 绝不能出现在签到头里（9074 的真根因就是它）。
+    expect(headers['x-device-id']).not.toBe(BOUND_DEVICE_ID)
+    // 形态：16 位纯十进制（与登录 URL 的 device_id 同源）。
+    expect(headers['x-device-id']).toMatch(/^\d{16}$/)
   })
 
-  it('设备四件套齐全（claim 缺一个就回 9004）', () => {
+  it('设备头齐全（claim 缺一个就回 9004）', () => {
     const headers = traeCnCreditsHeaders(makeCredential(), TRAE_CN)
     expect(headers['x-device-id']).toBeTruthy()
     expect(headers['x-device-type']).toBe('windows')
@@ -173,18 +182,48 @@ describe('traeCnCreditsHeaders（设备头构造）', () => {
     expect(headers['x-app-version']).toBe(TRAE_CN_APP_VERSION)
   })
 
-  it('鉴权三头同值，且不是 Bearer', () => {
+  it('鉴权头只有 Authorization: Cloud-IDE-JWT（官方 claim 头集）', () => {
     const headers = traeCnCreditsHeaders(makeCredential(), TRAE_CN)
     expect(headers.Authorization).toBe('Cloud-IDE-JWT AT')
-    expect(headers['X-Ide-Token']).toBe('AT')
-    expect(headers['X-Cloudide-Token']).toBe('AT')
     expect(headers.Authorization).not.toContain('Bearer')
+    expect(headers['Content-Type']).toBe('application/json')
   })
 
-  it('Origin / Referer 取产品 portalBase（编译期常量，不从凭据推断）', () => {
+  it('删除官方不发的 5 个头（Accept / Origin / Referer / X-Ide-Token / X-Cloudide-Token）', () => {
+    // 官方 claim 的头集逐字来自 bundle：`bb()` 只给 Content-Type，
+    // `mixAuthorization` 只加 Authorization，`fb()` 只加 5 个设备头。
+    // 本插件此前多发这 5 个；单变量 A/B 已证明它们**不影响**结果，
+    // 删除是「对齐官方形态」而不是「修复」—— 故用严格断言钉死。
     const headers = traeCnCreditsHeaders(makeCredential(), TRAE_CN)
-    expect(headers.Origin).toBe('https://www.trae.cn')
-    expect(headers.Referer).toBe('https://www.trae.cn')
+    for (const removed of ['Accept', 'Origin', 'Referer', 'X-Ide-Token', 'X-Cloudide-Token']) {
+      expect(headers, removed).not.toHaveProperty(removed)
+    }
+    // 头集**完全等于**官方那 6 个（多一个少一个都算漂移）。
+    expect(Object.keys(headers).sort()).toEqual([
+      'Authorization', 'Content-Type',
+      'x-app-version', 'x-device-id', 'x-device-type', 'x-os-version',
+    ])
+  })
+
+  it('刻意**不**发 x-device-brand（官方条件性发，我们不猜硬件型号）', () => {
+    // 官方：`i?.device_model && (e["x-device-brand"]=i.device_model)` —— 条件性。
+    // 本插件拿不到硬件型号，按约定如实**不发**，而不是发空串冒充「官方也发」。
+    const headers = traeCnCreditsHeaders(makeCredential(), TRAE_CN)
+    expect(headers).not.toHaveProperty('x-device-brand')
+  })
+
+  it('旧凭据（无 checkin_device_id）降级用 BoundDeviceID —— 如实降级不伪造', () => {
+    // 该字段引入前落盘的凭据 JSON 里根本没有这个键。
+    const legacy = makeCredential({ checkin_device_id: undefined as unknown as string })
+    const headers = traeCnCreditsHeaders(legacy, TRAE_CN)
+    expect(headers['x-device-id']).toBe(BOUND_DEVICE_ID)
+    // 不拿 machine_id 折算一个假的 16 位号顶上（README 禁止伪造设备身份）。
+    expect(headers['x-device-id']).not.toBe('a'.repeat(16))
+  })
+
+  it('两个设备号都缺时留空（不发明值）', () => {
+    const empty = makeCredential({ checkin_device_id: '', device_id: '' })
+    expect(traeCnCreditsHeaders(empty, TRAE_CN)['x-device-id']).toBe('')
   })
 
   it('不发腾讯系 / LobsterAI 的归属头', () => {
@@ -194,12 +233,13 @@ describe('traeCnCreditsHeaders（设备头构造）', () => {
     expect(Object.keys(headers).some((key) => key.startsWith('X-LobsterAI'))).toBe(false)
   })
 
-  it('请求头带设备四件套且 host 为 api.trae.cn', async () => {
+  it('请求头带设备头且 host 为 api.trae.cn', async () => {
     const { fetcher, calls } = stubFetch(happyPath())
     await fetchTraeCnCheckinStatus(makeCredential(), TRAE_CN, { fetcher })
     const headers = headersOf(calls[0]!.init)
-    expect(headers['x-device-id']).toBe(DEVICE_ID)
+    expect(headers['x-device-id']).toBe(CHECKIN_DEVICE_ID)
     expect(headers['x-device-type']).toBe('windows')
+    expect(headers['origin']).toBeUndefined()
     expect(new URL(calls[0]!.url).origin).toBe('https://api.trae.cn')
     expect(calls[0]!.init!.method).toBe('POST')
   })
@@ -563,9 +603,12 @@ describe('claim 段有界重试（9074 定性的配套处置）', () => {
     const outcome = await claimWithFakeTimers({ fetcher })
     expect(calls.filter((call) => call.url.includes('/claim'))).toHaveLength(3)
     expect(outcome).toMatchObject({ kind: 'failed', code: 9074, logid: 'LOGID-LAST' })
-    // 文案里带上新定性：不能只说「稍后再试」（实测证明那不是几秒钟的事）。
+    // 文案里带上新定性：不是「等名额」，而是指向**设备身份**这个真根因，
+    // 并给出可执行动作（重新登录以登记设备身份）。
     expect((outcome as { message: string }).message)
-      .toContain('该活动可能已达当日名额，请稍后或次日再试')
+      .toContain('x-device-id')
+    expect((outcome as { message: string }).message)
+      .toContain('重新登录')
   })
 
   it('4007 触发重试（同属共享退避表里的软限流）', async () => {
@@ -629,10 +672,12 @@ describe('claim 段有界重试（9074 定性的配套处置）', () => {
   })
 })
 
-describe('9074 不记冷却徽章（定性已改为活动级容量限制）', () => {
-  it('recordsTraeCnCooldown(9074) 为 false —— 名额满不是「该模型限流 N 分钟」', () => {
-    // 徽章语义是「这个模型受限，等一会儿自动解除」。9074 是**活动级当日名额**
-    // （或账号侧风控），次日才可能恢复，且与具体模型无关 —— 记徽章是虚假信息。
+describe('9074 不记冷却徽章（定性已改为设备身份）', () => {
+  it('recordsTraeCnCooldown(9074) 为 false —— 设备身份不是「该模型限流 N 分钟」', () => {
+    // 徽章语义是「这个模型受限，等一会儿自动解除」。9074 的现行定性是
+    // **设备身份不被活动系统认可**（2026-09-20 单变量 A/B 定案）——
+    // 它与具体模型无关，且等多久都不会自愈（要么重新登录登记设备身份，
+    // 要么走后续路径），记徽章是虚假信息。
     expect(recordsTraeCnCooldown(TRAE_CN_CODE_TOO_MANY_USERS)).toBe(false)
     expect(recordsTraeCnCooldown(9074)).toBe(false)
     // 反向对照：限流码确实会记（证明上面的 false 不是「判据整体失效」）。

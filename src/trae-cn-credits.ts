@@ -17,18 +17,19 @@
  * 余额  POST {apiBase}/trae/api/v2/pay/web_user_ent_usage      body {"require_usage":true}
  * ```
  *
- * 鉴权是 `Cloud-IDE-JWT <access>`（另带两个等值 token 头，见
- * `traeCnAccessHeaders`）+ `Origin` / `Referer` = 登录门户。
+ * 鉴权是 `Authorization: Cloud-IDE-JWT <access>` + 设备头（官方 claim 头集，
+ * 见 {@link traeCnCreditsHeaders}）。
  *
  * ## 三条本协议独有的约束
  *
- * 1. **必须带设备头**：`x-device-id`（凭据里的 `device_id`，即登录 exchange
- *    返回的 `BoundDeviceID`）+ `x-device-type` / `x-os-version` / `x-app-version`。
- *    ⚠️ **T9 已校准**（2026-09-18 真机）：status / claim **都不校验设备号形态**
- *    —— 16 位十进制号、`BoundDeviceID`、空串全返回 `code:0`；完全不带设备头时
- *    `did_checked_in:false`（设备级语义的佐证）。故照常取凭据值，**不**拿
- *    `machine_id` 折算假设备号。**这是 Trae 与另外两条线最大的形态差异** ——
- *    腾讯系与 LobsterAI 都不需要设备四件套。
+ * 1. **必须带设备头**：`x-device-id`（登录时注册的 16 位号，见
+ *    {@link traeCnCheckinDeviceId}）+ `x-device-type` / `x-os-version` /
+ *    `x-app-version`。⚠️ **T9 的第三次修正（2026-09-20）**：T9 原结论「服务端
+ *    **不校验设备号形态**」（16 位十进制号 / `BoundDeviceID` / 空串返回逐字节
+ *    相同）**观测成立但推论错了** —— 不校验**形态** ≠ 不校验**设备**。服务端按
+ *    `x-device-id` 做设备维度记账，认不认这台设备是真校验。
+ *    **这是 Trae 与另外两条线最大的形态差异** —— 腾讯系与 LobsterAI 都不需要
+ *    设备头。
  * 2. **签到判定以 body `code:0` 为准，不看 HTTP 状态**（对齐 CodeBuddy 既有约定）。
  *    `code:1001` + `enable:false` 是「凭据失效」，按需要重新登录处理。
  *    **余额端点例外**：`web_user_ent_usage` 的响应**没有 code 信封**（T7 已校准），
@@ -37,42 +38,46 @@
  *    ——后者是**设备级**语义：同一账号换一台设备仍为 false，拿它判幂等会
  *    对已经领过的账号重复发领取请求。
  *
- * ## 身份保真对照（2026-09-19 反混淆真机客户端）
+ * ## 身份保真对照（2026-09-20 第二次反混淆真机客户端，bundle 逐字）
  *
  * 反混淆 `out/main.js` 的 claim 调用链
  * （`claimCheckinCredits()` → `eb("/trae/api/v2/ug/checkin_credits/claim","POST","checkin_claim")`）
- * 后与本节实现逐字段对照，四处差异中**改了两处、刻意留了两处**：
+ * 后与本节实现逐头对照，**本次两处都已改为对齐官方**：
  *
- * | 项 | 真机 | 本实现 | 处置 |
+ * | 项 | 真机 | 本实现（改后） | 处置 |
  * |---|---|---|---|
- * | `x-os-version` | `os.version()`（本机 `Windows 10 Home`） | 原硬编码 `Windows 10.0.22631` | **已改为运行时取值** |
- * | `x-app-version` | `3.3.102` | 原 `3.3.100` | **已升到 `3.3.102`** |
- * | `x-device-id` | AHA/iCube SDK 的 16 位号 | 凭据的 `BoundDeviceID` | **刻意不动**（见 {@link traeCnCreditsHeaders}） |
- * | `X-Ide-Token` / `X-Cloudide-Token` | 未逐字确认 | 保留 | **刻意不动**（见 {@link traeCnCreditsHeaders}） |
+ * | `x-device-id` | `guaranteedDeviceId`（AHA 16 位号，与登录 URL 同源） | **登录时注册的 16 位号**（旧凭据降级为 `BoundDeviceID`） | **已修**（9074 真根因） |
+ * | `Content-Type` | `application/json`（`bb()`） | 同 | 已对齐 |
+ * | `Authorization` | `Cloud-IDE-JWT <token>`（`mixAuthorization`） | 同 | 已对齐 |
+ * | `x-device-type` / `x-os-version` / `x-app-version` | `commonParams` 三字段 | `windows` / 运行时 `os.version()` / `3.3.102` | 已对齐 |
+ * | `x-device-brand` | 条件性发（`device_model` 非空才发） | **不发** | 刻意（不猜硬件型号，不发空串冒充） |
+ * | `Accept` / `Origin` / `Referer` / `X-Ide-Token` / `X-Cloudide-Token` | **官方都不发** | 原多发 → **已删** | **已删**（对齐官方头集） |
  *
- * ⚠️ **本次修复是「身份保真」，不是 `9074` 的解药**：`9074` 的成因**与设备身份
- * 形态无关**（2026-09-20 已重新定性，见下节）。
- * 改这两处是为了让出站身份与真实客户端一致，从而消除「服务端按身份归因/风控
- * 时看到的是一个不存在的客户端形态」这类隐患，而不是为了让某个具体错误码消失。
+ * ⚠️ **`x-os-version` / `x-app-version` 的旧「身份保真」修复与 `9074` 无关**，
+ * 本次定案的根因是**设备身份**（`x-device-id`），不是版本号形态。见下节。
  *
- * ## `9074` 的定性（2026-09-20 重新取证，**推翻**「瞬时频次软限流」）
+ * ## `9074` 的定性（2026-09-20 **第三次**修正，前两次均作废）
  *
- * 旧记载「瞬时频次软限流（同账号隔一会儿重试即成功）」**已不成立**。三日取证：
+ * | 次序 | 定性 | 状态 |
+ * |---|---|---|
+ * | 第 1 次 | 瞬时频次软限流 | **作废**（8 秒退避重放仍 9074、三日 452 次报错） |
+ * | 第 2 次 | 活动级当日容量/名额限制或账号侧风控 | **作废**（官方客户端同期可签成功；单变量 A/B 找到真变量） |
+ * | **第 3 次（本次）** | **设备身份**：服务端按 `x-device-id` 记设备维度签到状态，我们发的 `BoundDeviceID` 不被活动系统认可 | 单变量隔离证据 |
  *
- * | 观测 | 实测结果 |
- * |---|---|
- * | 同账号跨 3 天报错量（09-17 / 09-18 / 09-19） | **15 / 187 / 250 次，合计 452 次** |
- * | 8 秒退避后重放 | **仍回 `9074`** |
- * | 同一套设备头下 status vs claim | **status 恒成功、claim 恒 `9074`** |
+ * 决定性证据（status 端点 A/B，2026-09-20）：我们全套头不变 + **仅**把
+ * `x-device-id` 换成官方客户端的 16 位号 → `did_checked_in` 由 `false` 翻转为
+ * `true`。其余头差异（我们多发的 `Accept` / `Origin` / `Referer` /
+ * `X-Ide-Token` / `X-Cloudide-Token`）已证明**不影响**结果。
  *
- * 新定性：**活动级当日容量/名额限制，或账号侧风控** —— 服务端对**写**（claim）
- * 有独立于**读**（status）的名额桶，故「状态读得到、奖励领不到」是正常形态，
- * 不是请求节奏问题。用户引导文案因此按「稍后或次日再试」写（见
- * {@link describeFailureCode}），而不是「等几秒再重试」。
+ * 根因结构：官方登录 URL 的 `device_id` 与 claim 的 `x-device-id` 是**同一个稳定
+ * AHA 号**；本插件此前两者不同源 —— 登录用现场随机号（用完即丢），claim 却发
+ * exchange 返回的 `BoundDeviceID`，构成「与登录不匹配且每次登录都漂移的设备身份」。
+ * 修复即 {@link TraeCnCredential.checkin_device_id}：把登录时的 16 位号落盘。
  *
- * 另一条**推测（未证实）**：09-18 / 09-19 的两次成功都在下午 14:28–14:43，
- * 而 09-20 的失败全在零点后（00:50 / 01:04）—— 可能叠加了**零点结算窗口**
- * （当日名额在结算前后处于不可领状态）。
+ * ⚠️ **待验证假设**：本次修复是「按证据最优假设落地 + 次日自然验证」——
+ * 定案当天官方已签到成功（幂等挡路），claim 级验证需等次日名额重置。
+ * 若明日仍 9074，后续路径是「读 Trae 客户端 AHA 设备号」（跨产品耦合，
+ * 需用户拍板），而不是再改形态。
  *
  * ## claim 段的有界重试（2026-09-20）
  *
@@ -82,6 +87,9 @@
  * {@link TRAE_CN_CLAIM_RETRY_DELAYS_MS}）；**status 段不重试**（读接口没有名额
  * 问题，重试只是重复请求），`9004`（设备被拒）与 `1001`（凭据失效）**绝不**
  * 重试 —— 那是确定性失败，重试只会把同一个结果问三遍。
+ *
+ * ⚠️ 第三次定性**不推翻**这段重试：设备身份错误虽然确定性，但「设备维度当日
+ * 已签」与「名额释放」的边界在客户端不可见，保留有界重试的成本仍只有 4 秒。
  *
  * ## 与 `lobsterai-credits.ts` 的签名差异（刻意）
  *
@@ -103,7 +111,7 @@ import {
   type TraeCnProduct,
 } from './trae-cn-product.js'
 import {
-  traeCnAccessHeaders,
+  traeCnCheckinDeviceId,
   type TraeCnCredential,
 } from './trae-cn-oauth.js'
 // 重试判据**复用** chat 侧的退避码表（`src/trae-cn-errors.ts`）——「哪些码算
@@ -210,13 +218,23 @@ export const TRAE_CN_CODE_CREDENTIAL_INVALID = 1001
 export const TRAE_CN_CODE_DEVICE_REJECTED = 9004
 
 /**
- * 「当前参与用户太多，请稍后再试」码（**活动级当日容量/名额限制或账号侧风控**）。
+ * 「当前参与用户太多，请稍后再试」码（**真根因：设备身份**）。
  *
- * ⚠️ **定性已于 2026-09-20 推翻重写**（原文记作「瞬时频次软限流」）。三日取证：
- * 同账号跨 09-17/18/19 报错 15 / 187 / 250 次（合计 **452 次**）、8 秒退避重放
- * **仍** 9074、同一套设备头下 **status 恒成功而 claim 恒 9074**（读/写两个名额桶）。
- * 故它**不是**请求节奏问题，重试只是覆盖「撞在名额释放瞬间」的小概率；
- * 用户引导按「稍后或次日再试」写（见 {@link describeFailureCode}）。
+ * ⚠️ **定性已于 2026-09-20 第三次修正**（前两次均作废）：
+ *
+ * | 次序 | 定性 | 作废依据 |
+ * |---|---|---|
+ * | 1 | 瞬时频次软限流 | 8 秒退避重放**仍** 9074；三日 452 次报错 |
+ * | 2 | 活动级当日容量/名额限制或账号侧风控 | 官方客户端同期签成功；单变量 A/B 定位到真变量 |
+ * | **3（现行）** | **设备身份不被活动系统认可** | status 端点 A/B：仅换 `x-device-id` 即让 `did_checked_in` 由 false 翻转为 true |
+ *
+ * 服务端按 `x-device-id` 做**设备维度**签到记账，我们发的 `BoundDeviceID`
+ * 不在它的设备表里。修复见 {@link traeCnCreditsHeaders} /
+ * {@link TraeCnCredential.checkin_device_id}。
+ *
+ * ⚠️ **待验证假设**：claim 级验证需等次日名额重置（定案当天官方已签成功、
+ * 幂等挡路）。若明日仍 9074，后续路径是「读 Trae 客户端 AHA 设备号」
+ * （跨产品耦合，需用户拍板）。
  */
 export const TRAE_CN_CODE_TOO_MANY_USERS = 9074
 
@@ -323,44 +341,71 @@ type CreditsCallResult =
 const UNPARSABLE_RESPONSE_MESSAGE = '请求失败或响应无法解析'
 
 /**
- * 读取带 Trae 鉴权与设备四件套的请求头。
+ * 读取带 Trae 鉴权与设备头的签到请求头。
  *
- * ## 两处与真机不同、但**刻意不改**的地方（防「顺手统一」）
+ * ## 与官方 claim 请求头**逐头对齐**（2026-09-20，bundle 反混淆取证）
  *
- * ### 1. `x-device-id` 维持凭据里的 `BoundDeviceID`
+ * 官方 `claimCheckinCredits()` 的调用链（`out/main.js` @1696645 附近）是
+ * `eb(path,"POST","checkin_claim")`，其头集合由两处拼成：
  *
- * 真实客户端发的是 **AHA/iCube SDK 生成的 16 位号**，与本实现的 `BoundDeviceID`
- * 形态不同。**不改**，三条理由缺一不可：
+ * ```js
+ * bb(){ const e={"Content-Type":"application/json"}; …; return e }        // 基础头
+ * cb(e){ return { headers: this.mixAuthorization(this.bb(), e) } }        // + Authorization
+ * fb(e){ e["x-device-id"] = this.S.guaranteedDeviceId;                    // + 设备头
+ *        const i=this.g?.commonParams;
+ *        i?.device_model && (e["x-device-brand"]=i.device_model),
+ *        i?.os_name      && (e["x-device-type"]=i.os_name),
+ *        i?.os_version   && (e["x-os-version"]=i.os_version),
+ *        i?.app_version  && (e["x-app-version"]=i.app_version) }
+ * ```
  *
- * - **(a) 真机实证服务端不校验形态**：16 位十进制号 / `BoundDeviceID` / 空串
- *   返回**逐字节相同**（T9，2026-09-18），`BoundDeviceID` 拿到的是 `code:0`。
- *   模仿一个服务端明确不看的字段，收益为零。
- * - **(b) 伪造 16 位号是 `README.md` 明令禁止的「伪造设备身份」** ——
- *   本插件的既定立场是「如实留空/如实取凭据值」，而不是造一个看起来合法的号。
- * - **(c) 读 Trae 客户端 `storage.json` 是跨产品耦合**：那是另一个产品的私有
- *   存储，其 schema 随时可能变；为发一个服务端不校验的头而依赖它，是在给
- *   本插件绑一个自己控制不了的脆弱前置。
+ * 故官方全集是 **`Content-Type` + `Authorization: Cloud-IDE-JWT` + 设备头**，
+ * **没有** `Accept` / `Origin` / `Referer` / `X-Ide-Token` / `X-Cloudide-Token`。
+ * 本函数此前多发这 5 个头，现已删除（对齐取证结论；单变量 A/B 已证明它们不影响
+ * 结果，故删除是「对齐官方形态」而非「修复」）。
  *
- * ### 2. `X-Ide-Token` / `X-Cloudide-Token` 保留
+ * ## `x-device-id` 用 {@link traeCnCheckinDeviceId}（**9074 真根因修复**）
  *
- * 签到**不需要**它们（三选一即可），但 **chat 网关可能依赖**（未验证）——
- * 而 `traeCnAccessHeaders` 是签到与 chat **共用**的构造器。为一个未验证的
- * 「少发一个头更真」而承担 chat 全线 401 的风险，去头风险大于收益。
+ * 服务端按 `x-device-id` 做**设备维度记账**，只认登录时注册的那台设备。
+ * 官方登录 URL 的 `device_id` 与 claim 的 `x-device-id` 是**同一个稳定 AHA 号**；
+ * 本插件此前两者不同源（登录用现场随机号、claim 发 `BoundDeviceID`），构成
+ * 「与登录不匹配且每次登录都漂移的设备身份」。
+ *
+ * 单变量隔离证据（status 端点 A/B，2026-09-20）：我们全套头 + **仅**把
+ * `x-device-id` 换成官方 16 位号 → `did_checked_in` 由 `false` 翻转为 `true`。
+ *
+ * ## 刻意**不**发 `x-device-brand`
+ *
+ * 官方是**条件性**发它（`commonParams.device_model` 非空才发），而本插件拿不到
+ * 硬件型号 —— 按既有约定「不猜硬件型号」如实**不发**，而不是发一个空串冒充
+ * 「官方也发这个头」。发空串与不发在服务端看来是两种不同的客户端形态。
+ *
+ * ## 鉴权头不再复用 `traeCnAccessHeaders`
+ *
+ * 那个构造器是 **chat（SOLO）与签到共用**的，带 `Accept` 与两个多余 token 头。
+ * 官方 claim 三者都没有，故签到侧改为**自建**这三个头；chat 侧
+ * （`src/trae-cn-models.ts` 的 `traeCnSoloHeaders`）继续用它，**不受影响**。
+ * 这正是「签到侧删除不影响 chat」的边界所在。
+ *
+ * ⚠️ `product` 形参在删除 `Origin` / `Referer` 后**已不再被读取**，但**刻意保留**：
+ * 它是「本构造器随产品配置走」的既有签名（调用点与测试都按两参调用），
+ * 且将来若某个 Trae 变体需要按产品区分头集，它就是现成的挂点。
+ * （`tsconfig.json` 未开 `noUnusedParameters`，故保留形参不会报错。）
  */
 export function traeCnCreditsHeaders(
   credential: TraeCnCredential,
   product: TraeCnProduct,
 ): Record<string, string> {
   return {
-    // 三个等值 token 头（Authorization: Cloud-IDE-JWT + X-Ide-Token + X-Cloudide-Token）
-    // 由 oauth 模块统一构造：签到与对话走同一份鉴权形态，不在这里另写一遍。
-    ...traeCnAccessHeaders(credential),
-    // Origin/Referer 取编译期常量 portalBase，**不从凭据推断**（对齐 X-Domain 那条约定）。
-    Origin: product.portalBase,
-    Referer: product.portalBase,
+    // 官方基础头：只有 Content-Type（`bb()` 逐字）。`Accept` 官方不发。
+    'Content-Type': 'application/json',
+    // 官方 `mixAuthorization` 逐字：`Authorization: Cloud-IDE-JWT ${token}`。
+    // **不**发 `X-Ide-Token` / `X-Cloudide-Token`（官方 claim 没有这两个头）。
+    Authorization: `Cloud-IDE-JWT ${credential.access_token}`,
     // 设备四件套：claim 严格校验，缺了回 9004。
-    // `x-device-id` 取凭据值而非伪造 16 位号 —— 理由见本函数头注释（三条）。
-    'x-device-id': credential.device_id,
+    // `x-device-id` 取「登录时注册的 16 位号」（旧凭据如实降级，见该函数说明）。
+    'x-device-id': traeCnCheckinDeviceId(credential),
+    // 官方取 `commonParams.os_name`；真机实测值为 `windows`。
     'x-device-type': TRAE_CN_DEVICE_TYPE,
     // 运行时取 `os.version()`（真机客户端同源），不再硬编码构建号。
     'x-os-version': traeCnOsVersion(),
@@ -543,23 +588,26 @@ async function postJson(
 function describeFailureCode(code: number, message: string): string {
   if (code === TRAE_CN_CODE_CREDENTIAL_INVALID) return '凭据已失效，请重新登录'
   if (code === TRAE_CN_CODE_DEVICE_REJECTED) {
-    // 本模块总是带设备四件套 ⇒ 9004 只可能是「服务端不认可我们构造的设备身份」，
+    // 本模块总是带设备头 ⇒ 9004 只可能是「服务端不认可我们构造的设备身份」，
     // 而不是「忘了带设备头」。文案因此指向真正要校准的那个值。
-    // （T9 已校准确认**设备号形态**不被校验，故这里不再声称形态是成因。）
+    // （T9 已校准确认设备号**形态**不被校验，故这里不声称形态是成因。）
     return `设备校验未通过（code ${TRAE_CN_CODE_DEVICE_REJECTED}）：`
-      + 'x-device-id 取自凭据的 device_id（登录 exchange 返回的 BoundDeviceID），'
+      + 'x-device-id 取自凭据的 checkin_device_id（登录时注册的 16 位设备号），'
       + `x-os-version 为本机 os.version() 的运行时取值（${TRAE_CN_OS_VERSION}）、`
       + `x-app-version 为实测常量（${TRAE_CN_APP_VERSION}）`
   }
   if (code === TRAE_CN_CODE_TOO_MANY_USERS) {
     // 服务端原文（「当前参与用户太多，请稍后再试」）说的是「稍后」，但实测证明
-    // 那不是几秒钟的事 —— 三日 452 次报错、8 秒退避重放仍 9074、同设备头下
-    // status 恒成功而 claim 恒失败。故在原文后补一句**定性**，把用户的预期从
-    // 「刷新几次就好」纠到「今天可能已经没有名额了」。
+    // 那不是几秒钟的事 —— 三日 452 次报错、8 秒退避重放仍 9074。
+    //
+    // 2026-09-20 第三次定性：真根因是**设备身份**（服务端按 x-device-id 记设备
+    // 维度签到状态，我们发的 BoundDeviceID 不被活动系统认可）。故文案把用户
+    // 引向**可执行的动作**（重新登录以注册设备身份），而不是让他反复刷新等名额。
     //
     // 刻意**不在文案里重复 code**：前端 `formatClaimFailureLine` 会统一追加
     // `（code N）`，这里再写一次会显示成「…（code 9074）…（code 9074）」。
-    return `${message}（该活动可能已达当日名额，请稍后或次日再试）`
+    return `${message}（服务端按 x-device-id 记设备维度签到状态；`
+      + '若本账号是旧版凭据登录的，请重新登录一次以登记设备身份）'
   }
   return message
 }

@@ -41,8 +41,12 @@
  *
  * ## 仍未校准的部分
  *
- * 签到设备的来源已确认（`BoundDeviceID`），但**签到该用哪个号**仍未定论 ——
- * 见 {@link TraeCnDeviceIdSource}。
+ * ⚠️ 本条已于 2026-09-20 更新：签到该用哪个号**已定案** —— 用**登录时注册的
+ * 16 位设备号**（`TraeCnCredential.checkin_device_id`），因为活动系统按
+ * `x-device-id` 认**设备**，而 exchange 返回的 `BoundDeviceID` 不被认可
+ * （单变量 A/B：仅换该头即让 `did_checked_in` 由 false 翻转为 true）。
+ * 仍待验证的是 **claim 级**闭环（需等次日名额重置）。见
+ * `src/trae-cn-credits.ts` 的 `9074` 小节。
  */
 
 /**
@@ -421,6 +425,17 @@ export const TRAE_CN_LOGIN_TIMEOUT_MS = 10 * 60 * 1000
  * 故旧的 `machine-id-fallback` 降级路径已**删除**：登录 URL 里的 `device_id`
  * 是我们随机生成的临时值（仅参与登录握手与风控形态校验），把它折算成设备号
  * 存进凭据是**伪造设备身份**，比缺字段更坏 —— 缺字段至少能被发现。
+ *
+ * ## ⚠️ 本标记只描述 `device_id`，与签到设备号无关（2026-09-20 修正）
+ *
+ * 2026-09-20 单变量 A/B 定案：活动系统按 `x-device-id` 认**设备**，而
+ * `BoundDeviceID` **不被认可**（仅换成官方 16 位号即让 `did_checked_in` 由
+ * false 翻转为 true）。故签到头已改用**登录时注册的 16 位号**
+ * （`TraeCnCredential.checkin_device_id`，见 `src/trae-cn-oauth.ts` 的
+ * `traeCnCheckinDeviceId`）。
+ *
+ * 本类型**不**为那个字段扩展取值：`checkin_device_id` 是「登录 URL 的
+ * `device_id` 原样落盘」，来源没有分叉，加一个恒为同一个值的标记只是噪声。
  *
  * @see TraeCnDeviceIdSource
  */

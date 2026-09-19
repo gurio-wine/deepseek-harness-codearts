@@ -299,8 +299,12 @@ export class TraeCnAuth extends Service {
    * ⚠️ 它**不是**登录协议的主路径：真机登录走的是 PKCE → `authCodeInfo` →
    * `trae/api/v3/oauth/ExchangeToken`（见 `src/trae-cn-oauth.ts` 模块头）。
    * 这里拿不到 exchange 响应的 `BoundDeviceID`，故凭据的 `device_id` 只能取
-   * 续期响应里自带的设备字段（通常为空）；签到时若报 9004，正是因为
-   * 这条路径造出的凭据缺设备绑定 —— 应改用浏览器登录。
+   * 续期响应里自带的设备字段（通常为空）。
+   *
+   * ⚠️ **本入口造的凭据也缺签到设备号**（`checkin_device_id` 为空）：签到用的
+   * 16 位号只在登录 URL 里生成，本入口没有登录 URL。签到侧会**如实降级**为
+   * `BoundDeviceID`（见 `traeCnCheckinDeviceId`），而该值不被活动系统认可 ——
+   * 故**要签到就得走浏览器登录**，这一点在 2026-09-20 的 9074 定案后更明确了。
    */
   async loginWithRefreshToken(
     refreshToken: string,
@@ -324,6 +328,9 @@ export class TraeCnAuth extends Service {
         deviceId: payload.deviceId,
         deviceIdSource: 'exchange-bound-device-id',
         machineId: options.machineId ?? '',
+        // ⚠️ **本入口拿不到签到设备号**：它没有登录 URL，也就没有那个 16 位号
+        // （见 `TraeCnCredential.checkin_device_id`）。故如实留空 ——
+        // 签到侧会降级用 BoundDeviceID，**不伪造**。要修复签到请走浏览器登录。
       }),
       payload,
     )

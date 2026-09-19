@@ -40,17 +40,31 @@
  *
  * 本模块只做**登录 + 凭据 + 续期请求**，不含：LLM 适配器、签到、积分余额。
  *
- * ## ✅ T9 已校准（2026-09-18）
+ * ## ⚠️ T9 的第三次修正（2026-09-20）：形态不校验 ≠ 设备被认可
  *
- * 签到请求的 `x-device-id` 用**凭据里的 `device_id`**（即 exchange 返回的
- * `BoundDeviceID`，如 `wl2k1e2endpp32`）。真机实测 status / claim
- * **都不校验设备号形态**（16 位十进制号 / `BoundDeviceID` / 空串返回逐字节相同），
- * 故「该用哪个号」这个悬念已消解。见 {@link TraeCnCredential.device_id}。
+ * T9（2026-09-18）的原始结论是「status / claim **都不校验设备号形态**」——
+ * 16 位十进制号 / `BoundDeviceID` / 空串返回**逐字节相同**。该观测本身仍然成立，
+ * 但**推论是错的**：不校验形态 ≠ 不校验设备。服务端按 `x-device-id` 做**设备维度
+ * 记账**，认不认这台设备是真校验。
  *
- * ⚠️ **本模块的「设备号」是另一个位置**（2026-09-19 澄清）：本模块生成并使用
- * **登录 URL 的 `device_id`**，那个**必须**是 16 位纯十进制（登录握手的形态要求，
- * 见 {@link generateTraeCnDeviceId}）；T9 说的「不校验形态」指的是**签到头**的
- * `x-device-id`。两个字段同名不同位，`README.md` 里讲 16 位形态的是登录 URL 那个。
+ * 单变量隔离证据（status 端点 A/B，2026-09-20）：我们全套头 + **仅**把
+ * `x-device-id` 换成官方客户端那个 16 位号 → `did_checked_in` 由 `false` 翻转为
+ * `true`；其余头差异（多发的 `Accept` / `Origin` / `Referer` / `X-Ide-Token` /
+ * `X-Cloudide-Token`）已证明不影响结果。这正是签到 `9074` 的真根因（见
+ * `src/trae-cn-credits.ts` 的 `9074` 小节）。
+ *
+ * 结论落到本模块：**登录时生成的那个 16 位号必须持久化进凭据**，供签到侧使用
+ * —— 它才是「我们注册的这台设备」，见 {@link TraeCnCredential.checkin_device_id}。
+ *
+ * ⚠️ **本模块的「设备号」仍是两个位置**（2026-09-19 澄清，本次修正后依然成立）：
+ *
+ * | 位置 | 取值 | 用途 |
+ * |---|---|---|
+ * | **登录 URL 的 `device_id`**（{@link generateTraeCnDeviceId}） | 现场生成的 16 位十进制 | 登录握手形态要求 **且** 设备身份（现已落盘） |
+ * | **exchange 返回的 `BoundDeviceID`**（`TraeCnCredential.device_id`） | 14 位字母数字（如 `wl2k1e2endpp32`） | 服务端的绑定标识；**活动系统不认它** |
+ *
+ * `README.md` 里讲 16 位形态的是**前者**；后者只是服务端在登录链路里发给我们的
+ * 绑定号，不是设备身份。
  */
 
 import { createServer, type Server } from 'node:http'
@@ -179,27 +193,29 @@ export function generateTraeCnMachineId(): string {
 }
 
 /**
- * 生成 16 位纯十进制 `device_id`（**登录 URL 专用**）。
+ * 生成 16 位纯十进制 `device_id`（**登录 URL 专用，且是设备身份**）。
  *
  * 真机值形如 `2996599860772203`（16 位十进制）。**不能用 hex32 或 UUID**：
  * 这是**登录握手**的参数形态要求 —— 授权页与 authCode 交换按这个形态校验。
  *
- * ## ⚠️ 「设备号」在本项目里有**两个位置**，边界不要混（2026-09-19 澄清）
+ * ## ⚠️ 「设备号」在本项目里有**两个位置**，边界不要混（2026-09-20 修正）
  *
- * | 位置 | 取值 | 形态要求 |
+ * | 位置 | 取值 | 形态/语义 |
  * |---|---|---|
- * | **登录 URL 的 `device_id`**（本函数，见 {@link buildTraeCnLoginUrl}） | 本函数现场生成的 16 位十进制号 | **必须** 16 位纯十进制 |
- * | **claim 的 `x-device-id`**（`src/trae-cn-credits.ts`） | 凭据里的 `device_id`，即 exchange 返回的 `BoundDeviceID` | **不校验形态**（T9 实测） |
+ * | **登录 URL 的 `device_id`**（本函数） | 现场生成的 16 位十进制号 | **必须** 16 位纯十进制；**且它是签到认的设备身份** |
+ * | **exchange 返回的 `BoundDeviceID`**（`TraeCnCredential.device_id`） | 14 位字母数字 | 服务端绑定标识，**活动系统不认** |
  *
- * 两处都曾被称为「设备号」，于是产生过「T9 说不校验形态，这里却说形态不符有风险」
- * 的矛盾假象 —— 它们说的是**两个不同的字段**：前者进登录 URL，后者进签到请求头。
+ * 早先这条注释把「形态不符」的后果记成「会触发 9074 风控」，**归因是错的**：
+ * `9074` 的成因与设备号**形态**无关，而与**设备是否被活动系统认可**有关。
+ * 2026-09-20 单变量 A/B 已定案：仅把 `x-device-id` 换成官方 16 位号即让
+ * `did_checked_in` 由 false 翻转为 true（见模块头注释）。保留 16 位形态的理由
+ * 因此**不止**登录握手 —— 它同时是设备身份本身的形态。
  *
- * 另外，早先这条注释把「形态不符」的后果记成「会触发 9074 风控」，**归因是错的**：
- * `9074` 的成因与设备号形态无关 —— 它已于 2026-09-20 重新定性为**活动级当日
- * 容量/名额限制或账号侧风控**（三日 452 次报错、8 秒退避重放仍 9074、同一套
- * 设备头下 status 恒成功而 claim 恒 9074），见 `src/trae-cn-errors.ts` 的
- * `TRAE_CN_BACKOFF_CODES` 注释。保留 16 位形态的理由是**登录握手的形态校验**，
- * 不是 9074。
+ * ⚠️ **本函数是随机的、且每次登录都不同**（8 字节随机数取低 16 位十进制）。
+ * 服务端没有把「我们上报的号」回传（exchange 响应只有它自己新发的
+ * `BoundDeviceID`），故**它只能在生成时被保存**：见
+ * {@link TraeCnCredential.checkin_device_id}。旧凭据无法恢复该值，走
+ * {@link traeCnCheckinDeviceId} 的如实降级路径。
  */
 export function generateTraeCnDeviceId(): string {
   // 8 字节 → 最大约 1.8e19（20 位十进制），取其**低 16 位十进制**。
@@ -245,7 +261,7 @@ export interface TraeCnCredential {
   /** OAuth 客户端 ID（五件套之一；与产品配置的 `clientId` 同值，随凭据快照留档）。 */
   client_id: string
   /**
-   * 设备号（五件套之一）——**claim 的 `x-device-id` 来源**。
+   * 设备号（五件套之一）——**服务端的绑定标识**。
    *
    * ## 来源（**已用真机校准**，2026-09-17）
    *
@@ -254,36 +270,48 @@ export interface TraeCnCredential {
    * `Result.DeviceBindStatus: "BOUND"`；它**不是**客户端上报的 `DeviceID`
    * （16 位十进制）或 `MachineID`（64 hex）的回显。
    *
-   * ## ⚠️ 与「登录 URL 的 `device_id`」是两个位置，别混（2026-09-19 澄清）
+   * ## ⚠️ 它**不是**签到用的设备号（2026-09-20 定案）
    *
-   * 本项目里「设备号」一词曾同时指两个字段，造成了「T9 说不校验形态、别处却说
-   * 形态有风险」的矛盾假象。边界如下：
+   * 本字段曾被用作 claim 的 `x-device-id`，理由是 T9 的「服务端不校验设备号
+   * 形态」。**该推论已被单变量 A/B 推翻**：不校验**形态** ≠ 不校验**设备** ——
+   * 服务端按 `x-device-id` 做设备维度记账，`BoundDeviceID` 不被活动系统认可
+   * （仅把它换成官方 16 位号即让 `did_checked_in` 由 false 翻转为 true）。
    *
-   * - **登录 URL 的 `device_id`**：`generateTraeCnDeviceId()` 现场生成的
-   *   **16 位纯十进制**号（`README.md` 讲的就是它）—— 那是**登录握手**的形态要求；
-   * - **claim 的 `x-device-id`**：**本字段**。服务端**不校验形态**，静默可用。
-   *
-   * ## ✅ T9 已校准（2026-09-18）：签到不校验设备号形态
-   *
-   * 签到端点的 `x-device-id` 读的就是本字段（`src/trae-cn-credits.ts`）。
-   * 真机实测 status / claim **都不校验设备号形态**：16 位十进制号、本字段、
-   * 空串三者返回**逐字节相同**；只有**完全不带设备头**时才出现
-   * `did_checked_in:false`（这恰好印证它是设备级语义）。
-   *
-   * 故「签到该用哪个号」这个悬念已消解 —— 用本字段即可。真实客户端发的是
-   * AHA/iCube SDK 的 16 位号，但**刻意不模仿**（三条理由见
-   * `src/trae-cn-credits.ts` 的 `traeCnCreditsHeaders`：服务端不校验形态、
-   * 伪造设备身份被 README 明令禁止、读 Trae 客户端 storage.json 是跨产品耦合）。
-   *
-   * 若仍拿到 `code:9004`，那意味着服务端不认可我们构造的设备**身份**
-   * （此时按 `x-os-version` / `x-app-version` 的实测值校准），
-   * **不是** `MachineID` 的问题（形态不符，且它是遥测机器号），
-   * 也**不要**拿 `machine_id` 折算一个假的 16 位号顶上。
+   * 故签到头现在用 {@link checkin_device_id}（我们注册的 16 位设备号），
+   * 本字段只保留它在登录链路里的本义（服务端绑定标识 / 诊断 / 五件套完整性）。
    *
    * 走到兼容分支（回调给 refreshToken、无 exchange 响应）时本字段为**空串** ——
-   * 如实留空；按上面的实测结论，空串同样能签到成功。
+   * 如实留空，不伪造。
    */
   device_id: string
+  /**
+   * **签到用的设备号**：登录时生成、并原样上报给服务端的那个 16 位纯十进制号。
+   *
+   * ## 为什么必须有这个独立字段（2026-09-20，9074 真根因修复）
+   *
+   * 服务端按 `x-device-id` 做**设备维度**记账，且只认**登录时注册的那台设备**。
+   * 官方客户端的登录 URL `device_id` 与 claim 的 `x-device-id` 是**同一个稳定
+   * AHA 号**；本插件此前两者不同源 —— 登录用现场随机号（用完即丢），claim 却发
+   * exchange 返回的 `BoundDeviceID`（{@link device_id}），构成「与登录不匹配且
+   * 每次登录都漂移的设备身份」。
+   *
+   * 单变量证据：全套头不变、**仅**把 `x-device-id` 换成官方 16 位号 →
+   * status 的 `did_checked_in` 由 `false` 翻转为 `true`。
+   *
+   * ## 值域与降级（**不伪造**）
+   *
+   * - 主路径（PKCE + authCode 交换）：= 本次登录 URL 里的 `device_id`
+   *   （{@link generateTraeCnDeviceId} 现场生成，16 位纯十进制）；
+   * - 兼容分支（回调给 refreshToken）：登录 URL 里也有那个随机号，同样落盘 ——
+   *   该分支能拿到它，只是拿不到 `BoundDeviceID`；
+   * - **旧凭据（本字段引入前登录的）**：该号从未被保存、且生成器是**随机**的
+   *   （非机器特征派生），服务端也不回传，**无法恢复**。此时本字段为 `''`，
+   *   签到侧按 {@link traeCnCheckinDeviceId} 如实降级 —— 详见该函数的取舍说明。
+   *
+   * ⚠️ **不拿 `machine_id` 折算一个假的 16 位号顶上**：那正是 README 禁止的
+   * 「伪造设备身份」。缺字段可以被发现，伪造的号只会让问题更难查。
+   */
+  checkin_device_id: string
   /** 机器号（五件套之一，64 位小写十六进制）；登录 URL 的 `machine_id` 用之。 */
   machine_id: string
   /** `device_id` 的来源标记（诊断用）。 */
@@ -303,6 +331,45 @@ export interface TraeCnCredential {
 /** 凭据是否携带可静默续期的 `refresh_token`。 */
 export function isTraeCnRefreshable(credential: TraeCnCredential): boolean {
   return typeof credential.refresh_token === 'string' && credential.refresh_token.length > 0
+}
+
+/**
+ * 取签到该用的 `x-device-id`（**9074 真根因修复的落点**，2026-09-20）。
+ *
+ * ## 取值与降级链
+ *
+ * | 优先级 | 来源 | 何时命中 |
+ * |---|---|---|
+ * | 1 | {@link TraeCnCredential.checkin_device_id} | 本字段引入后登录的凭据（主路径 + 兼容分支都能拿到） |
+ * | 2 | {@link TraeCnCredential.device_id}（`BoundDeviceID`） | **旧凭据**（本字段缺失） |
+ *
+ * ## 为什么降级到 `BoundDeviceID` 而不是留空
+ *
+ * 两条都**不是**活动系统认可的设备号，但 `BoundDeviceID` 至少是**服务端自己发的**
+ * 一个稳定绑定标识：它保证「同一账号每次签到发同一个值」（幂等语义不被我们自己
+ * 打破），且失败时错误码/文案能指向确定的原因。
+ *
+ * 而**不伪造**是本项目的硬约束（`README.md` 明令禁止伪造设备身份）：不能拿
+ * `machine_id` 折算一个看起来合法的 16 位号，也不能读 Trae 客户端 `storage.json`
+ * 的 AHA 号（跨产品耦合，需用户拍板）。
+ *
+ * ## ⚠️ 旧凭据必须重新登录才能修复签到
+ *
+ * `checkin_device_id` 是**登录时现场随机生成**的 16 位号（见
+ * {@link generateTraeCnDeviceId}），服务端**不回传**它，exchange 响应里只有它自己
+ * 新发的 `BoundDeviceID`。故本字段引入前登录的凭据**无法恢复**该值 —— 这是如实
+ * 的信息缺失，不是可以绕过的实现细节。这类凭据的签到会继续按 `BoundDeviceID`
+ * 发（大概率仍不通过活动系统的设备认可），**重新登录一次即可修复**。
+ *
+ * @param credential - 已解析的凭据（可能来自旧版本，字段缺失时为 `undefined`）。
+ * @returns 非空的设备号字符串；两者都缺失时返回 `''`（如实留空）。
+ */
+export function traeCnCheckinDeviceId(credential: TraeCnCredential): string {
+  // 旧凭据（本字段引入前落盘）在 JSON 里根本没有这个键：类型说是 string，
+  // 运行时是 undefined。故按「非空字符串」判，而不是按 `!== undefined`。
+  const stored = credential.checkin_device_id
+  if (typeof stored === 'string' && stored.length > 0) return stored
+  return typeof credential.device_id === 'string' ? credential.device_id : ''
 }
 
 /**
@@ -1264,6 +1331,9 @@ export async function completeTraeCnCallback(
       deviceId: result.boundDeviceId,
       deviceIdSource: 'exchange-bound-device-id',
       machineId: session.machineId,
+      // **签到设备号 = 本次登录 URL 里的那个 16 位号**（9074 真根因修复）：
+      // 它才是「我们注册的这台设备」，服务端按它做设备维度记账。
+      checkinDeviceId: session.deviceId,
       ...result.tokenExpireAt === undefined ? {} : { expiresAt: result.tokenExpireAt },
       nickname,
     })
@@ -1272,6 +1342,8 @@ export async function completeTraeCnCallback(
   // 兼容分支：回调直接给 refreshToken（授权页的非 PKCE 模式）。
   // 该分支**没有** exchange 响应，故没有 BoundDeviceID —— device_id 如实留空，
   // 绝不拿 machine_id 折算一个假的 16 位号顶上（伪造设备身份比缺字段更坏）。
+  // ⚠️ 但**签到设备号照常落盘**：它就是本次登录 URL 里那个 16 位号，
+  //    该分支同样拿得到（只是拿不到服务端的 BoundDeviceID）。两条信息互不依赖。
   const tokenPayload = await exchangeTraeCnToken(
     { refreshToken: payload.refreshToken, userId: payload.userId },
     product,
@@ -1294,6 +1366,7 @@ export async function completeTraeCnCallback(
     deviceId: tokenPayload.deviceId,
     deviceIdSource: 'exchange-bound-device-id',
     machineId: session.machineId,
+    checkinDeviceId: session.deviceId,
     nickname,
   })
 }
@@ -1313,6 +1386,14 @@ export function buildTraeCnCredential(input: {
   deviceId: string
   deviceIdSource: TraeCnDeviceIdSource
   machineId: string
+  /**
+   * 登录时生成、并原样上报给服务端的 16 位纯十进制设备号。
+   *
+   * 主路径与兼容分支都**能**拿到它（它就是登录 URL 里的 `device_id`）；只有
+   * 「粘贴 refreshToken」这类**没有登录 URL** 的入口拿不到，那时传空串，
+   * 由 {@link traeCnCheckinDeviceId} 如实降级。
+   */
+  checkinDeviceId?: string
   expiresAt?: number
   nickname?: string
 }): TraeCnCredential {
@@ -1323,6 +1404,9 @@ export function buildTraeCnCredential(input: {
     user_id: input.userId,
     client_id: input.clientId,
     device_id: input.deviceId,
+    // 缺失即空串（不是 undefined）：凭据要能 JSON 往返且键存在，
+    // 让「本字段为空」与「老凭据没这个键」在存储层可区分。
+    checkin_device_id: input.checkinDeviceId ?? '',
     machine_id: input.machineId,
     device_id_source: input.deviceIdSource,
     expires_at: expiresAt === undefined ? '' : String(expiresAt),
