@@ -85,6 +85,10 @@ function makeCredential(overrides: Partial<TraeCnCredential> = {}): TraeCnCreden
     user_id: 'uid-1',
     client_id: 'ono9krqynydwx5',
     device_id: '1234567890123456',
+    // ⚠️ **与 `device_id` 刻意不同值**：chat（本 spec）必须用 `device_id`，
+    // 签到用本字段。两者同值时，「chat 是否误用了签到设备号」就测不出来了 ——
+    // 那正是 2026-09-20 设备身份修复后最需要防的「顺手统一」回归。
+    checkin_device_id: '2996599860772203',
     machine_id: 'a'.repeat(32),
     device_id_source: 'exchange-bound-device-id',
     // 用**不透明**的过期值：`isTraeCnExpired` 只在能解析出过期时间时才判定过期，
@@ -1005,8 +1009,15 @@ describe('TraeCnAdapter 请求构造', () => {
     expect(headers['x-flow-traceparent']).toBe(`04-${traceId}-${traceId.slice(0, 16)}-01`)
     // `x-uid` 取凭据的 user_id（不是昵称、不是设备号）。
     expect(headers['x-uid']).toBe('uid-1')
-    // 设备头取自凭据的 device_id（与签到端点同一个字段，不是登录 URL 的随机号）。
+    // ⚠️ chat 的设备头取凭据的 `device_id`（`BoundDeviceID`），
+    // **不是**签到用的 `checkin_device_id`（登录时生成并上报的 16 位号）——
+    // 两条协议线在 2026-09-20 的 9074 修复后**刻意分道**，
+    // 见 `src/trae-cn-oauth.ts` 的 `traeCnCheckinDeviceId` 与 `src/trae-cn-credits.ts`。
     expect(headers['x-device-id']).toBe('1234567890123456')
+    // 防「顺手统一」的回归点：`makeCredential()` 里两个设备号**不同值**，
+    // 若有人把这里改成「优先 checkin_device_id」的签到语义，上一行会立刻变红
+    // （已用变异测试确认：改动后本用例失败，而不是静默通过）。
+    expect(makeCredential().checkin_device_id).not.toBe(makeCredential().device_id)
     expect(headers['x-device-type']).toBe('windows')
     // chat 与签到**必须报同一种设备身份**，故共用 `TRAE_CN_OS_VERSION`
     // （它是 `os.version()` 的模块级快照，2026-09-19 起不再是硬编码构建号）。
