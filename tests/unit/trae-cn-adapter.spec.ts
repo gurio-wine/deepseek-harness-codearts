@@ -27,9 +27,10 @@ import {
   TRAE_CN_SOLO_LITE_FUNCTION,
   TRAE_CN_SOLO_REMOTE_FUNCTION,
   TRAE_CN_SOLO_USER_AGENT,
-  applyTraeCnStaticModalities,
+  applyTraeCnStaticMetadata,
   fallbackTraeCnCatalog,
   fetchTraeCnDirectory,
+  isCustomTraeCnModel,
   isInternalTraeCnConfig,
   mergeTraeCnDirectory,
   parseTraeCnDirectory,
@@ -645,9 +646,10 @@ describe('TraeCnAdapter 模型目录', () => {
       expect([32_000, 64_000], model.id).toContain(model.maxTokens)
       expect(model.contextWindow, model.id).toBeGreaterThan(0)
     }
-    // 原真机 16 项里 12 项多模态；剔除的 5 项**全是多模态项**，故现存 11 项里 7 项。
+    // 原真机 16 项里 12 项多模态；剔除的 5 项**全是多模态项**，故原本是 7 项。
+    // 2026-09-20 按 SOLO 目录实测把 `minimax-m3` 改成 false → **6 项**。
     // 数一下，避免整表被改成全 true / 全 false 还绿。
-    expect(TRAE_CN_FALLBACK_MODELS.filter((m) => m.supportsImages)).toHaveLength(7)
+    expect(TRAE_CN_FALLBACK_MODELS.filter((m) => m.supportsImages)).toHaveLength(6)
   })
 
   it('inputModalities 按模型给：多模态项 image，非多模态项只有 text', async () => {
@@ -857,13 +859,70 @@ describe('TraeCnAdapter resolveModel', () => {
     expect((await adapter.resolveModel('trae-cn', 'glm-5.2')).name).toBe('远端 GLM')
   })
 
-  it('远端条目没给档位时**不声明** reasoning（沿用静态表逻辑，不编造档位）', async () => {
+  it('**远端条目没带档位时，按 id 从静态表补上**（本次缺陷的核心）', async () => {
+    // ⚠️ 这条断言曾经锁死的是**缺陷**：它写的是「远端没给档位就不声明」，
+    // 而 SOLO 目录端点**根本不提供档位**（`support_thinking` 恒 false），
+    // 于是动态目录一旦生效，「思考程度」选择器整行消失 —— 用户报的正是这个。
+    // 正确语义：档位判据是「条目自己有没有档位」，没有就按 id 从静态表补。
     const { adapter } = makeAdapter(() => sseResponse(''), {
       fetchRemoteModels: async () => [
         { id: 'glm-5.2', name: 'GLM-5.2', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
       ],
     })
-    expect((await adapter.resolveModel('trae-cn', 'glm-5.2')).reasoning).toBeUndefined()
+    const reasoning = (await adapter.resolveModel('trae-cn', 'glm-5.2')).reasoning
+    expect(reasoning?.efforts.map((e) => e.id)).toEqual(['high', 'extra_high'])
+    expect(reasoning?.defaultEffort).toBe('high')
+  })
+
+  it('**远端独有 id 仍不声明档位**（静态表没有它 → 不编造）', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''), {
+      fetchRemoteModels: async () => [
+        { id: 'remote-only', name: 'Remote Only', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+      ],
+    })
+    expect((await adapter.resolveModel('trae-cn', 'remote-only')).reasoning).toBeUndefined()
+  })
+
+  it('**目录明说 `support_thinking:false` 不阻止补齐**（判据不是目录字段）', async () => {
+    // 目录端点对 9/10 项回的是 `{support_thinking:false}` 空壳。若照「目录已表态
+    // 就不覆盖」写，档位永远补不上；这里的条目形态就是那个空壳解析后的结果
+    // （`parseTraeCnDirectory` 读不出档位 → 条目上无 reasoningEfforts）。
+    const { adapter } = makeAdapter(() => sseResponse(''), {
+      fetchRemoteModels: async () => [
+        { id: 'kimi-k3', name: 'Kimi-K3', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+      ],
+    })
+    const reasoning = (await adapter.resolveModel('trae-cn', 'kimi-k3')).reasoning
+    expect(reasoning?.efforts.map((e) => e.id)).toEqual(['light', 'high', 'extra_high'])
+    // kimi-k3 的默认档是 extra_high（与其余模型不同）。
+    expect(reasoning?.defaultEffort).toBe('extra_high')
+  })
+
+  it('**补齐后 listModels 与 resolveModel 的档位口径一致**（8 项都有档位）', async () => {
+    // 用真实 roster 形态（不带档位）走一遍：过滤后 13 项里应有 8 项声明档位。
+    const ids = [
+      'Doubao-Seed-Evolving', 'Doubao-Seed-2.1-Pro', 'Doubao-Seed-2.1-Turbo', 'glm-5.3', 'glm-5.2',
+      'DeepSeek-V4-Flash-Official', 'DeepSeek-V4-Pro-Official', 'kimi-k3', 'kimi-k2.7-code',
+      'kimi-k2.6', 'minimax-m3', 'qwen3.8-max', 'qwen-3.7-plus',
+    ]
+    const { adapter } = makeAdapter(() => sseResponse(''), {
+      fetchRemoteModels: async () => ids.map((id) => ({
+        id, name: id, usage: 'chat_completion', function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+      })),
+    })
+    expect((await adapter.listModels('trae-cn')).map((m) => m.id)).toEqual(ids)
+    let declared = 0
+    for (const id of ids) {
+      const reasoning = (await adapter.resolveModel('trae-cn', id)).reasoning
+      if (reasoning !== undefined) declared += 1
+    }
+    expect(declared).toBe(8)
+    // 反证：三个无档位项确实没有（避免「全补上」也算通过）。
+    for (const id of ['minimax-m3', 'qwen-3.7-plus', 'Doubao-Seed-Evolving']) {
+      expect((await adapter.resolveModel('trae-cn', id)).reasoning, id).toBeUndefined()
+    }
+    // 动态独有项也必须**能**补上档位（kimi-k2.6 不在静态表 → 无档位）。
+    expect((await adapter.resolveModel('trae-cn', 'kimi-k2.6')).reasoning).toBeUndefined()
   })
 })
 
@@ -1626,18 +1685,80 @@ describe('Trae CN 目录拉取（fetchTraeCnDirectory，零网络）', () => {
     expect(await fetchTraeCnDirectory(makeCredential(), { fetchImpl: throws })).toEqual([])
   })
 
-  it('**多模态标记由静态表补齐**（applyTraeCnStaticModalities 只补不增）', () => {
-    const applied = applyTraeCnStaticModalities([
+  it('**多模态与思考档位都由静态表补齐**（applyTraeCnStaticMetadata 只补不增）', () => {
+    const applied = applyTraeCnStaticMetadata([
       { id: 'kimi-k3', name: 'Kimi-K3', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
       { id: 'remote-only', name: 'Remote Only', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
       // 目录将来若自带该字段，以目录为准（不被静态表覆盖）。
       { id: 'glm-5.3', name: 'GLM-5.3', supportsImages: true, function: TRAE_CN_SOLO_REMOTE_FUNCTION },
     ])
     expect(applied[0]!.supportsImages).toBe(true)
-    // 远端独有 id：静态表没有它 → 仍然缺席（保守判纯文本），**不新增条目**。
+    // 档位**同源补上** —— 这是本次缺陷的核心：SOLO 目录不提供档位，
+    // 不补的话「思考程度」选择器整行消失。
+    expect(applied[0]!.reasoningEfforts).toEqual(['light', 'high', 'extra_high'])
+    expect(applied[0]!.defaultReasoningEffort).toBe('extra_high')
+    // 远端独有 id：静态表没有它 → 两个字段都仍然缺席（保守判纯文本、不声明档位），
+    // **不新增条目**。
     expect(applied[1]).not.toHaveProperty('supportsImages')
+    expect(applied[1]).not.toHaveProperty('reasoningEfforts')
     expect(applied[2]!.supportsImages).toBe(true)
+    // 目录给的多模态不被覆盖，但档位仍补（两个字段判据独立）。
+    expect(applied[2]!.reasoningEfforts).toEqual(['light', 'high', 'extra_high'])
     expect(applied).toHaveLength(3)
+  })
+
+  it('**档位补齐判据是 `reasoningEfforts === undefined`，不是目录的 `support_thinking`**', () => {
+    // ⚠️ 这条用例锁死最容易写反的地方：目录的 `support_thinking` **恒为 false**
+    // （实测 9/10 项都是 `{support_thinking:false}`，其余连字段都没有）。
+    // 若照「目录已表态就不覆盖」写，档位将**永远补不上** —— 那正是本次要修的缺陷。
+    const applied = applyTraeCnStaticMetadata([
+      // 目录明说 support_thinking:false，但条目本身没有档位 → **必须补**。
+      { id: 'glm-5.2', name: 'GLM-5.2', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+      // 反例：条目**自带**档位时不被静态表覆盖（目录将来真带上档位的情形）。
+      {
+        id: 'glm-5.2', name: 'GLM-5.2 远端', reasoningEfforts: ['high'], defaultReasoningEffort: 'high',
+        function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+      },
+      // 静态表本身无档位的项（minimax-m3）**不编造**。
+      { id: 'minimax-m3', name: 'MiniMax-M3', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+    ])
+    expect(applied[0]!.reasoningEfforts).toEqual(['high', 'extra_high'])
+    expect(applied[0]!.defaultReasoningEffort).toBe('high')
+    // 自带档位的不覆盖：仍是远端那一档，而不是静态表的两档。
+    expect(applied[1]!.reasoningEfforts).toEqual(['high'])
+    expect(applied[2]).not.toHaveProperty('reasoningEfforts')
+  })
+
+  it('**8 项补齐档位且逐项等于静态表值**（含 kimi-k3 的默认档是 extra_high）', () => {
+    // 用「目录原样返回静态表那 11 项」模拟真实 SOLO 目录：目录条目**不带**档位。
+    const directoryShaped = TRAE_CN_FALLBACK_MODELS.map((model) => ({
+      id: model.id,
+      name: model.name,
+      function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+    }))
+    const applied = applyTraeCnStaticMetadata(directoryShaped)
+    const withEffort = applied.filter((entry) => entry.reasoningEfforts !== undefined)
+    expect(withEffort).toHaveLength(8)
+    for (const entry of applied) {
+      const expected = TRAE_CN_FALLBACK_MODELS.find((m) => m.id === entry.id)!
+      expect(entry.reasoningEfforts, entry.id).toEqual(expected.reasoningEfforts)
+      expect(entry.defaultReasoningEffort, entry.id).toBe(expected.defaultReasoningEffort)
+    }
+    // 逐字符点名一条：档位 id 会原样进请求体，规整化会让上游认不出。
+    expect(applied.find((e) => e.id === 'kimi-k3')!.defaultReasoningEffort).toBe('extra_high')
+  })
+
+  it('**minimax-m3 两条路径同口径**（目录实测 multimodal:false，静态表不再说 true）', () => {
+    const staticValue = TRAE_CN_FALLBACK_MODELS.find((m) => m.id === 'minimax-m3')!.supportsImages
+    // 静态表（目录整体失败时的路径）
+    expect(staticValue).toBe(false)
+    // 动态目录路径：条目不带该字段 → 由静态表补 → 同样是 false。
+    const applied = applyTraeCnStaticMetadata([
+      { id: 'minimax-m3', name: 'MiniMax-M3', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+    ])
+    expect(applied[0]!.supportsImages).toBe(false)
+    // 反证：同表里确有 true 的项，避免「整表被改成 false」还绿。
+    expect(TRAE_CN_FALLBACK_MODELS.find((m) => m.id === 'kimi-k3')!.supportsImages).toBe(true)
   })
 
   it('静态回退目录 = 11 项且全部映射到 `solo_work_remote`', () => {
@@ -1660,6 +1781,272 @@ describe('Trae CN 目录拉取（fetchTraeCnDirectory，零网络）', () => {
     for (const key of ['x-app-id', 'x-ide-version-code', 'request-traffic-type', 'x-plugin-channel', 'User-Agent', 'x-uid']) {
       expect(directory[key], key).toBe(chat[key])
     }
+  })
+})
+
+// ── 四、目录过滤：custom（BYOK）与 invisible（客户端自隐） ──
+
+/**
+ * 实测 14 项账号私有 BYOK 项（2026-09-20 取证清单，逐字符照抄）。
+ *
+ * 它们的三方 key 存在**某个账号**的服务端，列出即误导别的账号。
+ */
+const TRAE_CN_CUSTOM_MODEL_IDS: readonly string[] = [
+  'custom_model_gemini',
+  'custom_model_placeholder',
+  'custom_model_1M_text',
+  'custom_model_1M',
+  'custom_model_doubao_1M',
+  'custom_model_doubao_256k',
+  'custom_model_kimi',
+  'custom_model_claude',
+  'custom_model_gpt-6',
+  'custom_model_gpt-5',
+  'custom_model_no-fc',
+  'custom_model_deepseek_chat',
+  'custom_model_deepseek_reasoner',
+  'custom_model_deepseek_v4',
+]
+
+/**
+ * 实测 8 项 `is_invisible_to_user:true`（客户端自己隐藏）。
+ *
+ * ⚠️ 其中 `seed-code-pro-0430` / `Doubao-Seed-2.0-Code` 的展示名分别是
+ * `Doubao-Seed-2.1-Pro` / `Doubao-Seed-2.1-Turbo`（旧代际重名别名），
+ * `sagitta` / `aquila` 的展示名是 `"-"`。
+ */
+const TRAE_CN_INVISIBLE_IDS: readonly string[] = [
+  'seed-code-pro-0430',
+  'Doubao-Seed-2.0-Code',
+  'glm-5-turbo',
+  'glm-5',
+  'DeepSeek-V4-Flash',
+  'DeepSeek-V4-Pro',
+  'sagitta',
+  'aquila',
+]
+
+/** 实测 26 项用户可调项（40 项并集剔除 5 内部 − 14 custom 后剩 21，其中 8 项 invisible）。 */
+const TRAE_CN_PRESET_IDS: readonly string[] = [
+  'Doubao-Seed-Evolving',
+  'Doubao-Seed-2.1-Pro',
+  'Doubao-Seed-2.1-Turbo',
+  'glm-5.3',
+  'glm-5.2',
+  'DeepSeek-V4-Flash-Official',
+  'DeepSeek-V4-Pro-Official',
+  'kimi-k3',
+  'kimi-k2.7-code',
+  'kimi-k2.6',
+  'minimax-m3',
+  'qwen3.8-max',
+  'qwen-3.7-plus',
+  'seed-code-pro-0430',
+  'Doubao-Seed-2.0-Code',
+  'glm-5-turbo',
+  'glm-5',
+  'DeepSeek-V4-Flash',
+  'DeepSeek-V4-Pro',
+  'sagitta',
+  'aquila',
+]
+
+describe('Trae CN 目录过滤：custom（账号私有 BYOK）', () => {
+  const entryOf = (id: string, extra: Partial<TraeCnModelEntry> = {}): TraeCnModelEntry =>
+    ({ id, name: id, function: TRAE_CN_SOLO_REMOTE_FUNCTION, ...extra })
+
+  it('**14 项 custom 零漏过**（主判据 `usage === "custom_model"`）', () => {
+    for (const id of TRAE_CN_CUSTOM_MODEL_IDS) {
+      expect(isCustomTraeCnModel(entryOf(id, { usage: 'custom_model' })), id).toBe(true)
+    }
+    const merged = mergeTraeCnDirectory([{
+      function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+      entries: [
+        ...TRAE_CN_CUSTOM_MODEL_IDS.map((id) => entryOf(id, { usage: 'custom_model' })),
+        entryOf('glm-5.3', { usage: 'chat_completion' }),
+      ],
+    }], true)
+    expect(merged.map((m) => m.id)).toEqual(['glm-5.3'])
+  })
+
+  it('**`usage` 缺失时由 id 前缀兜底**（上游漏发 `usage` 也不会漏过）', () => {
+    for (const id of TRAE_CN_CUSTOM_MODEL_IDS) {
+      // 不带 usage：只能靠形态判据。
+      expect(isCustomTraeCnModel(entryOf(id)), id).toBe(true)
+    }
+    const merged = mergeTraeCnDirectory([{
+      function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+      entries: TRAE_CN_CUSTOM_MODEL_IDS.map((id) => entryOf(id)),
+    }], true)
+    expect(merged).toEqual([])
+  })
+
+  it('**21 项 preset 零误伤**（正常项一个都不命中两条判据）', () => {
+    for (const id of TRAE_CN_PRESET_IDS) {
+      expect(isCustomTraeCnModel(entryOf(id, { usage: 'chat_completion' })), id).toBe(false)
+    }
+    // 反证：过滤后 normal 项仍在（否则「全被误杀」也会让上面那条假通过）。
+    const merged = mergeTraeCnDirectory([{
+      function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+      entries: TRAE_CN_PRESET_IDS.map((id) => entryOf(id, { usage: 'chat_completion' })),
+    }], true)
+    expect(merged).toHaveLength(TRAE_CN_PRESET_IDS.length)
+  })
+
+  it('**两个陷阱字段不得用作判据**（`config_source` 恒 1 / `is_custom_model` 恒 false）', () => {
+    // 目录里 custom 与正常项的这两个字段**取值完全相同**，用它们判会零命中。
+    // 这里锁死的是「判据只能是 usage + id 前缀」这一事实。
+    const custom = entryOf('custom_model_gemini', { usage: 'custom_model' })
+    const normal = entryOf('glm-5.3', { usage: 'chat_completion' })
+    // 两个条目在接口层面**只有** usage / id 不同 —— 没有别的字段可供判定。
+    expect(Object.keys(custom).sort()).toEqual(Object.keys(normal).sort())
+    expect(isCustomTraeCnModel(custom)).toBe(true)
+    expect(isCustomTraeCnModel(normal)).toBe(false)
+  })
+})
+
+describe('Trae CN 目录过滤：invisible（客户端自隐项）', () => {
+  const entryOf = (id: string, extra: Partial<TraeCnModelEntry> = {}): TraeCnModelEntry =>
+    ({ id, name: id, function: TRAE_CN_SOLO_REMOTE_FUNCTION, ...extra })
+
+  it('**8 项 invisible 全剔除**（含重名别名与展示名为 "-" 的两项）', () => {
+    const merged = mergeTraeCnDirectory([{
+      function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+      entries: [
+        ...TRAE_CN_INVISIBLE_IDS.map((id) => entryOf(id, { invisible: true })),
+        entryOf('glm-5.3', { invisible: false }),
+      ],
+    }], true)
+    expect(merged.map((m) => m.id)).toEqual(['glm-5.3'])
+    for (const id of TRAE_CN_INVISIBLE_IDS) {
+      expect(merged.map((m) => m.id), id).not.toContain(id)
+    }
+  })
+
+  it('**`invisible: undefined` 不剔除**（14 项缺该字段，含两个正常项）', () => {
+    // ⚠️ 写成 `!entry.invisible` 会把这 14 项全部误杀 —— 其中
+    // `qwen3.8-max` / `qwen-3.7-plus` 是**正常可调项**。
+    const merged = mergeTraeCnDirectory([{
+      function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+      entries: [
+        entryOf('qwen3.8-max'),
+        entryOf('qwen-3.7-plus'),
+        entryOf('glm-5.3', { invisible: false }),
+      ],
+    }], true)
+    expect(merged.map((m) => m.id)).toEqual(['qwen3.8-max', 'qwen-3.7-plus', 'glm-5.3'])
+  })
+
+  it('**kimi-k2.7-code / kimi-k2.6 必须保留**（`invisible:false` 的正常项）', () => {
+    // 这两项**不在**静态表里（静态表是旧 IDE 通道的 16 项），只在 SOLO 目录出现；
+    // 一旦被误判成 invisible，用户就永远看不到它们。
+    const merged = mergeTraeCnDirectory([{
+      function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+      entries: [
+        entryOf('kimi-k2.7-code', { invisible: false, usage: 'chat_completion' }),
+        entryOf('kimi-k2.6', { invisible: false, usage: 'chat_completion' }),
+      ],
+    }], true)
+    expect(merged.map((m) => m.id)).toEqual(['kimi-k2.7-code', 'kimi-k2.6'])
+  })
+
+  it('**解析器只把 `true` 读成 invisible**（false / 缺字段都不写该属性）', () => {
+    const parsed = parseTraeCnDirectory({
+      config_info_list: [
+        { config_name: 'a', is_invisible_to_user: true, usage: 'chat_completion' },
+        { config_name: 'b', is_invisible_to_user: false, usage: 'chat_completion' },
+        { config_name: 'c', usage: 'chat_completion' },
+        { config_name: 'd', is_invisible_to_user: 'true', usage: 'chat_completion' },
+      ],
+    }, TRAE_CN_SOLO_REMOTE_FUNCTION)
+    expect(parsed[0]!.invisible).toBe(true)
+    expect(parsed[1]).not.toHaveProperty('invisible')
+    expect(parsed[2]).not.toHaveProperty('invisible')
+    // 字符串 `"true"` **不算**（只认布尔，避免上游形态漂移时误杀）。
+    expect(parsed[3]).not.toHaveProperty('invisible')
+    expect(parsed.map((e) => e.usage)).toEqual(['chat_completion', 'chat_completion', 'chat_completion', 'chat_completion'])
+  })
+})
+
+describe('Trae CN 目录过滤：四道网合流（真实 roster 规模）', () => {
+  const entryOf = (id: string, extra: Partial<TraeCnModelEntry> = {}): TraeCnModelEntry =>
+    ({ id, name: id, function: TRAE_CN_SOLO_REMOTE_FUNCTION, ...extra })
+
+  it('**40 项并集 → 13 项**（−5 内部 −14 custom −8 invisible，实测逐项核对）', () => {
+    // 内部项 5 项：4 项点名 + `computer_use_subagent`（**lite 独有**，由 remote
+    // 优先规则顺带剔除）。
+    const internal = [
+      'summary', 'file_search_agent', 'explore_sub_agent_v2', 'browser_use_subagent',
+    ]
+    const remoteEntries = [
+      ...TRAE_CN_PRESET_IDS.map((id) => entryOf(id, {
+        usage: 'chat_completion',
+        ...TRAE_CN_INVISIBLE_IDS.includes(id as never) ? { invisible: true } : {},
+      })),
+      ...TRAE_CN_CUSTOM_MODEL_IDS.map((id) => entryOf(id, { usage: 'custom_model' })),
+      ...internal.map((id) => entryOf(id, { usage: 'chat_completion', invisible: true })),
+    ]
+    const liteEntries = [
+      ...remoteEntries,
+      // lite 独有项：内部项，且被 remote 优先规则剔除。
+      entryOf('computer_use_subagent', { usage: 'chat_completion', invisible: true }),
+    ]
+    expect(remoteEntries).toHaveLength(39)
+    expect(liteEntries).toHaveLength(40)
+
+    const merged = mergeTraeCnDirectory([
+      { function: TRAE_CN_SOLO_REMOTE_FUNCTION, entries: remoteEntries },
+      { function: TRAE_CN_SOLO_LITE_FUNCTION, entries: liteEntries },
+    ], true)
+
+    expect(merged).toHaveLength(13)
+    expect(merged.map((m) => m.id)).toEqual([
+      'Doubao-Seed-Evolving',
+      'Doubao-Seed-2.1-Pro',
+      'Doubao-Seed-2.1-Turbo',
+      'glm-5.3',
+      'glm-5.2',
+      'DeepSeek-V4-Flash-Official',
+      'DeepSeek-V4-Pro-Official',
+      'kimi-k3',
+      'kimi-k2.7-code',
+      'kimi-k2.6',
+      'minimax-m3',
+      'qwen3.8-max',
+      'qwen-3.7-plus',
+    ])
+    // 算术自查：40 − 5 − 14 − 8 = 13（内部项是 **5** 项，不是 4）。
+    expect(40 - 5 - 14 - 8).toBe(13)
+  })
+
+  it('**过滤后仍补齐档位**（合流顺序：先过滤，后补静态元数据）', () => {
+    const merged = mergeTraeCnDirectory([{
+      function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+      entries: [
+        entryOf('glm-5.3', { usage: 'chat_completion' }),
+        entryOf('custom_model_gemini', { usage: 'custom_model' }),
+      ],
+    }], true)
+    const applied = applyTraeCnStaticMetadata(merged)
+    expect(applied.map((e) => e.id)).toEqual(['glm-5.3'])
+    expect(applied[0]!.reasoningEfforts).toEqual(['light', 'high', 'extra_high'])
+  })
+
+  it('**动态目录的 13 项与静态表 11 项的差集只有两项**（kimi-k2.7-code / kimi-k2.6）', () => {
+    const dynamic = mergeTraeCnDirectory([{
+      function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+      entries: [
+        ...TRAE_CN_PRESET_IDS.map((id) => entryOf(id, {
+          usage: 'chat_completion',
+          ...TRAE_CN_INVISIBLE_IDS.includes(id as never) ? { invisible: true } : {},
+        })),
+        ...TRAE_CN_CUSTOM_MODEL_IDS.map((id) => entryOf(id, { usage: 'custom_model' })),
+      ],
+    }], true).map((e) => e.id)
+    const staticIds = TRAE_CN_FALLBACK_MODELS.map((m) => m.id)
+    expect(dynamic.filter((id) => !staticIds.includes(id))).toEqual(['kimi-k2.7-code', 'kimi-k2.6'])
+    // 反向：静态表里没有一项被过滤掉（11 项全是保留项）。
+    expect(staticIds.filter((id) => !dynamic.includes(id))).toEqual([])
   })
 })
 

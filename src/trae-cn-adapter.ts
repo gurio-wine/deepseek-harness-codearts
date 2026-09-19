@@ -21,8 +21,8 @@
  * | body | `model` + **`config_name`（= model）** + **`function`（模型来源 function）**，见 `buildBody` |
  * | 网关头 | 见 `src/trae-cn-models.ts` 的 `traeCnSoloHeaders`（与目录拉取共用一份） |
  * | 目录 | **动态 `get_detail_param`（按 function 取并集）+ 静态 11 项回退**，见 `ensureRemoteModels` |
- * | 图片 | **按模型给**：静态表 11 项里 7 项多模态 → `['text','image']`，其余 `['text']` |
- * | 思考等级 | **声明档位**（原 13/16 项，现存 8/11 项，真机 vscdb `reasoning_effort_config`），下发字段名 `reasoning_effort_level` |
+ * | 图片 | **按模型给**：静态表 11 项里 6 项多模态 → `['text','image']`，其余 `['text']` |
+ * | 思考等级 | **声明档位**（静态表 8/11 项按 id 补回；SOLO 目录端点不提供档位，见 `applyTraeCnStaticMetadata`），下发字段名 `reasoning_effort_level` |
  *
  * 可原样复用的只有 `src/sse.ts` 的工具函数（它们处理的是 harness 侧的协议层
  * 陷阱，与厂商无关）。
@@ -46,7 +46,7 @@ import type { TraeCnProduct } from './trae-cn-product.js'
 import {
   TRAE_CN_MODELS_TTL_MS,
   TRAE_CN_SOLO_REMOTE_FUNCTION,
-  applyTraeCnStaticModalities,
+  applyTraeCnStaticMetadata,
   fallbackTraeCnCatalog,
   fetchTraeCnDirectory,
   traeCnSoloHeaders,
@@ -288,8 +288,10 @@ export class TraeCnAdapter extends LlmAdapter {
         ? await fetchTraeCnDirectory(credential, { fetchImpl: this.fetchImpl })
         : await this.options.fetchRemoteModels(credential)
       if (entries.length === 0) return
-      // 目录不带多模态标记，用静态表补（**不新增条目**，见该函数的说明）。
-      this.catalog = { entries: applyTraeCnStaticModalities(entries), fetchedAt: Date.now() }
+      // 目录既不提供多模态标记，也不提供思考档位（SOLO 端点的
+      // `reasoning_effort_config` 恒为 `{support_thinking:false}` 空壳），
+      // 两者都由静态表按 id 补回（**不新增条目**，见该函数的说明）。
+      this.catalog = { entries: applyTraeCnStaticMetadata(entries), fetchedAt: Date.now() }
     } catch {
       // 远端不可用：回退静态目录（由 catalogEntries 提供）。
     }
@@ -304,10 +306,10 @@ export class TraeCnAdapter extends LlmAdapter {
    * 模型接受的输入模态。
    *
    * 真机目录（2026-09-18）逐项标了多模态：原 16 项里 **12 项支持图片**；剔除 5 项
-   * SOLO 不可调 id 后现存 11 项里 7 项。动态目录条目由
-   * `applyTraeCnStaticModalities` 从静态表补齐该标记；仍缺省的（远端独有 id）
-   * **保守判为纯文本** —— 目录里没有的能力不该被假定存在（与 `stream()` 的图片
-   * 拦截同向：宁可报 UNSUPPORTED_CONTENT，也不静默丢图）。
+   * SOLO 不可调 id 后现存 11 项里 6 项（`minimax-m3` 按 SOLO 目录实测改为 false）。
+   * 动态目录条目由 `applyTraeCnStaticMetadata` 从静态表补齐该标记；仍缺省的
+   * （远端独有 id）**保守判为纯文本** —— 目录里没有的能力不该被假定存在（与
+   * `stream()` 的图片拦截同向：宁可报 UNSUPPORTED_CONTENT，也不静默丢图）。
    */
   private inputModalitiesFor(supportsImages: boolean | undefined): readonly ['text'] | readonly ['text', 'image'] {
     return supportsImages === true ? ['text', 'image'] : ['text']
@@ -358,7 +360,7 @@ export class TraeCnAdapter extends LlmAdapter {
       provider: this.product.id,
       id: model.id,
       name: model.name,
-      // 模态按目录条目给（静态表 11 项里 7 项多模态）；远端条目无该字段时判纯文本。
+      // 模态按目录条目给（静态表 11 项里 6 项多模态）；远端条目无该字段时判纯文本。
       inputModalities: this.inputModalitiesFor(model.supportsImages),
     }))
   }
@@ -381,7 +383,10 @@ export class TraeCnAdapter extends LlmAdapter {
     // 思考档位：DSH 的「思考程度」选择器**唯一**的数据源就是本字段
     // （`resolveModel().reasoning`）——不声明时模型选择器里整行不渲染，
     // 用户只能看到「当前模型未提供推理等级」。档位数据来自真机 vscdb 的
-    // `reasoning_effort_config`（原 13/16 项、现存 8/11 项有档位）；动态目录里带该配置的项同样声明。
+    // `reasoning_effort_config`（原 13/16 项、现存 **8/11** 项有档位）。
+    // ⚠️ SOLO 目录端点**不提供**档位（`support_thinking` 恒 false、无 options），
+    // 故动态条目在 `applyTraeCnStaticMetadata` 里按 id 从静态表补回；
+    // 目录将来真带上档位时以目录为准（该函数判据是「条目自己有没有档位」）。
     // 无档位的模型（minimax-m3 / qwen-3.7-plus / Doubao-Seed-Evolving）与不在
     // 表内的模型**保持不声明**：那是诚实的，而不是给一个上游不认的档位。
     const efforts = entry?.reasoningEfforts ?? []
@@ -416,7 +421,7 @@ export class TraeCnAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    // 图片：静态表 11 项里 7 项标了多模态，但**本适配器的图片通路未实测**
+    // 图片：静态表 11 项里 6 项标了多模态，但**本适配器的图片通路未实测**
     // （`serializeTraeCnMessages` 只展平文本块，没有把 image 块编码成上游要的
     // 形态）。故这里明确报错而不是静默丢弃 —— 静默丢弃会让用户以为模型看到了
     // 图片，那比报错更糟。

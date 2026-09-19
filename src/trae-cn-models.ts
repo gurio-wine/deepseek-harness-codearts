@@ -153,6 +153,50 @@ export function isInternalTraeCnConfig(id: string): boolean {
   return TRAE_CN_INTERNAL_NAME_PATTERN.test(id)
 }
 
+/**
+ * 账号私有自定义模型（BYOK）的 **id 形态**。
+ *
+ * 实测（2026-09-20）目录里 14 项 custom 项的 id 全部以它开头，且**没有一个**正常
+ * 模型命中该前缀。
+ */
+const TRAE_CN_CUSTOM_MODEL_PREFIX = 'custom_model_'
+
+/**
+ * 判定目录项是否为**账号私有自定义模型**（应当从模型目录里剔除）。
+ *
+ * ## 为什么必须剔
+ *
+ * 这 14 项（`custom_model_gemini` / `custom_model_deepseek_chat` / …）不是云端
+ * 可调模型，而是**账号私有的 BYOK 条目** —— 条目里的 `custom_models` 是三方来源
+ * 列表（如 `["deepseek//deepseek-chat"]`、`["gemini//gemini-3.1-pro-preview"]`），
+ * 三方 key 存在**该账号的服务端**。列进模型选择器的后果：别的账号选中它必然失败，
+ * 而用户完全无法从名字看出「这是某个账号私有的」。
+ *
+ * ## 两道判据（主判据 + 形态兜底）
+ *
+ * 1. **主判据 `usage === 'custom_model'`** —— 目录自己给的语义字段，最准确；
+ * 2. **兜底 `id` 前缀 `custom_model_`** —— 防上游把 `usage` 改掉/漏发。
+ *
+ * ⚠️ **实测三条判据的等价性**（2026-09-20 取证，14 项逐项核对）：
+ *
+ * | 判据 | 命中数 | 与主判据的差集 |
+ * |---|---|---|
+ * | `usage === 'custom_model'` | 14 | —— |
+ * | `id` 前缀 `custom_model_` | 14 | **双向为空**（与主判据完全等价） |
+ * | `Array.isArray(custom_models)` | 13 | **漏 `custom_model_placeholder`**（它的 `custom_models` 是 `null`） |
+ *
+ * 故**不采用** `custom_models` 存在性作判据（会漏一项），只在注释里记下它的形态。
+ * 主判据 + 前缀兜底在真实 roster 上双向差集为空 → **零误伤、零漏过**。
+ *
+ * ⚠️ **两个陷阱字段**（都是恒定的假信息，**不要**拿来判 custom）：
+ * `config_source` 恒为 `1`（custom 与正常项都一样）；`display_config.is_custom_model`
+ * 恒为 `false`（连 `custom_model_gemini` 也是 false）。
+ */
+export function isCustomTraeCnModel(entry: TraeCnModelEntry): boolean {
+  if (entry.usage === 'custom_model') return true
+  return entry.id.startsWith(TRAE_CN_CUSTOM_MODEL_PREFIX)
+}
+
 // ── 模型条目与静态表 ──
 
 /**
@@ -178,7 +222,8 @@ export interface TraeCnFallbackModel {
   contextWindow: number
   /**
    * 是否接受图片输入（真机目录的「多模态」标记，原 16 项里 12 项为真；本表现存
-   * 11 项中 7 项为真 —— 被剔除的 5 项恰好全是多模态项）。
+   * 11 项中 **6 项**为真 —— 被剔除的 5 项恰好全是多模态项，另 1 项见
+   * {@link TRAE_CN_FALLBACK_MODELS} 的 `minimax-m3` 修正说明）。
    *
    * 与 `src/product.ts` 的 `supportsImages` 同语义同字段名：适配器据此在
    * `listModels` / `resolveModel` 里输出 `['text','image']` 或 `['text']`。
@@ -252,8 +297,9 @@ export interface TraeCnFallbackModel {
  *
  * 动态目录（`get_detail_param`）是权威来源；本表在动态目录整体失败时顶替
  * （见 `src/trae-cn-adapter.ts` 的 `ensureRemoteModels`）。它仍是**唯一**记录
- * 「多模态标记」的地方 —— 目录端点不带该字段（见
- * {@link applyTraeCnStaticModalities}）。
+ * 「多模态标记」与**「思考档位」**的地方 —— 目录端点两个字段都不提供（前者本就没有，
+ * 后者的 `reasoning_effort_config` 恒为空壳），见
+ * {@link applyTraeCnStaticMetadata}。
  *
  * ## 4 个旧死 id 的下落（原 8 项静态表里的）
  *
@@ -266,6 +312,17 @@ export interface TraeCnFallbackModel {
  *
  * 真机目录里**没有** `deepseek//deepseek-chat` 与 `deepseek//deepseek-reasoner`：
  * 那两个是账号自定义的 BYOK 条目，不属于云端目录，故**排除**。
+ *
+ * ## ⚠️ `minimax-m3` 的多模态标记已修正为 `false`（2026-09-20）
+ *
+ * 原表照抄的是**旧 IDE 通道** `chat_v3` 缓存里的 `true`，而 SOLO 目录端点实测
+ * `display_config.multimodal: false`（remote 与 lite 两条 function 上分别是
+ * `false` / `true`，`mergeTraeCnDirectory` 的 **remote 优先**规则取到的正是
+ * `false`）。改它与「两条路径同口径」的原则一致：不改的话，同一模型在「目录
+ * 成功」路径判纯文本、在「目录失败」路径判多模态 —— 正是
+ * {@link applyTraeCnStaticMetadata} 要消灭的那种自相矛盾。
+ *
+ * 其余 10 项静态值与目录实测**逐项一致**（取证二次核对，2026-09-20），只改这一项。
  */
 export const TRAE_CN_FALLBACK_MODELS: readonly TraeCnFallbackModel[] = [
   { id: 'Doubao-Seed-Evolving', name: 'Seed-Evolving', supportsImages: true, contextWindow: 262_144, maxTokens: 64_000 },
@@ -276,7 +333,7 @@ export const TRAE_CN_FALLBACK_MODELS: readonly TraeCnFallbackModel[] = [
   { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
   { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
   { id: 'kimi-k3', name: 'Kimi-K3', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'extra_high' },
-  { id: 'minimax-m3', name: 'MiniMax-M3', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000 },
+  { id: 'minimax-m3', name: 'MiniMax-M3', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000 },
   { id: 'qwen3.8-max', name: 'Qwen3.8-Max', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
   { id: 'qwen-3.7-plus', name: 'Qwen3.7-Plus', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
 ]
@@ -308,6 +365,23 @@ export interface TraeCnModelEntry {
   defaultReasoningEffort?: string
   /** 该模型的来源 function（chat 请求的 `function` 字段）。 */
   function: string
+  /**
+   * 目录的 `usage` 字段（实测取值 `chat_completion` / `summary` / `custom_model`）。
+   *
+   * 用途只有一个：识别**账号私有 BYOK 条目**（见 {@link isCustomTraeCnModel}）。
+   * 静态回退表条目**没有**该字段（它们全是云端可调模型）。
+   */
+  usage?: string
+  /**
+   * 目录的 `is_invisible_to_user` 字段 —— **客户端自己会隐藏**的项。
+   *
+   * ⚠️ 三态语义，**不能写成 `!entry.invisible`**：`true` 才剔除；
+   * `false` 与 **`undefined` 都必须保留**。实测（2026-09-20）40 项里
+   * `true` 12 项、`false` 14 项、**缺该字段 14 项**（含 13 项 custom 与
+   * `qwen3.8-max` / `qwen-3.7-plus` 两个正常项）—— 把 undefined 当剔除会把
+   * 正常模型一并干掉。
+   */
+  invisible?: boolean
 }
 
 /** 静态回退表 → 目录条目（全部映射到 {@link TRAE_CN_SOLO_REMOTE_FUNCTION}）。 */
@@ -325,30 +399,68 @@ export function fallbackTraeCnCatalog(): TraeCnModelEntry[] {
 }
 
 /**
- * 用静态表补**多模态标记**（目录端点不提供该字段）。
+ * 用静态表补**目录端点不提供的字段**：多模态标记与**思考档位**。
  *
  * ## 为什么需要这一步
  *
  * `get_detail_param` 的条目里**没有**多模态标记（对照实现只读
  * `config_name` / `display_config` / `model_detail_list` / `context_window_tokens`），
- * 而静态表是真机 vscdb 逐项记录的模态标记（原 16 项里 12 项、现存 11 项里 7 项）。
+ * 而静态表是真机 vscdb 逐项记录的模态标记（原 16 项里 12 项、现存 11 项里 6 项）。
  * 不补的话，动态目录一旦生效，这些支持图片的模型会**全部**变成纯文本 ——
  * 同一模型在「目录拉取成功」与「目录拉取失败」两条路径下报出不同模态，是自相矛盾。
  *
+ * **思考档位同理，且后果更严重**：SOLO 目录端点对用户可调模型**根本不提供档位**
+ * （2026-09-20 取证：9 项带 `reasoning_effort_config` 的全部是
+ * `{support_thinking:false}` 形态，**没有** `options` / `default_level`；另 30 项
+ * 连该字段都没有）。动态目录取代静态表后，DSH 的「思考程度」选择器**整行消失**，
+ * 而档位数据一直是有的（静态表 8 项）。故必须与多模态一起同源补回。
+ *
+ * ## 两条判据**刻意不同**（写反会让档位永远补不上）
+ *
+ * | 字段 | 判据 | 理由 |
+ * |---|---|---|
+ * | `supportsImages` | `entry.supportsImages === undefined` 才补 | 目录**将来可能**带上该字段，届时以目录为准 |
+ * | `reasoningEfforts` | **同样只看 `entry.reasoningEfforts === undefined`** | 见下 |
+ *
+ * ⚠️ **档位绝不能看目录的 `support_thinking`**：目录恒为 `false`（或字段缺席），
+ * 照多模态那种「目录已表态就不覆盖」的写法写，就会得到「目录说 false → 不补」
+ * 的结果 —— 档位**永远补不上**，而这正是本次要修的缺陷。判据只能是
+ * 「动态条目有没有自带档位」，而动态条目**永远不可能**自带（端点不给 options），
+ * 故这条判据等价于「按 id 补」。
+ *
+ * 若上游将来真在目录里发出 `support_thinking:true` + 非空 `options`，
+ * {@link parseTraeCnDirectory} 会把档位读进条目，本条判据随即**自动让位**给目录值
+ * —— 那时 `reasoningEfforts !== undefined`，不再补。
+ *
  * ## 边界（**不是**「接 remote 骨架」）
  *
- * 只对**静态表里已有的 id** 补值，**不新增**任何条目：远端独有 id 的多模态
- * 仍然未知（按纯文本）。骨架合并（把远端独有项也列出来）**刻意不做** ——
- * 那会引入 `join` 不到的不可调项（如旧表里的 `Doubao-Seed-Code`），选中即失败。
- *
- * 已被目录给出模态的条目不覆盖（目录将来若带上该字段，以目录为准）。
+ * 只对**静态表里已有的 id** 补值，**不新增**任何条目：远端独有 id 的多模态与档位
+ * 仍然未知（模态按纯文本、档位不声明）。骨架合并（把远端独有项也列出来）**刻意
+ * 不做** —— 那会引入 `join` 不到的不可调项（如旧表里的 `Doubao-Seed-Code`），
+ * 选中即失败。
  */
-export function applyTraeCnStaticModalities(entries: readonly TraeCnModelEntry[]): TraeCnModelEntry[] {
-  const staticFlags = new Map(TRAE_CN_FALLBACK_MODELS.map((model) => [model.id, model.supportsImages]))
+export function applyTraeCnStaticMetadata(entries: readonly TraeCnModelEntry[]): TraeCnModelEntry[] {
+  const staticById = new Map(TRAE_CN_FALLBACK_MODELS.map((model) => [model.id, model]))
   return entries.map((entry) => {
-    if (entry.supportsImages !== undefined) return entry
-    const known = staticFlags.get(entry.id)
-    return known === undefined ? entry : { ...entry, supportsImages: known }
+    const known = staticById.get(entry.id)
+    if (known === undefined) return entry
+    const patched: TraeCnModelEntry = { ...entry }
+    let changed = false
+    // 多模态：目录已给出该字段时不覆盖（目录优先）。
+    if (entry.supportsImages === undefined) {
+      patched.supportsImages = known.supportsImages
+      changed = true
+    }
+    // 思考档位：判据是「条目自己有没有档位」，**不是**目录的 support_thinking
+    // （目录恒 false，看它就会永远补不上）。
+    if (entry.reasoningEfforts === undefined && known.reasoningEfforts !== undefined) {
+      patched.reasoningEfforts = known.reasoningEfforts
+      if (known.defaultReasoningEffort !== undefined) {
+        patched.defaultReasoningEffort = known.defaultReasoningEffort
+      }
+      changed = true
+    }
+    return changed ? patched : entry
   })
 }
 
@@ -377,7 +489,13 @@ export function applyTraeCnStaticModalities(entries: readonly TraeCnModelEntry[]
  * - 上下文窗口：`model_detail_list[0].prompt_max_tokens`，回退 `context_window_tokens.dev`；
  * - 输出上限：`model_detail_list[0].max_tokens`；
  * - 思考档位：`reasoning_effort_config`（`support_thinking === true` 且 `options`
- *   是非空字符串数组才声明，`default_level` 不在 options 内时只丢默认档）。
+ *   是非空字符串数组才声明，`default_level` 不在 options 内时只丢默认档）；
+ * - 过滤线索：`usage`（识别账号私有 BYOK）与 `is_invisible_to_user`（客户端自隐项）。
+ *
+ * ⚠️ **SOLO 端点的档位字段恒为空壳**：实测 39/40 项里带 `reasoning_effort_config`
+ * 的 9/10 项**全是** `{support_thinking:false}`（无 `options`），其余项连字段都没有。
+ * 故本函数在 SOLO 目录上**永远读不出档位** —— 档位由
+ * {@link applyTraeCnStaticMetadata} 按 id 从静态表补回。这是设计，不是缺陷。
  *
  * @param body - 响应体（任意形态，非对象/缺数组时返回空数组）。
  * @param functionName - 本次拉取用的 function（写进每个条目的 `function`）。
@@ -399,12 +517,17 @@ export function parseTraeCnDirectory(body: unknown, functionName: string): TraeC
     const contextWindow = readPositive(detail?.prompt_max_tokens) ?? readPositive(contextTokens?.dev)
     const maxTokens = readPositive(detail?.max_tokens)
     const reasoning = readReasoningConfig(record)
+    const usage = readString(record.usage)
     entries.push({
       id,
       name: readString(display?.display_name) ?? id,
       ...contextWindow === undefined ? {} : { contextWindow },
       ...maxTokens === undefined ? {} : { maxTokens },
       ...reasoning,
+      // 过滤线索：`usage` 用于识别账号私有 BYOK 项；`is_invisible_to_user`
+      // **只认布尔 true**（缺字段与 false 都不剔除，见 TraeCnModelEntry.invisible）。
+      ...usage === undefined ? {} : { usage },
+      ...record.is_invisible_to_user === true ? { invisible: true } : {},
       function: functionName,
     })
   }
@@ -481,17 +604,33 @@ export interface TraeCnDirectoryGroup {
 /**
  * 合并多个 function 的目录（**first wins，调用方按优先级给顺序**）。
  *
- * ## 两条规则
+ * ## 四道过滤网（在**同一个循环**里逐项判定，与内部项过滤并列）
  *
  * 1. **remote 优先**：先到的 function 拥有该 id（{@link TRAE_CN_SOLO_FUNCTIONS}
  *    的顺序即优先级）。同名 id 在两条 function 下**可能不是同一个可调项**
  *    （`glm-5.3` 只在 remote 集里），故不能后到覆盖先到。
- * 2. **remote 成功时剔除 lite 独有项**：实测「用户可调的项要么两 function 都在集、
- *    要么 remote 独有」，故**只在 lite 出现**的项就是内部 agent 项
- *    （见 {@link isInternalTraeCnConfig}）。remote 整体失败时这条规则不生效 ——
- *    那时 lite 是唯一数据源，留着它的非内部项比空目录有用（空目录会退回静态表）。
+ * 2. **内部 agent 项**（点名或形态命中，见 {@link isInternalTraeCnConfig}）。
+ * 3. **账号私有 BYOK 项**（{@link isCustomTraeCnModel}）：14 项
+ *    `custom_model_*`，三方 key 存在别的账号服务端，列出即误导。
+ * 4. **客户端自隐项**（`invisible === true`）：8 项 —— 其中 `seed-code-pro-0430`
+ *    与 `Doubao-Seed-2.0-Code` 的展示名分别是 **`Doubao-Seed-2.1-Pro` /
+ *    `Doubao-Seed-2.1-Turbo`**（旧代际重名别名，不剔会与真身**重名**出现在
+ *    选择器里），`sagitta` / `aquila` 的展示名是 **`"-"`**。客户端自己隐藏它们。
  *
- * 内部项（点名或形态命中）在两条路径上都会被过滤掉。
+ * ## remote 成功时剔除 lite 独有项
+ *
+ * 实测「用户可调的项要么两 function 都在集、要么 remote 独有」，故**只在 lite 出现**
+ * 的项就是内部 agent 项（见 {@link isInternalTraeCnConfig}）。remote 整体失败时这条
+ * 规则不生效 —— 那时 lite 是唯一数据源，留着它的非内部项比空目录有用（空目录会退回
+ * 静态表）。
+ *
+ * ## 过滤后的规模（2026-09-20 取证实测，逐项核对）
+ *
+ * `40（并集）− 5（内部）− 14（custom）− 8（invisible）= 13 项`。
+ * ⚠️ 内部项是 **5** 项而非 4：`computer_use_subagent` 是 **lite 独有**项，它在
+ * 第 1 条规则（remote 成功时剔除 lite 独有）里就已经出局，故容易被漏算。
+ * 13 项与静态回退表（11 项）的差集是 `kimi-k2.7-code` / `kimi-k2.6` 两项 ——
+ * 它们是 `is_invisible_to_user:false` 的**正常项**，必须保留。
  */
 export function mergeTraeCnDirectory(
   groups: readonly TraeCnDirectoryGroup[],
@@ -501,6 +640,8 @@ export function mergeTraeCnDirectory(
   for (const group of groups) {
     for (const entry of group.entries) {
       if (isInternalTraeCnConfig(entry.id)) continue
+      if (isCustomTraeCnModel(entry)) continue
+      if (entry.invisible === true) continue
       if (byId.has(entry.id)) continue
       byId.set(entry.id, entry)
     }
@@ -557,7 +698,7 @@ export async function fetchTraeCnDirectory(
     }
   }
 
-  return applyTraeCnStaticModalities(mergeTraeCnDirectory(groups, remoteSucceeded))
+  return applyTraeCnStaticMetadata(mergeTraeCnDirectory(groups, remoteSucceeded))
 }
 
 // ── 网关头 ──

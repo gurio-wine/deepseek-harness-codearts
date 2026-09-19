@@ -963,7 +963,7 @@ provider id 是 `trae-cn`（带连字符，对齐用户与生态叫法），但 
 | 字段 | 说明 |
 |---|---|
 | `model` / `config_name` | **两个字段都要给，且恒等**（网关按 `config_name` 选配置） |
-| `function` | **模型来源 function**：CN 区为 `solo_work_remote`（41 项）/ `solo_work_lite` |
+| `function` | **模型来源 function**：CN 区为 `solo_work_remote`（40 项）/ `solo_work_lite` |
 | `messages[].content` | **`[{type:'text',text}]` 数组**（不是裸字符串） |
 | `role:"developer"` | **归一为 `"system"`**（上游不认 developer） |
 | assistant `tool_calls[].function` | **出站改名 `function_call`**（无 er；入站帧仍是 `function`，故解析侧不动） |
@@ -991,7 +991,10 @@ User-Agent:         Trae/0.1.61   ← 与上面两个头同代际
 ```
 
 - **值域**（目录端点值扫描）：只有 **8 位日期式**才命中非空配置表；`20260801` 起
-  表已满 **41 项**，取证当日（`20260919`）同为 41 项；
+  表已满，取证当日（`20260919`）为 41 项、二次取证（`20260920`）为 **40 项**
+  （**remote 39 / lite 40 / 交集 39**，lite 独有一项 `computer_use_subagent`）；
+  ⚠️ 前序记载的「41 项」是**单次快照**，`20260920` 复测为 40 项 —— roster 会随
+  上游增删浮动，**不要把它当常量**（代码里也没有任何地方依赖该数字）；
 - **只认 `x-ide-version-code`**：`x-app-version-code` 与选表**无关**（已隔离验证），
   但本实现让它与前者**同代际**，免得两个版本头自相矛盾；
 - **两组版本码同名不同物，不可合并**（`src/trae-cn-product.ts` 里是**四个**独立
@@ -1097,7 +1100,7 @@ IDE 通道对我方新池请求的恒定回复。归**可重试**（退避）而
 > 真正可用的是 `get_detail_param`，且**必须按 `function` 分别拉取后取并集**：
 > roster 被 Trae 摊在多个 SOLO function 下（`glm-5.3` 只在 `solo_work_remote`）。
 
-**目录过滤规则**（`src/trae-cn-models.ts` 的 `mergeTraeCnDirectory`）：
+**目录过滤规则**（`src/trae-cn-models.ts` 的 `mergeTraeCnDirectory`，**四道网**）：
 
 1. **remote 优先**：同名 id 以先到的 function 为准（顺序即优先级）；
 2. **remote 成功时剔除 lite 独有项** —— 实测「用户可调的项要么两个 function
@@ -1106,17 +1109,67 @@ IDE 通道对我方新池请求的恒定回复。归**可重试**（退避）而
    `explore_sub_agent_v2` / `browser_use_subagent` / `computer_use_subagent`）
    + 形态（id 里含 `agent` / `subagent`）。现存 11 项**一个都不命中**该形态，
    故不会误杀用户可调的模型；
-4. **刻意不接 remote 骨架合并**：把远端独有项也列出来会引入 `join` 不到的不可调项
+4. **账号私有 BYOK 项过滤**（`isCustomTraeCnModel`）：14 项 `custom_model_*`
+   是**某个账号私有的三方来源**（`custom_models:["deepseek//deepseek-chat"]` 这种，
+   key 存在该账号服务端），列进选择器只会让别的账号选中即失败，且用户无法从名字
+   看出它是私有的。判据 = **主判据 `usage === 'custom_model'`** + **兜底 id 前缀
+   `custom_model_`**（实测两条判据在真实 roster 上**双向差集为空**，零误伤零漏过）。
+   ⚠️ **两个陷阱字段不可用作判据**：`config_source` 恒为 `1`、
+   `display_config.is_custom_model` **恒为 `false`**（连 `custom_model_gemini` 也是
+   false）；`Array.isArray(custom_models)` 会**漏掉 `custom_model_placeholder`**
+   （它的 `custom_models` 是 `null`），故只作兜底不作主判据；
+5. **客户端自隐项过滤**（`invisible === true`）：8 项 `is_invisible_to_user:true`
+   —— 客户端自己隐藏它们。其中 `seed-code-pro-0430` / `Doubao-Seed-2.0-Code` 的
+   展示名分别是 **`Doubao-Seed-2.1-Pro` / `Doubao-Seed-2.1-Turbo`**（**旧代际重名
+   别名**，不剔会与真身重名出现在选择器里，用户无从分辨），`sagitta` / `aquila`
+   的展示名是 **`"-"`**。⚠️ **三态语义，不能写成 `!entry.invisible`**：`true` 才剔，
+   **`undefined` 必须保留**（实测 40 项里 `true` 12 项、`false` 14 项、**缺该字段
+   14 项**，其中 `qwen3.8-max` / `qwen-3.7-plus` 是**正常项**）。反向陷阱：
+   `kimi-k2.7-code` / `kimi-k2.6` 是 `is_invisible_to_user:false` 的**正常项，
+   必须保留**；
+6. **刻意不接 remote 骨架合并**：把远端独有项也列出来会引入 `join` 不到的不可调项
    （如旧表里的 `Doubao-Seed-Code`），选中即路由失败；
-5. **多模态标记由静态表补齐**（目录端点不带该字段）：只对**静态表已有的 id** 补值、
-   **不新增条目**。不补的话，动态目录一旦生效，支持图片的模型会全部变成纯文本
-   —— 同一模型在「目录成功」与「目录失败」两条路径下报出不同模态，是自相矛盾。
+7. **多模态标记与思考档位由静态表补齐**（目录端点两个都不提供，见下）：只对
+   **静态表已有的 id** 补值、**不新增条目**。不补的话，同一模型在「目录成功」与
+   「目录失败」两条路径下会报出不同模态、且档位**整行消失**，是自相矛盾。
+
+> **过滤后的规模（2026-09-20 取证，真实 roster 逐项核对）**：
+> `40（并集）− 5（内部）− 14（custom）− 8（invisible）= 13 项`。
+> ⚠️ 内部项是 **5** 项而非 4：`computer_use_subagent` 是 **lite 独有**项，在第 2 条
+> 规则里就已出局，容易被漏算。
+> 动态目录的 13 项与静态回退表（11 项）的差集**只有两项**：
+> `kimi-k2.7-code` / `kimi-k2.6`（它们不在旧 IDE 通道的 16 项里，只在 SOLO roster）。
+
+### ⚠️ 「客户端模型池（IDE 代际）」≠「SOLO 网关配置表」
+
+**这是理解本 provider「少模型」报障的关键区分**，两个池的成员**不重合**，而本
+provider **只走 SOLO**：
+
+| | 客户端模型池（IDE 代际） | **SOLO 网关配置表（本 provider 的权威可用集）** |
+|---|---|---|
+| 来源 | Trae 客户端本地 `vscdb` 缓存 / 客户端 UI | `get_detail_param` 按 `x-ide-version-code` 选出的表 |
+| 规模 | 旧 `chat_v3` 16 项 | 40 项（`20260920`） |
+| 能否路由 | **取决于客户端本地缓存**，与网关无关 | **能** —— 本 provider 的请求只认它 |
+| 典型独有项 | `Doubao-Seed-Code` / `glm-5.3-flash` / `deepseek-v4.1-flash` / `kimi-k2.8-preview` / `qwen3.8-flash` | `kimi-k2.7-code` / `kimi-k2.6`（客户端池里没有） |
+
+要点：
+
+- **客户端能显示的模型受本地缓存影响**（缓存是客户端上次拉取/登录时的快照，可能
+  滞后或超前于服务端），**不能**把它当作「服务端有什么」的证据；
+- **SOLO 表才是本 provider 的权威可用集**：请求发到 SOLO 网关，网关按
+  `config_name` 在**它自己那张表**里找配置，找不到即 `4001 param is invalid` ——
+  与客户端 UI 上显示什么**无关**；
+- 故 **5 项剔除（`glm-5.3-flash` 等）已二次确认非误伤**：它们在 SOLO 表里确实
+  不存在，留着只会产出必然 `4001` 的死选项（详见下「静态回退表」的说明）；
+- 反向也成立：`kimi-k2.7-code` / `kimi-k2.6` 只在 SOLO 表里、不在旧客户端池里
+  —— 它们是**正常可调项**（`is_invisible_to_user:false`），**必须保留**。
 
 **静态回退表（11 项）**：
 
 > ⚠️ **为什么是 11 项而不是真机目录的 16 项**（2026-09-19 二次取证）：
 > 原表 16 项录自**旧 IDE 通道**的 `chat_v3` 目录；chat 迁到 **SOLO 通道**后，
-> 该通道 roster 的 **41 项**里**没有**下面这 5 项，故它们**调不了**：
+> 该通道 roster（`20260919` 快照 41 项 / `20260920` 复测 **40 项**）里
+> **没有**下面这 5 项，故它们**调不了**：
 >
 > | 剔除的 id | 展示名 |
 > |---|---|
@@ -1145,7 +1198,7 @@ IDE 通道对我方新池请求的恒定回复。归**可重试**（退避）而
 | `DeepSeek-V4-Flash-Official` | `DeepSeek-V4-Flash 正式版` | ✗ | 64000 | 119040/1048576 |
 | `DeepSeek-V4-Pro-Official` | `DeepSeek-V4-Pro 正式版` | ✗ | 64000 | 119040/1048576 |
 | `kimi-k3` | `Kimi-K3` | ✓ | 64000 | 204800/1048576 |
-| `minimax-m3` | `MiniMax-M3` | ✓ | 64000 | 119040/1048576 |
+| `minimax-m3` | `MiniMax-M3` | ✗ | 64000 | 119040/1048576 |
 | `qwen3.8-max` | `Qwen3.8-Max` | ✓ | 64000 | 204800/1048576 |
 | `qwen-3.7-plus` | `Qwen3.7-Plus` | ✓ | 64000 | 204800/1048576 |
 
@@ -1154,15 +1207,24 @@ IDE 通道对我方新池请求的恒定回复。归**可重试**（退避）而
 id 形态极不规则（`qwen-3.7-plus` 带连字符、`minimax-m3` 全小写）——**任何规整化
 都会让请求打到不存在的模型上**，故原样保留。
 
-⚠️ 该表现在是**回退表**（不再是唯一目录），但它仍是**唯一**记录「多模态标记」的
-地方：目录端点不带该字段，故动态目录生效时由 `applyTraeCnStaticModalities` 按 id
-把标记补回来（只补不增，见上「目录过滤规则」第 5 条）。
+⚠️ **`minimax-m3` 的多模态标记已由 `✓` 修正为 `✗`（2026-09-20）**：原值照抄的是
+**旧 IDE 通道** `chat_v3` 缓存，而 SOLO 目录端点实测 `display_config.multimodal:false`
+（remote / lite 两条 function 上分别是 `false` / `true`，合并规则取 **remote 优先**
+→ `false`）。不改的话，同一模型在「目录成功」路径判纯文本、在「目录失败」路径判
+多模态 —— 正是静态补齐要消灭的那种自相矛盾。**其余 10 项静态值与目录实测逐项一致**
+（二次核对），只改这一项，故现存 11 项里多模态项由 7 项变为 **6 项**。
+
+⚠️ 该表现在是**回退表**（不再是唯一目录），但它仍是**唯一**记录「多模态标记」与
+**「思考档位」**的地方：目录端点两个字段都不提供（前者本就没有，后者的
+`reasoning_effort_config` 恒为空壳），故动态目录生效时由 `applyTraeCnStaticMetadata`
+按 id 把两者一起补回来（只补不增，见上「目录过滤规则」第 7 条）。
 
 - 上下文窗口取 **dev 档**（如 `262144/1048576` → 262144）：它是客户端默认实际
   使用的窗口。max 档（多数 1048576）是理论上限，按它声明会让 DSH 的上下文压缩
   迟迟不触发；动态目录同口径取 `prompt_max_tokens`（回退 `context_window_tokens.dev`）；
-- `inputModalities` **按模型给**：多模态项（原 16 项里 12 项、**现存 11 项里 7 项**
-  —— 被剔除的 5 项恰好全是多模态项）输出 `['text','image']`，其余 `['text']`。
+- `inputModalities` **按模型给**：多模态项（原 16 项里 12 项、**现存 11 项里 6 项**
+  —— 被剔除的 5 项恰好全是多模态项，另 1 项是上面的 `minimax-m3` 修正）输出
+  `['text','image']`，其余 `['text']`。
   `listModels` 与 `resolveModel` 读的是同一个 `supportsImages` 字段，两处口径强制
   同源（不一致会让选择器与请求路径自相矛盾）；
 - `maxTokens` **只记录不 materialize**：DSH 的 `defaultMaxTokens` 会在调用方未给
@@ -1173,13 +1235,37 @@ id 形态极不规则（`qwen-3.7-plus` 带连字符、`minimax-m3` 全小写）
   `description` 会污染选择器文案）。新的目录解析器**不读它** —— 读出来没有任何
   落点，留着只会让人以为它被用上了。
 
-**思考档位（reasoning effort）已接线**：原 16 项里 13 项声明档位、现存 11 项里
-**8 项**声明，另 3 项（`minimax-m3` / `qwen-3.7-plus` / `Doubao-Seed-Evolving`）
-刻意不声明（被剔除的 5 项恰好全都有档位）。
+**思考档位（reasoning effort）已接线**：静态表 11 项里 **8 项**声明档位，另 3 项
+（`minimax-m3` / `qwen-3.7-plus` / `Doubao-Seed-Evolving`）刻意不声明（被剔除的 5 项
+恰好全都有档位）。
+
+> ⚠️ **档位来源已变更（2026-09-20，用户报障的根因）**：**SOLO 目录端点不提供档位**。
+> 取证实测：`get_detail_param` 的 39/40 项里，带 `reasoning_effort_config` 的
+> 9/10 项**全是 `{support_thinking:false}` 空壳**（没有 `options` / `default_level`），
+> 其余项连该字段都没有 —— 即 `parseTraeCnDirectory` 在 SOLO 目录上**永远读不出档位**。
+> 动态目录取代静态表后，「思考程度」选择器**整行消失**（`resolveModel().reasoning`
+> 是唯一数据源）。
+>
+> **修法**：`applyTraeCnStaticMetadata`（原 `applyTraeCnStaticModalities`）在按 id
+> 补多模态之外，**同源按 id 补 `reasoningEfforts` / `defaultReasoningEffort`**。
+> 判据是 **`entry.reasoningEfforts === undefined` 时才补** ——
+> ⚠️ **绝不能看目录的 `support_thinking`**：目录恒为 `false`，照「目录已表态就不覆盖」
+> 的写法写就**永远补不上**（多模态那边确实是这个语义，两者判据**刻意不同**）。
+> 动态条目永远不可能自带档位，故该判据等价于「按 id 补」；上游将来真发出
+> `support_thinking:true` + 非空 `options` 时，解析器会把档位读进条目，这条判据
+> 随即自动让位给目录值。
+>
+> 补齐的 **8 项**：`Doubao-Seed-2.1-Pro`(light/high,def high)、
+> `Doubao-Seed-2.1-Turbo`(light/high,def high)、`glm-5.3`(light/high/extra_high,def high)、
+> `glm-5.2`(high/extra_high,def high)、`DeepSeek-V4-Flash-Official`、
+> `DeepSeek-V4-Pro-Official`、`kimi-k3`(def **extra_high**)、`qwen3.8-max`。
+> `kimi-k2.7-code` / `kimi-k2.6`（动态目录独有）**不在静态表** → 不补，保持不声明。
+> `fallbackTraeCnCatalog()` 自带的档位不受影响（它本就来自静态表）。
 
 - 档位数据来自真机 **vscdb 缓存**（`User/globalStorage/state.vscdb` 的
   `reasoning_effort_config{support_thinking, options, default_level}`，
-  2026-09-18 只读提取）。两套模型池各有一份：**`chat_v3`（IDE 对话，即本插件
+  2026-09-18 只读提取；2026-09-20 对 vscdb 逐字符复核，8 项静态值**准确**）。
+  两套模型池各有一份：**`chat_v3`（IDE 对话，即本插件
   走的路径）** 与 `solo_agent`（SOLO）——本插件取 **`chat_v3`** 那套。两者档位
   集合相同，但默认档不同（如 `glm-5.3` 在 chat_v3 是 `high`、solo_agent 是
   `extra_high`），**不可混用**；
@@ -1211,10 +1297,14 @@ serde 字段块里两者**并列存在**，印证这是「两套账号体系各�
 > 但也不是可用来判定字段名的信号）。字段名本身由上述静态证据三方互证定案；
 > 「档位是否生效」需一次能跑通的对话来对比 `reasoning_content` 长度。
 
-> ℹ️ **远端目录项的档位**：`get_detail_param` 的条目若带
-> `reasoning_effort_config`（`support_thinking:true` + 非空 `options`），同样会被
-> 声明；**没有该字段就不声明** —— 不编造档位。`default_level` 不在 `options` 内时
-> **只丢默认档、保留档位列表**（上游发出不自洽组合时用户仍能手动选档）。
+> ℹ️ **远端目录项的档位（已作废的期待，保留作对照）**：原实现写的是
+> 「`get_detail_param` 的条目若带 `reasoning_effort_config`
+> （`support_thinking:true` + 非空 `options`），同样会被声明；**没有该字段就不声明**
+> —— 不编造档位」。前半句的**解析**仍然正确（`parseTraeCnDirectory` 照旧按该判据读，
+> `default_level` 不在 `options` 内时只丢默认档、保留档位列表），
+> **但后半句是缺陷**：SOLO 目录**根本不发** `options`（9/10 项是
+> `{support_thinking:false}` 空壳），照此就得到「一项档位都没有」。
+> 正确语义是**按 id 从静态表补**（见上「档位来源已变更」）。
 
 **旧「为何不接远端模型目录」的实测表仍然有效，但它只说明那三个端点不可用**
 （2026-09-18 三端点实测结论）：
