@@ -469,6 +469,48 @@ Account Hub 面板标题栏的「**显示列表**」按钮展开该 provider 的
 - 相关 RPC 端点：`model.list`（列出模型并回填 `disabled`）、`model.setDisabled`
   （打开/关闭单个模型），实现见 `src/jet-hub-rpc.ts`。
 
+#### 显示列表的回填机制与过滤
+
+「显示列表」弹窗的模型集合**不只是**适配器播报的那份目录，而是
+`llm.listModels()` **并上**黑名单里的历史键 —— 由 `model.list` 端点完成（见
+`src/jet-hub-rpc.ts`）。这套「并集回填」有两个方向都必须正确：
+
+**为什么要回填。** 适配器的 `listModels` 会实时剔除黑名单命中的模型，因此
+`llm.listModels()` 的结果里**没有**被关闭的模型。若设置页直接用它渲染，被关掉的
+模型会连同它的开关一起消失，用户**再也无法重新打开**（只能手工编辑
+`settings.yaml`）。所以端点把「黑名单里为 `true`、却已不在目录中」的 id 补回列表
+并标记为 `disabled`；对话框模型选择器读的仍是过滤后的 `llm.listModels()`，
+**可见性行为完全不变**。回填是必要的：模型临时下线但黑名单仍留记录时，
+用户仍应能重新打开它。
+
+**垃圾键为什么不回填。** 回填的候选是**黑名单的键名**，而黑名单是历史累积的 ——
+在目录过滤规则上线**之前**，列表里还列着账号私有 BYOK（`custom_model_*`）、
+客户端自隐项（`is_invisible_to_user:true`）与内部 agent 项，用户当时关掉它们，
+键就永久落进了 `disabledModels`。实测（2026-09-20）：目录 13 项 **∪** 黑名单 30 个
+历史键 = 弹窗 **43 行**，其中 14 个 `custom_model_*` —— 而目录侧这 13 项里
+custom / invisible 各为 0，两边自相矛盾。更麻烦的是副作用：这些键已在黑名单里，
+用户点开关只会在**同一批键上**增删，列表永远清不掉这批僵尸行。
+
+故回填侧先过一道**与目录同源**的垃圾判定（`isTraeCnJunkModelId`，
+`src/trae-cn-models.ts`）：`custom_model_` 前缀、内部 agent 项（点名 + 形态）、
+实测的 8 项 invisible 点名清单。判定按 **id 形态**，因此对 `trae-cn` 与
+`trae-cn-work` **两个 provider 通用**（同一个 Trae 账号体系，僵尸键长得一样）。
+**其它 provider 不套这道过滤**：Buddy 系 / LobsterAI / Codearts 的黑名单语义没变，
+套上只会让一个恰好长成 `xxx_agent` 的真实模型无法被重新打开。
+
+**顺手清尸。** `model.list` 还会把命中垃圾判定的键从黑名单里**真正剔除**并写回
+settings（逐个走 `AccountPool.setModelDisabled(id, false)`，即「读 → 改 → 整体
+replace」，因此账号列表与数据版本号一并携带，不会被写坏）。这样僵尸键不会永远
+留在配置文件里 —— 只过滤不清理的话，每次开面板都要再判一遍，且用户换回旧版本
+插件时它们会重新冒出来。清理**一次性**：清完之后黑名单里无垃圾键，后续刷新
+设置页**零写入**（有测试钉死这一点）。**正常**被关闭的模型哪怕暂时不在目录里也
+**一律保留**，只删被垃圾判定点名的键。
+
+相关常量与判据集中在 `src/trae-cn-models.ts`
+（`TRAE_CN_INVISIBLE_MODEL_IDS` / `isTraeCnJunkModelId`），测试见
+`tests/unit/jet-hub-rpc.spec.ts` 的「黑名单并集：垃圾键不回填」与
+`tests/unit/trae-cn-adapter.spec.ts` 的「垃圾 id 判定」两组。
+
 ### 积分余额（Credits Balance）
 
 账号卡片上的「积分」一行显示该账号的**可用积分**，与 IDE 顶部显示的

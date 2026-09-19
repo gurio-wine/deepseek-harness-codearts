@@ -32,6 +32,7 @@ import {
   fetchTraeCnDirectory,
   isCustomTraeCnModel,
   isInternalTraeCnConfig,
+  isTraeCnJunkModelId,
   mergeTraeCnDirectory,
   parseTraeCnDirectory,
   traeCnSoloHeaders,
@@ -1965,6 +1966,77 @@ describe('Trae CN 目录过滤：invisible（客户端自隐项）', () => {
     // 字符串 `"true"` **不算**（只认布尔，避免上游形态漂移时误杀）。
     expect(parsed[3]).not.toHaveProperty('invisible')
     expect(parsed.map((e) => e.usage)).toEqual(['chat_completion', 'chat_completion', 'chat_completion', 'chat_completion'])
+  })
+})
+
+/**
+ * 裸 id 版垃圾判定（`isTraeCnJunkModelId`）—— 服务于 `model.list` 的**黑名单
+ * 并集回填**，那里的候选来自 settings 的**键名**，手上没有任何目录字段。
+ *
+ * 这组用例与上面的目录过滤共用同一批实测清单（`TRAE_CN_CUSTOM_MODEL_IDS` /
+ * `TRAE_CN_INVISIBLE_IDS` / `TRAE_CN_PRESET_IDS`），因此它同时是**同源性断言**：
+ * 两个判据对真实 roster 的结论必须一致，不能出现「目录里剔了、回填又补回来」。
+ */
+describe('Trae CN 垃圾 id 判定（裸 id，供 model.list 回填侧使用）', () => {
+  it('**14 项 custom 全部命中**（前缀判据，无 usage 字段可用）', () => {
+    for (const id of TRAE_CN_CUSTOM_MODEL_IDS) {
+      expect(isTraeCnJunkModelId(id), id).toBe(true)
+    }
+  })
+
+  it('**8 项 invisible 全部命中**（点名清单）', () => {
+    for (const id of TRAE_CN_INVISIBLE_IDS) {
+      expect(isTraeCnJunkModelId(id), id).toBe(true)
+    }
+  })
+
+  it('**内部 agent 项全部命中**（点名 + 形态两道网）', () => {
+    for (const id of TRAE_CN_INTERNAL_CONFIG_NAMES) {
+      expect(isTraeCnJunkModelId(id), id).toBe(true)
+    }
+    // 形态命中的**将来项**也要挡住：上游随时可能新增一个 `xxx_agent`。
+    expect(isTraeCnJunkModelId('some_new_subagent')).toBe(true)
+    expect(isTraeCnJunkModelId('coder_agent_v3')).toBe(true)
+  })
+
+  it('**13 项可见目录零误伤**（= 40 − 5 内部 − 14 custom − 8 invisible）', () => {
+    // ⚠️ 这里必须先把 8 项 invisible 从 preset 清单里剔掉：`TRAE_CN_PRESET_IDS`
+    // 是「剔除了内部项与 custom 之后的 21 项」，其中 8 项是客户端自隐项 ——
+    // 它们**本来就该**命中垃圾判定。剩下的 13 项才是真机目录的那 13 行。
+    const visible = TRAE_CN_PRESET_IDS.filter((id) => !TRAE_CN_INVISIBLE_IDS.includes(id))
+    expect(visible).toHaveLength(13)
+    // 误杀的后果是用户**无法重新打开**一个真实模型 —— 比多显示一行僵尸更糟，
+    // 因此这条断言是这组用例里最重要的一条。
+    for (const id of visible) {
+      expect(isTraeCnJunkModelId(id), id).toBe(false)
+    }
+  })
+
+  it('**目录路径与回填路径对真实 roster 结论一致**（不产生「剔了又补回来」）', () => {
+    // 两条判据必须同源：目录过滤（`mergeTraeCnDirectory`）剔掉的项，
+    // `model.list` 的回填侧必须也认定它是垃圾，否则僵尸行会被补回列表 ——
+    // 那正是本次缺陷的形态。
+    const dropped = [
+      ...TRAE_CN_CUSTOM_MODEL_IDS,
+      ...TRAE_CN_INVISIBLE_IDS,
+      ...TRAE_CN_INTERNAL_CONFIG_NAMES,
+    ]
+    for (const id of dropped) {
+      expect(isTraeCnJunkModelId(id), id).toBe(true)
+    }
+    const visible = TRAE_CN_PRESET_IDS.filter((id) => !TRAE_CN_INVISIBLE_IDS.includes(id))
+    for (const id of visible) {
+      expect(isTraeCnJunkModelId(id), id).toBe(false)
+    }
+  })
+
+  it('空串 / 普通未知名不命中（判定不误伤将来上线的新模型）', () => {
+    expect(isTraeCnJunkModelId('')).toBe(false)
+    expect(isTraeCnJunkModelId('glm-6')).toBe(false)
+    expect(isTraeCnJunkModelId('kimi-k4')).toBe(false)
+    // Work 池的 `-Official` 后缀项与 IDE 的同名旧项**不是一回事**，不许误伤。
+    expect(isTraeCnJunkModelId('DeepSeek-V4-Flash-Official')).toBe(false)
+    expect(isTraeCnJunkModelId('DeepSeek-V4-Pro-Official')).toBe(false)
   })
 })
 

@@ -582,21 +582,33 @@ describe('model.list / model.setDisabled 端点', () => {
      * 仅当需要验证「适配器未过滤」这一非真实场景时才置为 false。
      */
     adapterFiltersDisabledModels?: boolean
+    /**
+     * 预置账号列表（用于断言整体 replace 不会把 accounts 写坏）。
+     *
+     * ⚠️ 形状必须是**完整**的 `ProviderAccountEntry`：`writeModels` 走的是整体
+     * replace，若这里塞个残缺对象，测出来的会是「替身数据不全」而不是真实缺陷。
+     */
+    accounts?: Array<Record<string, unknown>>
+    /** 预置数据版本号（断言它将随 replace 一起被携带）。 */
+    schemaVersion?: number
   }) {
     // settings 替身：内存里保存 namespace 的值，语义与真实服务一致的
     // 「整体 replace」。
     let stored: Record<string, unknown> = {
-      accounts: [],
+      accounts: options.accounts ?? [],
       ...options.disabledModels !== undefined ? { disabledModels: options.disabledModels } : {},
+      ...options.schemaVersion !== undefined ? { schemaVersion: options.schemaVersion } : {},
     }
     let handler: Handler | undefined
+    // 落盘次数：用于断言「没有垃圾键时不写盘」。
+    let writes = 0
 
     const pool = new AccountPool({
       get: (key: string) => key === 'settings'
         ? {
             register: () => ({
               get: () => stored,
-              replace: async (value: Record<string, unknown>) => { stored = value },
+              replace: async (value: Record<string, unknown>) => { stored = value; writes++ },
             }),
           }
         : undefined,
@@ -667,7 +679,7 @@ describe('model.list / model.setDisabled 端点', () => {
       return body.result
     }
 
-    return { call, pool, storedValue: () => stored }
+    return { call, pool, storedValue: () => stored, writeCount: () => writes }
   }
 
   const MODELS = [
@@ -824,6 +836,232 @@ describe('model.list / model.setDisabled 端点', () => {
 
     expect(result.ok).toBe(false)
     expect(result.error?.message).toContain('令牌已过期')
+  })
+
+  /**
+   * 黑名单并集回填的**垃圾键过滤**（2026-09-20 报障修复）。
+   *
+   * ## 缺陷形态（真机取证）
+   *
+   * 目录过滤网上线（`1e2e15b`）后，`trae-cn` 的 `listModels` 只报 13 项、
+   * 0 custom / 0 invisible。但 Account Hub「显示列表」弹窗仍有 **43 行**，
+   * 其中 14 个 `custom_model_*` —— 全由 `model.list` 的回填侧补回来的：
+   * `13（目录）∪ 30（黑名单里的历史键）= 43`。
+   *
+   * 这 30 个键是用户在过滤网上线**之前**从 UI 关掉的 custom / invisible / 内部项。
+   * 副作用：它们已在黑名单里，用户点开关只会在**同一批键上**增删，
+   * 列表永远清不掉这批僵尸行。
+   *
+   * ## 为什么回填机制本身要保留
+   *
+   * 「目录里暂时消失但黑名单仍记录」是**真实且合法**的状态（模型临时下线），
+   * 回填让用户能把它重新打开。所以修法是**过滤回填源**，不是删掉回填：
+   * 下面第 2 组用例专门锁住「正常模型哪怕不在目录里也必须回填」。
+   */
+  describe('model.list 黑名单并集：垃圾键不回填（custom / invisible / 内部项）', () => {
+  /**
+   * 真机 13 项目录里的一小段代表 + 黑名单里的历史僵尸键。
+   *
+   * 垃圾键清单逐字符取自实测（见 `tests/unit/trae-cn-adapter.spec.ts` 的
+   * `TRAE_CN_CUSTOM_MODEL_IDS` / `TRAE_CN_INVISIBLE_IDS`）：custom 项、内部
+   * agent 项、客户端自隐项各取样，覆盖三道判据。
+   */
+  const TRAE_MODELS = [
+    { id: 'glm-5.3', name: 'GLM-5.3' },
+    { id: 'kimi-k3', name: 'Kimi-K3' },
+    { id: 'qwen3.8-max', name: 'Qwen3.8-Max' },
+  ]
+  const JUNK_KEYS = [
+    // custom（账号私有 BYOK）—— 真机 14 项
+    'custom_model_gemini',
+    'custom_model_deepseek_chat',
+    'custom_model_placeholder',
+    // 内部 agent 项
+    'summary',
+    'explore_sub_agent_v2',
+    // 客户端自隐项（`is_invisible_to_user:true`）
+    'sagitta',
+    'aquila',
+    'glm-5',
+    'Doubao-Seed-2.0-Code',
+    'seed-code-pro-0430',
+    // 形态命中的内部项（未点名的将来项也要挡住）
+    'some_new_agent_thing',
+  ]
+
+  it('**垃圾键不回填**，目录项照常返回（复刻真机 13 ∪ 30 的泄漏形态）', async () => {
+    const { call } = registerEndpoints({
+      models: TRAE_MODELS,
+      disabledModels: {
+        'trae-cn': Object.fromEntries(JUNK_KEYS.map((id) => [id, true])),
+      },
+    })
+
+    const result = await call('model.list', { provider: 'trae-cn' })
+    const models = (result.value as { models: Array<{ id: string; name: string; disabled: boolean }> }).models
+
+    expect(result.ok).toBe(true)
+    // 只有目录那 3 项 —— 一个僵尸行都不许出现。
+    expect(models.map((m) => m.id)).toEqual(['glm-5.3', 'kimi-k3', 'qwen3.8-max'])
+    expect(models.every((m) => m.disabled === false)).toBe(true)
+    // 反向断言（防「过滤条件写反了」把目录项一起干掉）：
+    expect(models.some((m) => m.id.startsWith('custom_model_'))).toBe(false)
+  })
+
+  it('**正常模型不在目录里时仍回填**（回填机制不能因过滤一起被删掉）', async () => {
+    const { call } = registerEndpoints({
+      models: TRAE_MODELS,
+      disabledModels: { 'trae-cn': { 'glm-5.2': true, custom_model_gemini: true } },
+    })
+
+    const result = await call('model.list', { provider: 'trae-cn' })
+    const models = (result.value as { models: Array<{ id: string; name: string; disabled: boolean }> }).models
+
+    // `glm-5.2` 是**真机 13 项里的正常模型**，临时不在目录里 → 必须保留开关，
+    // 否则用户再也无法重新打开它（这正是回填机制存在的理由）。
+    const glm52 = models.find((m) => m.id === 'glm-5.2')
+    expect(glm52).toBeDefined()
+    expect(glm52!.disabled).toBe(true)
+    // 同一批里的 custom 键则不回填。
+    expect(models.some((m) => m.id === 'custom_model_gemini')).toBe(false)
+  })
+
+  it('**顺手清尸**：垃圾键从 settings 的 disabledModels 里被剔除，正常键保留', async () => {
+    const { call, storedValue } = registerEndpoints({
+      models: TRAE_MODELS,
+      disabledModels: {
+        'trae-cn': {
+          ...Object.fromEntries(JUNK_KEYS.map((id) => [id, true])),
+          'glm-5.2': true,
+        },
+      },
+    })
+
+    await call('model.list', { provider: 'trae-cn' })
+
+    // 僵尸键落盘内容里已不存在 —— 用户换回旧版本插件也不会再看到它们。
+    expect(storedValue().disabledModels).toEqual({ 'trae-cn': { 'glm-5.2': true } })
+  })
+
+  it('清理**不碰其它 provider**的黑名单（按 provider 精确生效）', async () => {
+    const { call, storedValue } = registerEndpoints({
+      models: TRAE_MODELS,
+      disabledModels: {
+        'trae-cn': { 'custom_model_gemini': true, 'glm-5.3': true },
+        'buddy-cn': { 'custom_model_gemini': true },
+      },
+    })
+
+    await call('model.list', { provider: 'trae-cn' })
+
+    expect(storedValue().disabledModels).toEqual({
+      'trae-cn': { 'glm-5.3': true },
+      'buddy-cn': { 'custom_model_gemini': true },
+    })
+  })
+
+  it('**accounts 与 schemaVersion 不被清理写坏**（settings 是整体 replace）', async () => {
+    // `writeModels` 若漏带 accounts / schemaVersion，一次清尸就会把账号列表
+    // 清空、或让数据版本号归零（改名迁移于是每次启动重跑）。
+    const account = {
+      id: 'trae-cn-acc1',
+      provider: 'trae-cn',
+      nickname: '测试账号',
+      enabled: true,
+      credentialRef: 'TRAE_CN_ACCOUNT_ACC1',
+      createdAt: 1_700_000_000_000,
+      refreshable: true,
+    }
+    const { call, storedValue } = registerEndpoints({
+      models: TRAE_MODELS,
+      accounts: [account],
+      schemaVersion: 3,
+      disabledModels: { 'trae-cn': { custom_model_gemini: true } },
+    })
+
+    await call('model.list', { provider: 'trae-cn' })
+
+    expect(storedValue().accounts).toEqual([account])
+    expect(storedValue().schemaVersion).toBe(3)
+    // 垃圾键确实被清掉了（否则这条用例会在「什么都没写」的情况下虚假通过）。
+    expect(storedValue().disabledModels).toEqual({})
+  })
+
+  it('**其它 provider 的回填行为完全不变**（Buddy 系黑名单语义没变）', async () => {
+    // buddy 的历史行为原样保留：任何黑名单键都回填，不做垃圾判定 ——
+    // `custom_model_gemini` 这种 id 在 Buddy 池里根本不存在，判定对它无意义，
+    // 而误杀一个真实 id 会让用户无法重新打开模型。
+    const { call, storedValue } = registerEndpoints({
+      models: MODELS,
+      disabledModels: { 'buddy-cn': { 'glm-5.2': true, custom_model_gemini: true } },
+    })
+
+    const result = await call('model.list', { provider: 'buddy-cn' })
+    const models = (result.value as { models: Array<{ id: string }> }).models
+
+    // 目录里未被关闭的两项 + 两个回填项（正常键与「看起来像垃圾」的键**都**回填）。
+    expect(models.map((m) => m.id).sort())
+      .toEqual(['custom_model_gemini', 'deepseek-v4-flash', 'glm-5.2', 'hy3'])
+    // 且没有发生任何清理写入。
+    expect(storedValue().disabledModels).toEqual({
+      'buddy-cn': { 'glm-5.2': true, custom_model_gemini: true },
+    })
+  })
+
+  it('**Work 侧走同一道过滤**（僵尸 id 形态同源，黑名单键独立）', async () => {
+    const { call, storedValue } = registerEndpoints({
+      models: [{ id: 'Doubao-Seed-Code', name: 'Seed-Code' }],
+      disabledModels: {
+        'trae-cn-work': { custom_model_foo: true, sagitta: true, 'glm-5.3': true },
+      },
+    })
+
+    const result = await call('model.list', { provider: 'trae-cn-work' })
+    const models = (result.value as { models: Array<{ id: string }> }).models
+
+    // 目录项 + 唯一的正常僵尸键（glm-5.3 是 Work 14 项里的成员）。
+    expect(models.map((m) => m.id).sort()).toEqual(['Doubao-Seed-Code', 'glm-5.3'])
+    expect(storedValue().disabledModels).toEqual({ 'trae-cn-work': { 'glm-5.3': true } })
+  })
+
+  it('垃圾键全清后整个 provider 子表被移除（不留空对象噪音）', async () => {
+    const { call, storedValue } = registerEndpoints({
+      models: TRAE_MODELS,
+      disabledModels: { 'trae-cn': { custom_model_gemini: true, sagitta: true } },
+    })
+
+    await call('model.list', { provider: 'trae-cn' })
+
+    expect(storedValue().disabledModels).toEqual({})
+  })
+
+  it('没有垃圾键时**不写盘**（避免每次刷新设置页都产生无谓写入）', async () => {
+    const { call, writeCount } = registerEndpoints({
+      models: TRAE_MODELS,
+      disabledModels: { 'trae-cn': { 'glm-5.2': true } },
+    })
+
+    await call('model.list', { provider: 'trae-cn' })
+
+    expect(writeCount()).toBe(0)
+  })
+
+  it('清理是**一次性**的：第二次 model.list 不再写盘', async () => {
+    // 清尸本身要写盘（每个垃圾键一次 `setModelDisabled`），但清完之后
+    // 黑名单里已无垃圾键，后续每次刷新设置页都必须零写入 —— 否则这个
+    // 「顺手清理」会变成每次开面板都写配置文件。
+    const { call, writeCount } = registerEndpoints({
+      models: TRAE_MODELS,
+      disabledModels: { 'trae-cn': { custom_model_gemini: true, sagitta: true } },
+    })
+
+    await call('model.list', { provider: 'trae-cn' })
+    const afterFirst = writeCount()
+    expect(afterFirst).toBeGreaterThan(0)
+
+    await call('model.list', { provider: 'trae-cn' })
+    expect(writeCount()).toBe(afterFirst)
+  })
   })
 })
 

@@ -39,6 +39,7 @@ import {
 } from './lobsterai-credits.js'
 import { TRAE_CN } from './trae-cn-product.js'
 import { TRAE_CN_WORK } from './trae-cn-work-product.js'
+import { isTraeCnJunkModelId } from './trae-cn-models.js'
 import type { TraeCnCredential, TraeCnPendingLogin } from './trae-cn-oauth.js'
 import type { TraeCnProduct } from './trae-cn-product.js'
 import {
@@ -1134,9 +1135,24 @@ function registerJetHubEndpoints(
         // listModels 结果中」的模型，补回列表并标记为已关闭。设置页据此始终能
         // 渲染出全部开关；而对话框模型选择器读的仍是过滤后的 listModels，
         // 可见性行为完全不变。
+        //
+        // ⚠️ **回填必须先过垃圾判定**（2026-09-20 修复的黑名单并集泄漏）：回填的
+        // 候选是**黑名单的键名**——它们不只是「用户显式关过的正常模型」，还包括
+        // 用户在目录过滤网上线之前关掉的那批 custom / invisible / 内部项，以及
+        // 目录那次快照里存在、后来下线的 id。真机实测：目录 13 项 + 黑名单 30 个
+        // 历史键 = 弹窗 43 行，其中 14 个 `custom_model_*` 是**账号私有 BYOK**
+        // （别的账号选中必失败），用户在界面上完全无法分辨它们从哪来。
+        // 更糟的是副作用：这些键已在黑名单里，用户点开关只会在**同一批键上**
+        // 增删，列表永远清不掉这批僵尸行。
+        //
+        // 判据与目录侧**同源**（`isTraeCnJunkModelId`，见 src/trae-cn-models.ts），
+        // 且只对 Trae 系 provider 生效：其它 provider 的黑名单语义没变（它们的
+        // 历史行为原样保留，见 README 的「显示列表的回填机制与过滤」）。
+        const isTraeProvider = req.provider === TRAE_CN.id || req.provider === TRAE_CN_WORK.id
+        const junkBackfilled = (id: string): boolean => isTraeProvider && isTraeCnJunkModelId(id)
         const listedIds = new Set(models.map((model) => model.id))
         const filteredOut = Object.keys(disabledMap)
-          .filter((id) => disabledMap[id] === true && !listedIds.has(id))
+          .filter((id) => disabledMap[id] === true && !listedIds.has(id) && !junkBackfilled(id))
         const value: RpcModelListResponse = {
           models: [
             ...models.map((model) => ({
@@ -1147,6 +1163,36 @@ function registerJetHubEndpoints(
             // 这些模型已被适配器过滤掉，拿不到原始 name，回退为 id。
             ...filteredOut.map((id) => ({ id, name: id, disabled: true })),
           ],
+        }
+        // **顺手清尸**：把命中垃圾判定的键从黑名单里真正剔除并写回 settings。
+        // 只过滤不清理的话，僵尸键会永远留在配置文件里 —— 列表虽然干净了，
+        // 但每次 `model.list` 都要再判一遍，且用户换回旧版本插件时它们会重新
+        // 冒出来。清理**只针对垃圾键**：正常被关闭的模型哪怕暂时不在目录里
+        // （如模型临时下线）也**必须保留**，否则用户会发现「关掉的模型自己
+        // 又打开了」—— 这正是回填机制存在的理由。
+        //
+        // 走 `setModelDisabled(id, false)` 而不是自己写 settings：它是账号池
+        // 公开的开关入口，写入是「读 → 改 → **整体 replace**」且已携带 accounts
+        // 与 schemaVersion（漏带会把账号列表或数据版本号清空，见 account-pool.ts
+        // 的 writeModels 注释）。代价是每个键一次写盘 —— 一次性清理，且清完
+        // 即不再触发（下面的 `junkKeys.length > 0` 门），不值得为此新开一个
+        // 批量入口。
+        //
+        // 失败不影响本次响应：列表已经算好了，清理是尽力而为的副作用。
+        if (isTraeProvider) {
+          const junkKeys = Object.keys(disabledMap).filter((id) => isTraeCnJunkModelId(id))
+          if (junkKeys.length > 0) {
+            try {
+              for (const id of junkKeys) {
+                await pool.setModelDisabled(req.provider, id, false)
+              }
+              ctx.logger?.info?.(
+                `[jet-hub] 已从 ${req.provider} 显示列表清理 ${junkKeys.length} 个垃圾模型键`,
+              )
+            } catch (error) {
+              ctx.logger?.warn?.(`[jet-hub] 清理 ${req.provider} 垃圾模型键失败: ${String(error)}`)
+            }
+          }
         }
         return { ok: true, value }
       }

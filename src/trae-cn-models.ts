@@ -197,6 +197,59 @@ export function isCustomTraeCnModel(entry: TraeCnModelEntry): boolean {
   return entry.id.startsWith(TRAE_CN_CUSTOM_MODEL_PREFIX)
 }
 
+/**
+ * 实测 8 项 `is_invisible_to_user:true`（客户端自己隐藏）的 id 点名。
+ *
+ * 用途**只有一个**：给 {@link isTraeCnJunkModelId} 当形态清单。目录路径不读它 ——
+ * 那边有逐项的 `entry.invisible` 可用，比点名精确（见
+ * {@link TraeCnModelEntry.invisible} 的三态语义）。
+ */
+export const TRAE_CN_INVISIBLE_MODEL_IDS: readonly string[] = [
+  'seed-code-pro-0430',
+  'Doubao-Seed-2.0-Code',
+  'glm-5-turbo',
+  'glm-5',
+  'DeepSeek-V4-Flash',
+  'DeepSeek-V4-Pro',
+  'sagitta',
+  'aquila',
+]
+
+/**
+ * 判定一个**裸 id** 是否为「垃圾模型 id」（不该出现在 Account Hub 显示列表里）。
+ *
+ * ## 为什么需要裸 id 版本（{@link isCustomTraeCnModel} 不够用）
+ *
+ * {@link isCustomTraeCnModel} 的接口是**目录条目**：它的主判据 `usage` 只有目录
+ * 端点才发。而本函数服务于另一条链路 —— `model.list` 的**黑名单并集回填**
+ * （见 `src/jet-hub-rpc.ts`）：那里的候选来自 `jet-hub.disabledModels` 的**键名**，
+ * 手上只有 id 字符串，没有任何目录字段。若照抄 entry 版本，`usage` 判据必然落空，
+ * 只剩前缀兜底（对 custom 项尚可），而 invisible 项**根本没有形态判据可用**。
+ *
+ * ## 判据（三道，与目录侧同源）
+ *
+ * 1. **内部 agent 项**（{@link isInternalTraeCnConfig}）：点名 + 形态；
+ * 2. **账号私有 BYOK 项**：`custom_model_` 前缀；
+ * 3. **客户端自隐项**（{@link TRAE_CN_INVISIBLE_MODEL_IDS}）：点名清单。
+ *
+ * 第 1、3 条比目录路径**更严**（目录用逐项字段、此处只能点名/看形态）。这个方向
+ * 是刻意选的：本函数的调用场景是「要不要**补回**一个已被关闭的模型」，误杀一个
+ * 正常 id 的代价是它在设置页少一行（模型本身仍可在对话框里选用，只是无法重新
+ * 打开 —— 而它本来就已经被关闭了），远小于把僵尸行重新灌回列表。
+ *
+ * ## 对两个 Trae provider 通用
+ *
+ * 判据全部是 **id 形态**，不含任何 provider 专属字段：`trae-cn` 与 `trae-cn-work`
+ * 的黑名单各存一份键，但两边的垃圾 id 形态同源（同一个 Trae 账号体系）。
+ * Work 的 14 项表里当前没有 custom 项，然而用户若在过滤网上线前关过 Work 侧的
+ * 条目，僵尸键会长得一样，故两个 provider 走同一道过滤。
+ */
+export function isTraeCnJunkModelId(id: string): boolean {
+  if (isInternalTraeCnConfig(id)) return true
+  if (id.startsWith(TRAE_CN_CUSTOM_MODEL_PREFIX)) return true
+  return TRAE_CN_INVISIBLE_MODEL_IDS.includes(id)
+}
+
 // ── 模型条目与静态表 ──
 
 /**
