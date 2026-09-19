@@ -106,16 +106,28 @@ export const TRAE_CN_IDE_GATEWAY_VERSION = '1.107.1'
 /** IDE 网关请求头：版本通道（`x-ide-version-type`，真机 `stable`）。 */
 export const TRAE_CN_IDE_VERSION_TYPE = 'stable'
 
-/** IDE 网关请求头：流量类型（`request-traffic-type`，真机 `normal`）。 */
-export const TRAE_CN_REQUEST_TRAFFIC_TYPE = 'normal'
+/**
+ * 网关请求头：流量类型（`request-traffic-type`）。
+ *
+ * 旧 IDE 通道实测为 `normal`，**SOLO 通道实测为 `prod`**（2026-09-19 迁移取证，
+ * 与第三方可用实现一致）。两者是同一个头的两种取值，端点换了就跟着换 ——
+ * 留着 `normal` 是「旧通道的残留值」，而不是一个可选项。
+ */
+export const TRAE_CN_REQUEST_TRAFFIC_TYPE = 'prod'
 
 /**
- * IDE 网关请求头：`User-Agent`。
+ * 网关请求头：`User-Agent` 的**形态前缀**。
  *
- * 真机值为 `TraeClient/TTNet`（官方客户端自己的 UA），**不是**浏览器 UA。
- * 网关按 UA 归因客户端形态，故照抄实测值而不是留空。
+ * SOLO 通道实测值为 **`Trae/<appVersion>`**（客户端形态标识），不是浏览器 UA，
+ * 也不是旧 IDE 通道的 `TraeClient/TTNet` —— 那是旧通道的值，端点迁移后一并换掉
+ * （两个通道的 UA 形态本就不同）。
+ *
+ * 完整值由 `src/trae-cn-models.ts` 的 `TRAE_CN_SOLO_USER_AGENT` 拼接给出：
+ * 那里能拿到 `TRAE_CN_APP_VERSION`（`3.3.102`，与签到头同源），而本模块若反过来
+ * import credits 会形成 `product → credits → product` 的循环依赖。
+ * 故这里只留**前缀**（形态本身），版本号由 models 模块补上。
  */
-export const TRAE_CN_GATEWAY_USER_AGENT = 'TraeClient/TTNet'
+export const TRAE_CN_USER_AGENT_PREFIX = 'Trae/'
 
 /** Trae CN 登录门户基址（**编译期常量**）。 */
 export const TRAE_CN_PORTAL_BASE = 'https://www.trae.cn'
@@ -302,60 +314,37 @@ export const TRAE_CN_AUTHORIZATION_PATH = '/authorization'
 /**
  * chat（流式对话）端点**路径**（拼在 {@link TRAE_CN_IDE_API_BASE} 之后）。
  *
- * ## ✅ T6 已真机校准（2026-09-18）：路径本来就对，错的是 host
+ * ## ✅ 2026-09-19 迁移：SOLO 通道 `/api/agent/v3/llm_utils_chat`
  *
- * 本值取自本机客户端的只读提取（`resources/app/modules/ai-agent/ai_agent.dll`
- * 的字符串池），真机实测**确认它就是正确路径** —— 上游返回的是正常 SSE
- * （`event:output` 逐字），业务错误也在 HTTP 200 的 `event:error` 帧里
- * （实测 `code:4001`），与 `src/trae-cn-errors.ts` 的设计假设一致。
+ * 旧值 `/api/ide/v1/chat` 是**旧 aiserver 通道**：它的 `llm_raw_chat` 场景只认
+ * 5 项旧池，我方请求（`glm-5.3` 等新池模型）**恒回 `3003 all models failed`**，
+ * 历史零成功。真实客户端的新池聊天走的是
+ * 「AhaRpc → ai-agent 子进程 → `harness.dll` → 原生出网」五段链路，
+ * 第三方无法复刻；而 **SOLO 通道已用我方凭据实测走通**
+ * （`glm-5.2` 流式正常、`glm-5.3` + tools 结构化调用全绿，HTTP 200 SSE）。
  *
- * 曾经的错误不在路径上：它被拼在 `api.trae.cn` 后面，而 `/api/ide/*` 在
- * 那个 host 上 **404**（真正的网关是 {@link TRAE_CN_IDE_API_BASE}）。
- * 即「T6 的症状（404）与病因（host）不同」—— 若当初照候选表逐个试路径，
- * 四条全都会 404，反而会把正确的路径排除掉。
+ * host **不变**（仍是 {@link TRAE_CN_IDE_API_BASE}），凭据不变，
+ * 决定成败的是**端点 + body 的 `config_name` / `function` 两字段**
+ * （头集合差异已排除：网关对多余头宽容）。
  *
- * 候选表（{@link TRAE_CN_CHAT_PATH_CANDIDATES}）因此**已失去运行时意义**，
- * 保留仅为诊断留痕（见该常量的说明）。
+ * 因此旧的 `TRAE_CN_CHAT_PATH_CANDIDATES` 候选表已**删除**：它记录的是
+ * 「路径 vs host」那次误判的留痕，与本次迁移无关，留着只会让人以为
+ * `/api/ide/v1/*` 仍是可选路径（它们对新池全部无效）。
  */
-export const TRAE_CN_CHAT_PATH = '/api/ide/v1/chat'
+export const TRAE_CN_CHAT_PATH = '/api/agent/v3/llm_utils_chat'
 
 /**
- * 候选端点表（仅用于诊断与历史留痕，**运行时不使用**）。
+ * 模型目录端点路径（**SOLO 通道的目录，已接线**）。
  *
- * 真机校准（2026-09-18）已确认主选 `/api/ide/v1/chat` 正确，其余三个候选
- * 不再有排查价值。保留数组是为了让「曾经为什么这么猜」在代码里可查 ——
- * 删除它会让后来者重新经历一次「路径 vs host」的误判。
- */
-export const TRAE_CN_CHAT_PATH_CANDIDATES: readonly string[] = [
-  '/api/ide/v1/chat',
-  '/api/ide/v1/llm_raw_chat',
-  '/api/ide/v2/llm_raw_chat',
-  '/api/ide/v1/chat_prompt',
-]
-
-/**
- * 模型目录端点路径（**刻意不接线**）。
+ * ## 为什么这次能接（推翻 2026-09-18 的「远端不可接」结论）
  *
- * ## 为什么本插件不接远端模型目录（2026-09-18 三端点实测结论）
+ * 旧结论「新池在任何 HTTP 端点都拿不到」是**对的，但试错了端点**：
+ * `model_list` 只回 6 项旧池、`batch_get_detail_param` 只回 4 个 seed 配置。
+ * 真正可用的是**本端点**，且必须**按 `function` 分别拉取后取并集** ——
+ * roster 被 Trae 摊在多个 SOLO function 下（`glm-5.3` 只在 `solo_work_remote`）。
  *
- * 结论：**新模型池在任何 HTTP 端点上都拿不到**，静态表才是正解。三条证据：
- *
- * | 端点 | 实测结果 |
- * |---|---|
- * | `model_list`（`{"type":"chat"}` + 完整网关头） | 只回 **6 项旧池**（Doubao-1.5 代） |
- * | `batch_get_detail_param` | 只回 **4 个 seed 配置** |
- * | 其余 ~200 种形状组合 | 18 项新池**一个都不出现** |
- *
- * 官方客户端之所以能看到新池，靠的是 `harness.dll` **内嵌的静态映射** +
- * 本地缓存（vscdb），不是某个可调用的 HTTP 接口。
- *
- * 故 {@link TRAE_CN_FALLBACK_MODELS} 不是「兜底」，而是**唯一正确的目录**；
- * 适配器的 `fetchRemoteModels` 保持未接线（接口保留，注入方留空）。
- * 若将来上游真给出目录端点，改这里与 README 的「模型目录」小节即可。
- *
- * ⚠️ **待办**：`parseTraeCnModels` 解析器随之**无调用方**（远端不接就没有响应可解）。
- * 刻意保留而不删：真接线时它仍是入口，且它的候选表是从客户端响应形态推出来的。
- * 现状在 README 的「模型目录」小节有登记。
+ * 请求体固定字段见 `src/trae-cn-models.ts` 的 `TRAE_CN_DIRECTORY_BODY`；
+ * 解析与合并见 `parseTraeCnDirectory` / `mergeTraeCnDirectory`。
  */
 export const TRAE_CN_MODELS_PATH = '/api/ide/v1/get_detail_param'
 

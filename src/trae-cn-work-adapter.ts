@@ -8,9 +8,9 @@
  *
  * | 项 | IDE 路径 | Work 路径（本文件） |
  * |---|---|---|
- * | 请求 | 一次 `POST /api/ide/v1/chat` | 建会话 → 发消息 → 订阅 SSE（**三次调用**） |
+ * | 请求 | 一次 `POST /api/agent/v3/llm_utils_chat`（SOLO 通道） | 建会话 → 发消息 → 订阅 SSE（**三次调用**） |
  * | 鉴权头 | 鉴权三头 + **IDE 网关全套** | **仅鉴权三头**（无 x-app-id 等） |
- * | 模型池 | 16 项静态表（远端拿不到） | **14 项，远端可拉**（本文件已接线） |
+ * | 模型池 | 动态 `get_detail_param`（回退 16 项静态表） | **14 项，远端可拉**（本文件已接线） |
  * | 模型目录分组 | 单一池 | **按 `function` 分池，只列 `solo_agent_remote`** |
  * | 扣费池 | 通用积分（`available_endpoint=0`） | **Work 专属（`available_endpoint=1`）** |
  * | 思考档落点 | 请求体**顶层** `reasoning_effort_level` | **`custom_model` 对象内部**（见 `buildCustomModel`） |
@@ -887,11 +887,13 @@ export function registerTraeCnWorkLlm(ctx: Context, options: TraeCnWorkAdapterOp
 /**
  * 拉取远端模型目录（`GET /api/remote/v1/models?functions=…&show_custom_model=true`）。
  *
- * ## 与 IDE 路径相反：这个端点**真的可用**
+ * ## 与 IDE 路径的目录**不是同一个端点**
  *
- * IDE 路径的模型目录刻意不接线（任何 HTTP 端点都拿不到新池，见
- * `TRAE_CN_MODELS_PATH` 的说明）；Work 的目录端点**真机实测 200 且回全本组 14 项**
- * （带自定义项时 16 项），故这里**已接线**，远端是权威来源，静态表只在整体失败时顶替。
+ * IDE 路径走 `POST /api/ide/v1/get_detail_param`（2026-09-19 起已接线，见
+ * `src/trae-cn-models.ts`）；Work 走**本函数**的
+ * `GET /api/remote/v1/models?functions=…&show_custom_model=true`
+ * —— **真机实测 200 且回全本组 14 项**（带自定义项时 16 项）。
+ * 两者都是「远端权威、静态表兜底」，但协议与解析完全不同，**不可互相替换**。
  *
  * ## ⚠️ query 不是可选的：不带它拿到的是**另一个池**
  *

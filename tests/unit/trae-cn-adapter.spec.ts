@@ -16,11 +16,25 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import {
   PROVIDER,
-  TRAE_CN_FALLBACK_MODELS,
   TraeCnAdapter,
-  parseTraeCnModels,
+  buildTraeCnSoloBody,
   registerTraeCnLlm,
 } from '../../src/trae-cn-adapter.js'
+import {
+  TRAE_CN_FALLBACK_MODELS,
+  TRAE_CN_INTERNAL_CONFIG_NAMES,
+  TRAE_CN_MODELS_TTL_MS,
+  TRAE_CN_SOLO_LITE_FUNCTION,
+  TRAE_CN_SOLO_REMOTE_FUNCTION,
+  applyTraeCnStaticModalities,
+  fallbackTraeCnCatalog,
+  fetchTraeCnDirectory,
+  isInternalTraeCnConfig,
+  mergeTraeCnDirectory,
+  parseTraeCnDirectory,
+  traeCnSoloHeaders,
+} from '../../src/trae-cn-models.js'
+import type { TraeCnModelEntry } from '../../src/trae-cn-models.js'
 import {
   classifyTraeCnError,
   normalizeTraeCnCode,
@@ -37,13 +51,12 @@ import {
 } from '../../src/trae-cn-errors.js'
 import {
   TRAE_CN_CHAT_PATH,
-  TRAE_CN_CHAT_PATH_CANDIDATES,
-  TRAE_CN_GATEWAY_USER_AGENT,
   TRAE_CN_IDE_API_BASE,
   TRAE_CN_IDE_APP_ID,
   TRAE_CN_IDE_GATEWAY_VERSION,
   TRAE_CN_IDE_VERSION_CODE,
   TRAE_CN_IDE_VERSION_TYPE,
+  TRAE_CN_MODELS_PATH,
   TRAE_CN_REQUEST_TRAFFIC_TYPE,
   TRAE_CN,
 } from '../../src/trae-cn-product.js'
@@ -57,7 +70,7 @@ import {
   traeCnErrorCodeForAction,
 } from '../../src/trae-cn-sse.js'
 import type { TraeCnCredential } from '../../src/trae-cn-oauth.js'
-import { TRAE_CN_OS_VERSION } from '../../src/trae-cn-credits.js'
+import { TRAE_CN_APP_VERSION, TRAE_CN_OS_VERSION } from '../../src/trae-cn-credits.js'
 
 // ── 测试脚手架 ──
 
@@ -124,6 +137,10 @@ async function collect(
  * 构造适配器 + 捕获请求的 fetch stub。
  *
  * `responder` 收到 `(url, init, callIndex)`，可据 callIndex 让不同账号得到不同结果。
+ *
+ * ⚠️ **默认关掉动态目录**（`fetchRemoteModels: async () => []`）：适配器内置的
+ * 目录拉取会真的发网络请求，而本文件全部用例都是零网络的。要测目录相关行为的
+ * 用例显式覆盖该选项。
  */
 function makeAdapter(
   responder: (url: string, init: RequestInit | undefined, callIndex: number) => Response | Promise<Response>,
@@ -139,6 +156,7 @@ function makeAdapter(
     resolveCredential: async () => makeCredential(),
     refresh: async () => {},
     fetchImpl: fetcher,
+    fetchRemoteModels: async () => [],
     product: TRAE_CN,
     ...options,
   })
@@ -199,6 +217,29 @@ describe('Trae CN 错误码分类：退避类（不换号）', () => {
     for (const code of TRAE_CN_QUEUE_CODES) {
       expect(classifyTraeCnError({ httpStatus: 200, sseErrorCode: code })).toBe('backoff')
     }
+  })
+
+  it('**`3003`（MODEL_FAIL / all models failed）判 backoff** —— 基础设施类，可重试', () => {
+    // 这是端点迁移取证时补入的码：旧 IDE 通道对我方新池请求的恒定回复。
+    // 它必须**可重试**（退避），而不是被当成确定性失败直报 —— 否则用户看到的是
+    // 一个永远不可恢复的错误。同时它**不该换号**：与具体账号无关。
+    expect(TRAE_CN_BACKOFF_CODES).toContain(3003)
+    expect(classifyTraeCnError({ httpStatus: 200, sseErrorCode: 3003 })).toBe('backoff')
+    expect(classifyTraeCnError({ httpStatus: 200, sseErrorCode: '3003' })).toBe('backoff')
+    expect(shouldSwitchTraeCnAccount(classifyTraeCnError({ sseErrorCode: 3003 }))).toBe(false)
+    expect(isTraeCnBackoff(classifyTraeCnError({ sseErrorCode: 3003 }))).toBe(true)
+    // 退避 → 可重试的 RATE_LIMIT（否则 DSH 的重试层认不出来）。
+    expect(traeCnErrorCodeForAction('backoff', 3003)).toBe('RATE_LIMIT')
+    // 也不记冷却徽章（它不是账号级的模型限流）。
+    expect(recordsTraeCnCooldown(3003)).toBe(false)
+  })
+
+  it('`4023`（模型不存在）与 `4001`（参数错误）都直报', () => {
+    for (const code of [4023, 4001]) {
+      expect(classifyTraeCnError({ httpStatus: 200, sseErrorCode: code })).toBe('fail')
+    }
+    expect(traeCnErrorCodeForAction('fail', 4023)).toBe('INVALID_REQUEST')
+    expect(traeCnErrorCodeForAction('fail', 4001)).toBe('INVALID_REQUEST')
   })
 
   it('退避类**不**触发换号（正反例：换成限流码就要换号）', () => {
@@ -606,7 +647,9 @@ describe('TraeCnAdapter 模型目录', () => {
 
   it('远端可用时以远端为准（不做「以兜底表为准」的裁剪）', async () => {
     const { adapter } = makeAdapter(() => sseResponse(''), {
-      fetchRemoteModels: async () => [{ id: 'remote-only', name: 'Remote Only' }],
+      fetchRemoteModels: async () => [
+        { id: 'remote-only', name: 'Remote Only', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+      ],
     })
     const models = await adapter.listModels('trae-cn')
     expect(models).toEqual([{ provider: 'trae-cn', id: 'remote-only', name: 'Remote Only', inputModalities: ['text'] }])
@@ -619,6 +662,49 @@ describe('TraeCnAdapter 模型目录', () => {
       fetchRemoteModels: async () => { throw new Error('network down') },
     })
     expect(await failing.adapter.listModels('trae-cn')).toHaveLength(TRAE_CN_FALLBACK_MODELS.length)
+  })
+
+  it('**目录拉取成功后再调用不重复拉取**（12h TTL 内命中缓存）', async () => {
+    const fetchRemoteModels = vi.fn(async () => [
+      { id: 'remote-only', name: 'Remote Only', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+    ])
+    const { adapter } = makeAdapter(() => sseResponse(''), { fetchRemoteModels })
+    await adapter.listModels('trae-cn')
+    await adapter.listModels('trae-cn')
+    await adapter.resolveModel('trae-cn', 'remote-only')
+    expect(fetchRemoteModels).toHaveBeenCalledTimes(1)
+    expect(TRAE_CN_MODELS_TTL_MS).toBe(12 * 60 * 60 * 1000)
+  })
+
+  it('**目录拉取失败不写缓存**（下一次调用会重试，而不是永久停在静态表）', async () => {
+    let attempt = 0
+    const { adapter } = makeAdapter(() => sseResponse(''), {
+      fetchRemoteModels: async () => {
+        attempt += 1
+        if (attempt === 1) throw new Error('network down')
+        return [{ id: 'remote-only', name: 'Remote Only', function: TRAE_CN_SOLO_REMOTE_FUNCTION }]
+      },
+    })
+    // 第一次失败 → 静态表（16 项）。
+    expect(await adapter.listModels('trae-cn')).toHaveLength(TRAE_CN_FALLBACK_MODELS.length)
+    // 第二次成功 → 远端目录生效（若失败被缓存，这里仍是 16 项）。
+    expect((await adapter.listModels('trae-cn')).map((m) => m.id)).toEqual(['remote-only'])
+    expect(attempt).toBe(2)
+  })
+
+  it('**动态目录的多模态标记由静态表补齐**（否则 12 个多模态模型会全变纯文本）', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''), {
+      fetchRemoteModels: async () => [
+        { id: 'kimi-k3', name: 'Kimi-K3', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+        { id: 'glm-5.3', name: 'GLM-5.3', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+        // 远端独有 id：静态表没有它 → 多模态未知 → 保守判纯文本。
+        { id: 'remote-only', name: 'Remote Only', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+      ],
+    })
+    const byId = new Map((await adapter.listModels('trae-cn')).map((m) => [m.id, m]))
+    expect(byId.get('kimi-k3')!.inputModalities).toEqual(['text', 'image'])
+    expect(byId.get('glm-5.3')!.inputModalities).toEqual(['text'])
+    expect(byId.get('remote-only')!.inputModalities).toEqual(['text'])
   })
 
   it('**应用账号池的模型黑名单**（黑名单制：只滤显式关闭的）', async () => {
@@ -741,27 +827,47 @@ describe('TraeCnAdapter resolveModel', () => {
 
   it('远端给了展示名时优先用远端', async () => {
     const { adapter } = makeAdapter(() => sseResponse(''), {
-      fetchRemoteModels: async () => [{ id: 'glm-5.2', name: '远端 GLM' }],
+      fetchRemoteModels: async () => [
+        { id: 'glm-5.2', name: '远端 GLM', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+      ],
     })
     expect((await adapter.resolveModel('trae-cn', 'glm-5.2')).name).toBe('远端 GLM')
+  })
+
+  it('远端条目没给档位时**不声明** reasoning（沿用静态表逻辑，不编造档位）', async () => {
+    const { adapter } = makeAdapter(() => sseResponse(''), {
+      fetchRemoteModels: async () => [
+        { id: 'glm-5.2', name: 'GLM-5.2', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+      ],
+    })
+    expect((await adapter.resolveModel('trae-cn', 'glm-5.2')).reasoning).toBeUndefined()
   })
 })
 
 describe('TraeCnAdapter 请求构造', () => {
-  it('POST 到 **IDE 网关**（不是 api.trae.cn）', async () => {
+  it('POST 到 **SOLO 通道**（`/api/agent/v3/llm_utils_chat`，仍在 IDE 网关 host 上）', async () => {
     const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
     await collect(adapter, generateOptions())
     expect(calls).toHaveLength(1)
     expect(calls[0]!.url).toBe(`${TRAE_CN_IDE_API_BASE}${TRAE_CN_CHAT_PATH}`)
-    // T6 的真实病因是 host 而非路径：`/api/ide/*` 在 api.trae.cn 上 404。
+    // 端点迁移的**唯一判据**（旧 `/api/ide/v1/chat` 对新池恒回 3003）：
+    expect(TRAE_CN_CHAT_PATH).toBe('/api/agent/v3/llm_utils_chat')
+    // host 不变（迁移只动路径，不动 host）。
     expect(new URL(calls[0]!.url).host).toBe('trae-api-cn.mchost.guru')
     expect(new URL(calls[0]!.url).origin).not.toBe(TRAE_CN.apiBase)
     expect(calls[0]!.init?.method).toBe('POST')
   })
 
-  it('端点常量与候选表一致（历史留痕：改动时必须同步候选表）', () => {
-    expect(TRAE_CN_CHAT_PATH_CANDIDATES).toContain(TRAE_CN_CHAT_PATH)
-    expect(TRAE_CN_CHAT_PATH_CANDIDATES[0]).toBe(TRAE_CN_CHAT_PATH)
+  it('**不再存在旧端点常量**（`/api/ide/v1/chat` 与候选表已删除，不留死代码）', async () => {
+    // 用源码扫描而不是 import 断言：常量被删掉时 import 会直接编译失败，
+    // 而「有人把它加回来」只有扫描源码才拦得住。只看**赋值语句**，
+    // 注释里提到旧路径（迁移留痕）是允许且必要的。
+    const { readFileSync } = await import('node:fs')
+    const productSource = readFileSync(new URL('../../src/trae-cn-product.ts', import.meta.url), 'utf8')
+    const assignments = productSource.split('\n').filter((line) => line.startsWith('export const '))
+    expect(assignments.join('\n')).not.toContain('/api/ide/v1/chat')
+    expect(assignments.join('\n')).not.toContain('TRAE_CN_CHAT_PATH_CANDIDATES')
+    expect(assignments.join('\n')).toContain("export const TRAE_CN_CHAT_PATH = '/api/agent/v3/llm_utils_chat'")
   })
 
   it('请求头用 Cloud-IDE-JWT + 两个同值 token 头，且**不带**腾讯系归属头', async () => {
@@ -780,20 +886,34 @@ describe('TraeCnAdapter 请求构造', () => {
     }
   })
 
-  it('**带齐 IDE 网关全套头**（缺了实测 500/401）', async () => {
+  it('**带齐 SOLO 通道网关全套头**（版本头维持现状 + 新增追踪/通道/身份头）', async () => {
     const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
     await collect(adapter, generateOptions())
     const headers = calls[0]!.init?.headers as Record<string, string>
     expect(headers['x-app-id']).toBe(TRAE_CN_IDE_APP_ID)
     expect(headers['x-app-id']).toBe('6eefa01c-1036-4c7e-9ca5-d891f63bfcd8')
-    // 版本号**必须纯数字**：真机发 "3.3.100" 会 400。
+    // 版本头**维持现状**（迁移只由端点与 body 决定成败，头集合差异已排除）：
+    // `x-ide-version-code` 必须纯数字，真机发 "3.3.100" 会 400。
     expect(headers['x-ide-version-code']).toBe('107')
     expect(headers['x-app-version-code']).toBe('107')
     expect(headers['x-ide-version-code']).toMatch(/^\d+$/)
     expect(headers['x-ide-version']).toBe('1.107.1')
     expect(headers['x-ide-version-type']).toBe('stable')
-    expect(headers['request-traffic-type']).toBe('normal')
-    expect(headers['User-Agent']).toBe('TraeClient/TTNet')
+    // ⚠️ SOLO 通道实测值：`prod`（旧 IDE 通道是 `normal`）。
+    expect(headers['request-traffic-type']).toBe('prod')
+    expect(TRAE_CN_REQUEST_TRAFFIC_TYPE).toBe('prod')
+    // ⚠️ SOLO 通道 UA 是 `Trae/<appVersion>`，**不是**旧通道的 `TraeClient/TTNet`。
+    expect(headers['User-Agent']).toBe(`Trae/${TRAE_CN_APP_VERSION}`)
+    expect(headers['x-plugin-channel']).toBe('icube-ai')
+    // 追踪四头**同源**：requestId 一个 UUID，trace-id 是它去横线后的前 32 位。
+    const requestId = headers['x-request-id']!
+    expect(headers['x-trae-request-id']).toBe(requestId)
+    expect(requestId).toMatch(/^[0-9a-f-]{36}$/)
+    const traceId = requestId.replace(/-/g, '').slice(0, 32)
+    expect(headers['x-custom-trace-id']).toBe(traceId)
+    expect(headers['x-flow-traceparent']).toBe(`04-${traceId}-${traceId.slice(0, 16)}-01`)
+    // `x-uid` 取凭据的 user_id（不是昵称、不是设备号）。
+    expect(headers['x-uid']).toBe('uid-1')
     // 设备头取自凭据的 device_id（与签到端点同一个字段，不是登录 URL 的随机号）。
     expect(headers['x-device-id']).toBe('1234567890123456')
     expect(headers['x-device-type']).toBe('windows')
@@ -803,31 +923,78 @@ describe('TraeCnAdapter 请求构造', () => {
     expect(headers['x-os-version']).toBe(osVersion())
   })
 
-  it('body：model / messages / stream 恒为 true', async () => {
+  it('**每次请求的追踪 id 都是新的**（同一个 id 复用会让上游调用链混在一起）', async () => {
+    const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
+    await collect(adapter, generateOptions())
+    await collect(adapter, generateOptions())
+    const first = (calls[0]!.init?.headers as Record<string, string>)['x-request-id']
+    const second = (calls[1]!.init?.headers as Record<string, string>)['x-request-id']
+    expect(first).not.toBe(second)
+  })
+
+  it('body：model / config_name / function / stream 恒为 true', async () => {
     const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
     await collect(adapter, generateOptions({ model: 'kimi-k3' }))
     const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>
     expect(body.model).toBe('kimi-k3')
+    // ⚠️ `config_name` 必须与 `model` 同值：网关按它选配置。
+    expect(body.config_name).toBe('kimi-k3')
     expect(body.stream).toBe(true)
     expect(Array.isArray(body.messages)).toBe(true)
   })
 
-  it('system 提示折叠进 messages 首位', async () => {
+  it('**function 路由**：静态表模型一律走 `solo_work_remote`（16 项全在 remote 集内）', async () => {
     const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
-    await collect(adapter, generateOptions({ system: '你是助手' }))
-    const body = JSON.parse(String(calls[0]!.init?.body)) as { messages: Array<{ role: string; content: string }> }
-    expect(body.messages[0]).toEqual({ role: 'system', content: '你是助手' })
+    await collect(adapter, generateOptions({ model: 'glm-5.3' }))
+    const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>
+    // 写死 `solo_work_lite` 会让 glm-5.3 回 `4001 param is invalid`（真机实测）。
+    expect(body.function).toBe(TRAE_CN_SOLO_REMOTE_FUNCTION)
+    expect(body.function).toBe('solo_work_remote')
   })
 
-  it('工具 schema 映射为 OpenAI function 形态；无工具时不发 tools', async () => {
+  it('**function 路由跟随动态目录**：远端条目自带的 function 优先于静态回退值', async () => {
+    const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')), {
+      fetchRemoteModels: async () => [
+        { id: 'glm-5.3', name: 'GLM-5.3', function: TRAE_CN_SOLO_LITE_FUNCTION },
+      ],
+    })
+    await collect(adapter, generateOptions({ model: 'glm-5.3' }))
+    const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>
+    expect(body.function).toBe('solo_work_lite')
+  })
+
+  it('表外模型（历史会话里的旧 id）回退 `solo_work_remote`', async () => {
+    const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
+    await collect(adapter, generateOptions({ model: 'brand-new-model' }))
+    const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>
+    expect(body.function).toBe(TRAE_CN_SOLO_REMOTE_FUNCTION)
+    expect(body.config_name).toBe('brand-new-model')
+  })
+
+  it('system 提示折叠进 messages 首位，且 content 是 `[{type,text}]` 数组', async () => {
+    const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
+    await collect(adapter, generateOptions({ system: '你是助手' }))
+    const body = JSON.parse(String(calls[0]!.init?.body)) as { messages: Array<{ role: string; content: unknown }> }
+    expect(body.messages[0]).toEqual({ role: 'system', content: [{ type: 'text', text: '你是助手' }] })
+    // 后续 user 消息同样被改写成数组形态（上游不接受裸字符串）。
+    expect(body.messages[1]!.content).toEqual([{ type: 'text', text: '你好' }])
+  })
+
+  it('工具 schema 的 parameters **字符串化**；无工具时不发 tools', async () => {
     const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
     await collect(adapter, generateOptions({
-      tools: [{ name: 'read', description: '读文件', parameters: { type: 'object' } }],
+      tools: [{ name: 'read', description: '读文件', parameters: { type: 'object', properties: { p: { type: 'string' } } } }],
     }))
     const withTools = JSON.parse(String(calls[0]!.init?.body)) as { tools: unknown[] }
-    expect(withTools.tools).toEqual([
-      { type: 'function', function: { name: 'read', description: '读文件', parameters: { type: 'object' } } },
-    ])
+    // ⚠️ 上游把 parameters 当字符串绑定，传对象会 4001 type mismatch。
+    expect(withTools.tools).toEqual([{
+      type: 'function',
+      function: {
+        name: 'read',
+        description: '读文件',
+        parameters: JSON.stringify({ type: 'object', properties: { p: { type: 'string' } } }),
+      },
+    }])
 
     const second = makeAdapter(() => sseResponse(textStream('ok')))
     await collect(second.adapter, generateOptions())
@@ -850,8 +1017,9 @@ describe('TraeCnAdapter 请求构造', () => {
     const { adapter, calls } = makeAdapter(() => sseResponse(textStream('ok')))
     await collect(adapter, generateOptions({ reasoningEffort: 'extra_high' as never }))
     const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>
-    // 官方客户端对普通国内账号用的就是这个键（字节内网账号才用 reasoning_effort，
-    // 见 buildBody 的注释）。写错会让档位静默失效。
+    // ⚠️ **换端点不改字段名**：SOLO 代际的第三方实现用 `reasoning_effort`，但那
+    // 未做 A/B 验证；`reasoning_effort_level` 有 chat_v3 代际的三方互证（见
+    // buildTraeCnSoloBody 的注释）。在有对比证据前维持有证据的那个。
     expect(body.reasoning_effort_level).toBe('extra_high')
     expect(body).not.toHaveProperty('reasoning_effort')
   })
@@ -868,6 +1036,58 @@ describe('TraeCnAdapter 请求构造', () => {
     expect(error?.code).toBe('UNSUPPORTED_CONTENT')
     // 在取凭据/发请求之前就拒绝。
     expect(calls).toHaveLength(0)
+  })
+})
+
+describe('buildTraeCnSoloBody（纯函数，逐字段锁死出站形态）', () => {
+  /** 用 harness 的真实消息类型构造一次调用。 */
+  function bodyOf(options: Partial<GenerateOptions> = {}, functionName = 'solo_work_remote') {
+    return JSON.parse(buildTraeCnSoloBody(generateOptions(options), functionName)) as Record<string, unknown>
+  }
+
+  it('`role:"developer"` 改写为 `system`（上游没有 developer 角色）', () => {
+    const body = buildTraeCnSoloBody({
+      ...generateOptions(),
+      messages: [{ role: 'developer', content: '你是助手' } as never],
+    }, 'solo_work_remote')
+    const messages = JSON.parse(body).messages as Array<Record<string, unknown>>
+    expect(messages[0]).toEqual({ role: 'system', content: [{ type: 'text', text: '你是助手' }] })
+  })
+
+  it('assistant 的 `tool_calls[].function` **改名 `function_call`**（出站改名）', () => {
+    const body = buildTraeCnSoloBody({
+      ...generateOptions(),
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool-call', id: 'c1', name: 'read', arguments: '{"a":1}' }],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'ok' }] }],
+        },
+      ] as never,
+    }, 'solo_work_remote')
+    const messages = JSON.parse(body).messages as Array<Record<string, unknown>>
+    const assistant = messages.find((m) => m.role === 'assistant')!
+    const calls = assistant.tool_calls as Array<Record<string, unknown>>
+    expect(calls).toHaveLength(1)
+    // ⚠️ 键是 `function_call`（无 er），且**不得**同时留着 `function`。
+    expect(calls[0]!.function_call).toEqual({ name: 'read', arguments: '{"a":1}' })
+    expect(calls[0]).not.toHaveProperty('function')
+    // assistant 只有工具调用、没有正文 → content 为 null（不是空数组）。
+    expect(assistant.content).toBeNull()
+    // tool 消息带 tool_call_id（上游缺它会 400 整条请求）。
+    const tool = messages.find((m) => m.role === 'tool')!
+    expect(tool.tool_call_id).toBe('c1')
+  })
+
+  it('`function` 字段按入参下发；`config_name` 恒等于 `model`', () => {
+    const body = bodyOf({ model: 'glm-5.3' }, 'solo_work_lite')
+    expect(body.function).toBe('solo_work_lite')
+    expect(body.config_name).toBe('glm-5.3')
+    expect(body.model).toBe('glm-5.3')
+    expect(body.stream).toBe(true)
   })
 })
 
@@ -1148,31 +1368,217 @@ describe('TraeCnAdapter 收尾判定', () => {
   })
 })
 
-describe('Trae CN 模型目录解析（parseTraeCnModels）', () => {
-  it('解析扁平数组与嵌套信封', () => {
-    const entry = {
-      model_name: 'glm-5.2',
-      display_name: 'GLM-5.2',
-      display_contact_config: { consumption_rate: { data: { rate: 1.5 } } },
+describe('Trae CN 目录解析（parseTraeCnDirectory）', () => {
+  /** 一条实测形态的目录条目。 */
+  const entry = {
+    config_name: 'glm-5.3',
+    display_config: { display_name: 'GLM-5.3' },
+    model_detail_list: [{ prompt_max_tokens: 119_040, max_tokens: 64_000 }],
+    context_window_tokens: { dev: 119_040, max: 1_048_576 },
+  }
+
+  it('只读实测路径 `config_info_list`；字段按实测形态取', () => {
+    expect(parseTraeCnDirectory({ config_info_list: [entry] }, 'solo_work_remote')).toEqual([{
+      id: 'glm-5.3',
+      name: 'GLM-5.3',
+      contextWindow: 119_040,
+      maxTokens: 64_000,
+      function: 'solo_work_remote',
+    }])
+  })
+
+  it('上下文窗口回退 `context_window_tokens.dev`（缺 model_detail_list 时）', () => {
+    const parsed = parseTraeCnDirectory({
+      config_info_list: [{ config_name: 'm1', context_window_tokens: { dev: 200_000, max: 0 } }],
+    }, 'solo_work_remote')
+    expect(parsed[0]).toMatchObject({ id: 'm1', name: 'm1', contextWindow: 200_000 })
+    // 没读到 max_tokens 时字段**缺席**（不编造）。
+    expect(parsed[0]).not.toHaveProperty('maxTokens')
+  })
+
+  it('缺展示名时以 id 兜底；缺 id / 非法条目被跳过', () => {
+    const parsed = parseTraeCnDirectory({
+      config_info_list: [
+        { config_name: 'm1' },
+        { display_config: { display_name: '无 id' } },
+        null,
+        'x',
+        { config_name: '   ' },
+      ],
+    }, 'solo_work_lite')
+    expect(parsed).toEqual([{ id: 'm1', name: 'm1', function: 'solo_work_lite' }])
+  })
+
+  it('读 `reasoning_effort_config`：`support_thinking:true` + 非空 options 才声明', () => {
+    const parsed = parseTraeCnDirectory({
+      config_info_list: [
+        { config_name: 'a', reasoning_effort_config: { support_thinking: true, options: ['light', 'high'], default_level: 'high' } },
+        // support_thinking 为假 → 不声明。
+        { config_name: 'b', reasoning_effort_config: { support_thinking: false, options: null, default_level: '' } },
+        // options 为空 → 不声明。
+        { config_name: 'c', reasoning_effort_config: { support_thinking: true, options: [] } },
+        // default_level 不在 options 内 → 只丢默认档、保留档位列表。
+        { config_name: 'd', reasoning_effort_config: { support_thinking: true, options: ['high'], default_level: 'extra_high' } },
+      ],
+    }, 'solo_work_remote')
+    expect(parsed[0]).toMatchObject({ reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' })
+    expect(parsed[1]).not.toHaveProperty('reasoningEfforts')
+    expect(parsed[2]).not.toHaveProperty('reasoningEfforts')
+    expect(parsed[3]).toMatchObject({ reasoningEfforts: ['high'] })
+    expect(parsed[3]).not.toHaveProperty('defaultReasoningEffort')
+  })
+
+  it('结构不符时返回空数组（**不做信封猜测**：调用方回退静态表）', () => {
+    for (const bad of [null, 'x', 42, {}, { data: [] }, { config_info_list: null }, { config_info_list: 'nope' }]) {
+      expect(parseTraeCnDirectory(bad, 'solo_work_remote')).toEqual([])
     }
-    expect(parseTraeCnModels([entry])).toEqual([{ id: 'glm-5.2', name: 'GLM-5.2', consumptionRate: 1.5 }])
-    expect(parseTraeCnModels({ data: [entry] })).toHaveLength(1)
-    expect(parseTraeCnModels({ data: { models: [entry] } })).toHaveLength(1)
+  })
+})
+
+describe('Trae CN 目录合并与过滤（mergeTraeCnDirectory）', () => {
+  const entryOf = (id: string, fn: string): TraeCnModelEntry => ({ id, name: id, function: fn })
+
+  it('**remote 优先**：同名 id 以 remote 那份为准（function 也以 remote 为准）', () => {
+    const merged = mergeTraeCnDirectory([
+      { function: TRAE_CN_SOLO_REMOTE_FUNCTION, entries: [entryOf('glm-5.3', TRAE_CN_SOLO_REMOTE_FUNCTION)] },
+      { function: TRAE_CN_SOLO_LITE_FUNCTION, entries: [entryOf('glm-5.3', TRAE_CN_SOLO_LITE_FUNCTION), entryOf('glm-5.2', TRAE_CN_SOLO_LITE_FUNCTION)] },
+    ], true)
+    const byId = new Map(merged.map((m) => [m.id, m]))
+    expect(byId.get('glm-5.3')!.function).toBe(TRAE_CN_SOLO_REMOTE_FUNCTION)
+    // lite 独有项被剔除（见下一条的理由）。
+    expect(byId.has('glm-5.2')).toBe(false)
+    expect(merged).toHaveLength(1)
   })
 
-  it('缺展示名时以 id 兜底；缺 id 的条目被跳过', () => {
-    expect(parseTraeCnModels([{ model_name: 'm1' }])).toEqual([{ id: 'm1', name: 'm1' }])
-    expect(parseTraeCnModels([{ display_name: 'x' }, { model_name: 'm1' }])).toEqual([{ id: 'm1', name: 'm1' }])
+  it('**remote 成功时剔除 lite 独有项**（那些是内部 agent 项）', () => {
+    const merged = mergeTraeCnDirectory([
+      { function: TRAE_CN_SOLO_REMOTE_FUNCTION, entries: [entryOf('glm-5.3', TRAE_CN_SOLO_REMOTE_FUNCTION)] },
+      { function: TRAE_CN_SOLO_LITE_FUNCTION, entries: [entryOf('some_internal_thing', TRAE_CN_SOLO_LITE_FUNCTION)] },
+    ], true)
+    expect(merged.map((m) => m.id)).toEqual(['glm-5.3'])
   })
 
-  it('**不编造默认倍率**：读不到时字段缺席（而不是填 1.0）', () => {
-    expect(parseTraeCnModels([{ model_name: 'm1' }])[0]).not.toHaveProperty('consumptionRate')
-    expect(parseTraeCnModels([{ model_name: 'm1', display_contact_config: {} }])[0]).not.toHaveProperty('consumptionRate')
+  it('remote 失败时**保留** lite 的非内部项（那时它是唯一数据源）', () => {
+    const merged = mergeTraeCnDirectory([
+      { function: TRAE_CN_SOLO_LITE_FUNCTION, entries: [entryOf('glm-5.2', TRAE_CN_SOLO_LITE_FUNCTION)] },
+    ], false)
+    expect(merged.map((m) => m.id)).toEqual(['glm-5.2'])
   })
 
-  it('结构不符时返回空数组（调用方回退兜底表）', () => {
-    for (const bad of [null, 'x', 42, {}, { data: null }, { data: 'nope' }]) {
-      expect(parseTraeCnModels(bad)).toEqual([])
+  it('**内部 agent 项被过滤**（点名 + 形态两道网）', () => {
+    for (const id of TRAE_CN_INTERNAL_CONFIG_NAMES) {
+      expect(isInternalTraeCnConfig(id), id).toBe(true)
+    }
+    // 形态判据：含 agent / subagent 的一律内部项。
+    for (const id of ['some_new_agent', 'X_SubAgent', 'file_search_agent_v3']) {
+      expect(isInternalTraeCnConfig(id), id).toBe(true)
+    }
+    // 真机 16 项**一个都不该**命中（否则会误杀用户可调的模型）。
+    for (const model of TRAE_CN_FALLBACK_MODELS) {
+      expect(isInternalTraeCnConfig(model.id), model.id).toBe(false)
+    }
+    const merged = mergeTraeCnDirectory([
+      { function: TRAE_CN_SOLO_REMOTE_FUNCTION, entries: [
+        entryOf('glm-5.3', TRAE_CN_SOLO_REMOTE_FUNCTION),
+        entryOf('summary', TRAE_CN_SOLO_REMOTE_FUNCTION),
+        entryOf('explore_sub_agent_v2', TRAE_CN_SOLO_REMOTE_FUNCTION),
+      ] },
+    ], true)
+    expect(merged.map((m) => m.id)).toEqual(['glm-5.3'])
+  })
+})
+
+describe('Trae CN 目录拉取（fetchTraeCnDirectory，零网络）', () => {
+  /** 造一个目录响应。 */
+  function directoryResponse(ids: string[]): Response {
+    return new Response(JSON.stringify({
+      config_info_list: ids.map((id) => ({ config_name: id, display_config: { display_name: id } })),
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+
+  it('两个 function 各拉一次，body 是实测定案的固定形态', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetcher = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), init })
+      const fn = (JSON.parse(String(init?.body)) as { function: string }).function
+      return fn === TRAE_CN_SOLO_REMOTE_FUNCTION
+        ? directoryResponse(['glm-5.3', 'glm-5.2'])
+        : directoryResponse(['glm-5.2', 'lite_only_internal_agent'])
+    }) as unknown as typeof fetch
+
+    const entries = await fetchTraeCnDirectory(makeCredential(), { fetchImpl: fetcher })
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.url).toBe(`${TRAE_CN_IDE_API_BASE}${TRAE_CN_MODELS_PATH}`)
+    expect(calls[0]!.init?.method).toBe('POST')
+    // body 的固定字段逐项锁死（`function` 按轮次变化，其余恒为这些值）。
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({
+      function: TRAE_CN_SOLO_REMOTE_FUNCTION,
+      config_names: null,
+      need_prompt: false,
+      current_config_info: null,
+      poly_prompt: true,
+      mode_type: null,
+      agent_type: null,
+    })
+    expect(JSON.parse(String(calls[1]!.init?.body)).function).toBe(TRAE_CN_SOLO_LITE_FUNCTION)
+    // 目录头与 chat 同源（鉴权三头 + SOLO 通道头），Accept 为 JSON。
+    const headers = calls[0]!.init?.headers as Record<string, string>
+    expect(headers['Authorization']).toBe('Cloud-IDE-JWT AT-1')
+    expect(headers['Accept']).toBe('application/json')
+    expect(headers['request-traffic-type']).toBe('prod')
+    // 结果：remote 优先 + 剔除 lite 独有项。
+    expect(entries.map((e) => e.id)).toEqual(['glm-5.3', 'glm-5.2'])
+    expect(entries.find((e) => e.id === 'glm-5.3')!.function).toBe(TRAE_CN_SOLO_REMOTE_FUNCTION)
+  })
+
+  it('单 function 失败不阻断另一个（HTTP 非 200 / 抛错都只跳过该 function）', async () => {
+    const nonOk = vi.fn(async (url: unknown, init?: RequestInit) => {
+      const fn = (JSON.parse(String(init?.body)) as { function: string }).function
+      return fn === TRAE_CN_SOLO_REMOTE_FUNCTION
+        ? new Response('boom', { status: 500 })
+        : directoryResponse(['glm-5.2'])
+    }) as unknown as typeof fetch
+    // remote 失败 → remoteSucceeded 为假 → 保留 lite 的非内部项。
+    expect((await fetchTraeCnDirectory(makeCredential(), { fetchImpl: nonOk })).map((e) => e.id))
+      .toEqual(['glm-5.2'])
+
+    const throws = vi.fn(async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch
+    expect(await fetchTraeCnDirectory(makeCredential(), { fetchImpl: throws })).toEqual([])
+  })
+
+  it('**多模态标记由静态表补齐**（applyTraeCnStaticModalities 只补不增）', () => {
+    const applied = applyTraeCnStaticModalities([
+      { id: 'kimi-k3', name: 'Kimi-K3', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+      { id: 'remote-only', name: 'Remote Only', function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+      // 目录将来若自带该字段，以目录为准（不被静态表覆盖）。
+      { id: 'glm-5.3', name: 'GLM-5.3', supportsImages: true, function: TRAE_CN_SOLO_REMOTE_FUNCTION },
+    ])
+    expect(applied[0]!.supportsImages).toBe(true)
+    // 远端独有 id：静态表没有它 → 仍然缺席（保守判纯文本），**不新增条目**。
+    expect(applied[1]).not.toHaveProperty('supportsImages')
+    expect(applied[2]!.supportsImages).toBe(true)
+    expect(applied).toHaveLength(3)
+  })
+
+  it('静态回退目录 = 16 项且全部映射到 `solo_work_remote`', () => {
+    const catalog = fallbackTraeCnCatalog()
+    expect(catalog).toHaveLength(16)
+    for (const entry of catalog) {
+      expect(entry.function, entry.id).toBe(TRAE_CN_SOLO_REMOTE_FUNCTION)
+      expect(entry.id.length).toBeGreaterThan(0)
+      expect(entry.name.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('目录请求头与 chat 头**同源**（同一个构造器，两处不可能分叉）', () => {
+    const chat = traeCnSoloHeaders(makeCredential(), 'text/event-stream')
+    const directory = traeCnSoloHeaders(makeCredential(), 'application/json')
+    expect(directory['Accept']).toBe('application/json')
+    expect(chat['Accept']).toBe('text/event-stream')
+    // 除 Accept 外逐键相同（追踪 id 每次不同，故只比对键集合与固定值）。
+    expect(Object.keys(directory).sort()).toEqual(Object.keys(chat).sort())
+    for (const key of ['x-app-id', 'x-ide-version-code', 'request-traffic-type', 'x-plugin-channel', 'User-Agent', 'x-uid']) {
+      expect(directory[key], key).toBe(chat[key])
     }
   })
 })

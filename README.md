@@ -931,24 +931,52 @@ provider id 是 `trae-cn`（带连字符，对齐用户与生态叫法），但 
 注意该 namespace 里的连字符是**正确**的：namespace 是字符串键而非 JS 标识符，
 与 cordis 服务名（`traeCnAuth`）走的是两套命名规则。
 
-**端点**：`POST https://trae-api-cn.mchost.guru/api/ide/v1/chat`，请求头
+**端点**：`POST https://trae-api-cn.mchost.guru/api/agent/v3/llm_utils_chat`
+（**SOLO 通道**，2026-09-19 迁移，见下），请求头
 `Cloud-IDE-JWT <access>` + 同值 `X-Ide-Token` / `X-Cloudide-Token` +
-**IDE 网关全套头**（见下），`Accept: text/event-stream`；请求体是标准
-OpenAI chat-completions 消息数组（`model` / `messages` / `stream: true`），
+**网关全套头**（见下），`Accept: text/event-stream`；请求体是
+`{messages, model, config_name, function, stream: true, tools?, reasoning_effort_level?}`，
 **不发**任何腾讯系或 LobsterAI 归属头。
 
-> ✅ **T6 已真机校准（2026-09-18）：路径本来就对，错的是 host。**
-> `/api/ide/*` **不在** `api.trae.cn` 上 —— 实测 `/api/ide/v1/ping` 在该 host
-> 回 **404**，在 IDE 网关 `trae-api-cn.mchost.guru` 回 **200**（该 host 由官方
-> product.json 的 `bootConfig.agent.trae.normal` 指定）。原实现把正确路径拼在
-> 错误的 base 后面，症状是 404 而病因在 host —— 若当初照候选表逐个试路径，
-> 四条会全部 404，反而把正确的那个排除掉。候选表
-> `TRAE_CN_CHAT_PATH_CANDIDATES` 因此已无运行时意义，仅作历史留痕。
-> 实测该网关上 chat 返回**正常 SSE**，业务错误在 HTTP 200 的 `event:error`
-> 帧里（实测 `code:4001`），与 `src/trae-cn-errors.ts` 的设计假设一致。
+> ✅ **2026-09-19 端点迁移：`/api/ide/v1/chat` → `/api/agent/v3/llm_utils_chat`。**
+>
+> **病根（五轮真机取证定案）**：旧 `/api/ide/v1/chat` 是**旧 aiserver 通道**，
+> 它的 `llm_raw_chat` 场景只认 **5 项旧池**，我方请求（`glm-5.3` 等新池模型）
+> **恒回 `event:error {code:3003, "all models failed"}`**，历史零成功。
+> 真实客户端的新池聊天走的是
+> 「AhaRpc → ai-agent 子进程 → `harness.dll` → 原生出网」五段链路，
+> 第三方无法复刻。
+>
+> **解法**：SOLO 通道 `/api/agent/v3/llm_utils_chat` **已用我方凭据实测走通**
+> —— `glm-5.2` 流式正常、`glm-5.3` + tools 结构化调用全绿（HTTP 200 SSE）。
+> host **不变**（仍是 `trae-api-cn.mchost.guru`），凭据不变，头集合差异已排除
+> （网关对多余头宽容）。**决定成败的是端点 + body 的 `config_name` / `function`
+> 两字段**。
+>
+> T6 那次「路径本来就对，错的是 host」的结论对**旧通道**仍然成立，但它解释不了
+> 新池拿不到模型这件事 —— 两者是**两个不同层的问题**：T6 是 host 拼错，
+> 本次是**端点选错了通道**。旧路径与候选表 `TRAE_CN_CHAT_PATH_CANDIDATES`
+> 已**整体删除**（留着会让人以为 `/api/ide/v1/*` 仍是可选路径，它们对新池全部无效）。
 
-**IDE 网关必须带齐的请求头**（实测缺了直接 500 / 401，带齐才是 200 ——
-它们不是遥测字段，而是请求能否成立的一部分）：
+**请求体的 SOLO 形态**（`buildTraeCnSoloBody`，逐字段实测）：
+
+| 字段 | 说明 |
+|---|---|
+| `model` / `config_name` | **两个字段都要给，且恒等**（网关按 `config_name` 选配置） |
+| `function` | **模型来源 function**：CN 区为 `solo_work_remote`（41 项）/ `solo_work_lite` |
+| `messages[].content` | **`[{type:'text',text}]` 数组**（不是裸字符串） |
+| `role:"developer"` | **归一为 `"system"`**（上游不认 developer） |
+| assistant `tool_calls[].function` | **出站改名 `function_call`**（无 er；入站帧仍是 `function`，故解析侧不动） |
+| `tools[].function.parameters` | **JSON 字符串**（传对象会 `4001 parameter type does not match binding data`） |
+| `reasoning_effort_level` | **维持不变**（见下「思考档位」的说明） |
+
+⚠️ **`function` 必须逐模型记住来源**：`glm-5.3` **只在 `solo_work_remote` 集里**，
+写死 `solo_work_lite` 必回 `4001 param is invalid`（真机实测）。静态回退表的
+16 项**全部**映射到 `solo_work_remote`（实测确认都在 remote 集内）；动态目录的
+条目**自带**来源 function。
+
+**网关必须带齐的请求头**（版本头维持现状；`request-traffic-type` / UA /
+追踪头是 SOLO 通道的实测值）：
 
 ```
 x-app-id:            6eefa01c-1036-4c7e-9ca5-d891f63bfcd8
@@ -956,22 +984,33 @@ x-ide-version-code:  107            ← 必须纯数字；"3.3.100" 会 400
 x-app-version-code:  107
 x-ide-version:       1.107.1        ← 与登录用的 3.3.100 不是一个号
 x-ide-version-type:  stable
-request-traffic-type: normal
+request-traffic-type: prod           ← SOLO 通道实测值（旧 IDE 通道是 normal）
+x-plugin-channel:    icube-ai        ← SOLO 通道新增
+x-request-id / x-trae-request-id: <同一个 UUID>
+x-custom-trace-id:   <requestId 去横线后前 32 字符>
+x-flow-traceparent:  04-<traceId>-<traceId 前 16>-01
+x-uid:               <凭据的 user_id>
 x-device-id:         <凭据的 device_id>   ← 与签到头同源
 x-device-type:       windows
 x-os-version:        <本机 os.version()，与签到头同源>
-User-Agent:          TraeClient/TTNet     ← 官方客户端 UA，不是浏览器 UA
+User-Agent:          Trae/<appVersion>    ← SOLO 通道实测值（旧通道是 TraeClient/TTNet）
 ```
+
+追踪四头**同源**：`x-request-id` 是一个 UUID，`x-custom-trace-id` 是它去横线后的
+前 32 字符，`x-flow-traceparent` 是 W3C 形态。生成一次、三处复用 —— 每处各生成
+一个会让上游的调用链对不上；而**每次请求都必须是新的 id**（复用会把多次调用混成
+一条链）。
 
 注意 `x-ide-version-code` 与登录 URL 的 `x_app_version`（`3.3.100`）**同名不同物、
 形态要求还不同**：一个进网关头且必须纯数字，一个进 URL/请求体。三个版本号
 （`107` / `1.107.1` / `3.3.100`）在 `src/trae-cn-product.ts` 里是三个独立常量。
 
-**SSE 不是 OpenAI 协议**。上游返回**具名事件**流，帧解析在 `src/trae-cn-sse.ts`：
+**SSE 不是 OpenAI 协议**。上游返回**具名事件**流，帧解析在 `src/trae-cn-sse.ts`
+（SOLO 通道的帧格式与旧通道**逐字一致**，故解析器一字未改）：
 
 ```
 event:metadata      data:{"conversation_id":…}      ← 忽略（`meta` 亦识别）
-event:timing_cost   data:{…}                        ← 忽略
+event:timing_cost   data:{provider_model_name:…}    ← 忽略
 event:output        data:{"response":"片段"}         ← 正文增量
 event:token_usage   data:{prompt_tokens,…}          ← usage
 event:done          data:{…}                        ← 流结束
@@ -981,19 +1020,30 @@ event:error         data:{"code":4008,"message":…}  ← 失败（HTTP 仍为 2
 事件名同样取自本机客户端字符串池：Rust 侧
 `…/adapter/llm/event.rs` 有一份权威事件类型清单，每个变体都带一条
 `Failed to deserialize <name> event` 诊断串（实测提取到 22 条）。
+`tool_calls[].function_call`（无 er）是**出站改名**，入站帧里仍是 `function` ——
+故解析侧不需要任何改动。
 
 **错误分类按业务码，不按 HTTP 状态码**（`src/trae-cn-errors.ts`，纯函数）：
 
 | 动作 | 业务码 | 说明 |
 |---|---|---|
 | **换号** | `4008` `4021` `5003` `977`（限流）、`4200`–`4203`（额度）、`1001` `1002` `4010` `4014`（账号失效）、`4011` `4013` `4015`（风控） | 对齐官方 `isSecurityError` 语义：账号失效与风控同样换号 |
-| **退避不换号** | `4007` `3004` `9074`（软限流）、`4000005` `4050`–`4052`（排队） | 排队是**全局**状态，换号只会把同一个问题再问一遍并多烧一个账号的额度 |
+| **退避不换号** | `4007` `3004` `9074`（软限流）、**`3003`（MODEL_FAIL，基础设施类）**、`4000005` `4050`–`4052`（排队） | 排队与基础设施故障都是**全局**状态，换号只会把同一个问题再问一遍并多烧一个账号的额度 |
 | **直接报错** | `4001`（参数）、`4006`（超长）、`4023`（模型不存在） | 确定性失败，换号与退避都是浪费往返 |
 | **直报（带原始码）** | 其它未知码 | 保守默认：未知码可能是终态（积分耗尽的真实码 T3 尚未实测到），直报能让真机第一次遇到就把码暴露在文案里，一步校准 |
+
+`3003`（`MODEL_FAIL`，`all models failed`）是**端点迁移取证时补入**的：它正是旧
+IDE 通道对我方新池请求的恒定回复。归**可重试**（退避）而非直报，是因为它明确是
+基础设施/容量类的瞬时失败，退避后可能就好了；同时它**不换号**（与具体账号无关），
+也**不记冷却徽章**（不是账号级的模型限流）。
 
 非 200 的 HTTP 失败（网络层/网关）走兜底：`401`/`403` → 换号，`429`/`408`/`5xx` → 退避，
 其余直报。`4006` 映射为 `CONTEXT_WINDOW_EXCEEDED`（触发 DSH 上下文自动压缩），
 换号与退避都映射为可重试的 `RATE_LIMIT`。
+
+> ⚠️ **绝不允许把流内错误转成优雅关闭**：`event:error` / `code >= 4000` 必须把
+> 业务码**直报**给 DSH。转成优雅关闭会让 DSH 报「Stream ended without
+> finish_reason」，真因永远丢失（`dsh-connect-trae` 的教训）。
 
 **结构上与 LobsterAI 的根本差异**：Trae 的业务失败发生在 **HTTP 200 的
 `event:error` 帧**里，所以换号循环必须能接住**流内**失败 —— LobsterAI 的错误
@@ -1001,7 +1051,38 @@ event:error         data:{"code":4008,"message":…}  ← 失败（HTTP 仍为 2
 （3 个账号，含首次）。若流已经开始产出正文才报错，则**不再换号**（换号会让用户
 看到「半截回答 + 完整回答」两段内容，比直接报错更糟），改为直报。
 
-**模型目录 = 真机 16 项静态表**（`TRAE_CN_FALLBACK_MODELS`，2026-09-18）。
+**模型目录 = 动态 `get_detail_param`（权威）+ 静态 16 项回退**（2026-09-19 起）。
+
+| 项 | 值 |
+|---|---|
+| 端点 | `POST /api/ide/v1/get_detail_param`（同一网关，与 chat **同源凭据与头**） |
+| body | `{function, config_names:null, need_prompt:false, current_config_info:null, poly_prompt:true, mode_type:null, agent_type:null}` |
+| function | CN 区**两个都拉**：`solo_work_remote`（优先）与 `solo_work_lite`，取并集 |
+| 解析 | `config_info_list[].config_name` / `display_config.display_name` / `model_detail_list[0].prompt_max_tokens`（回退 `context_window_tokens.dev`）与 `.max_tokens` |
+| 缓存 | 12h TTL（参照 LobsterAI 的 `clientVersion` 缓存先例）；**失败不写缓存**，下次调用重试 |
+| 回退 | 目录整体不可用 → 现行 16 项静态表（`TRAE_CN_FALLBACK_MODELS`） |
+
+> ✅ **推翻 2026-09-18 的「远端不可接」结论**：那条结论**是对的，但试错了端点** ——
+> `model_list` 只回 6 项旧池、`batch_get_detail_param` 只回 4 个 seed 配置。
+> 真正可用的是 `get_detail_param`，且**必须按 `function` 分别拉取后取并集**：
+> roster 被 Trae 摊在多个 SOLO function 下（`glm-5.3` 只在 `solo_work_remote`）。
+
+**目录过滤规则**（`src/trae-cn-models.ts` 的 `mergeTraeCnDirectory`）：
+
+1. **remote 优先**：同名 id 以先到的 function 为准（顺序即优先级）；
+2. **remote 成功时剔除 lite 独有项** —— 实测「用户可调的项要么两个 function
+   都在集、要么 remote 独有」，故**只在 lite 出现**的项就是内部 agent 项；
+3. **内部项过滤两道网**：点名（`summary` / `file_search_agent` /
+   `explore_sub_agent_v2` / `browser_use_subagent` / `computer_use_subagent`）
+   + 形态（id 里含 `agent` / `subagent`）。真机 16 项**一个都不命中**该形态，
+   故不会误杀用户可调的模型；
+4. **刻意不接 remote 骨架合并**：把远端独有项也列出来会引入 `join` 不到的不可调项
+   （如 `Doubao-Seed-Code`），选中即路由失败；
+5. **多模态标记由静态表补齐**（目录端点不带该字段）：只对**静态表已有的 id** 补值、
+   **不新增条目**。不补的话，动态目录一旦生效，12 个支持图片的模型会全部变成纯文本
+   —— 同一模型在「目录成功」与「目录失败」两条路径下报出不同模态，是自相矛盾。
+
+**静态回退表（16 项，2026-09-18 真机 `chat_v3` 目录）**：
 
 | id | 展示名 | 多模态 | max_tokens | 上下文（dev/max） |
 |---|---|---|---|---|
@@ -1028,15 +1109,23 @@ id 形态极不规则（`qwen3.8-flash` 无连字符、`qwen-3.7-plus` 有、
 `deepseek-v4.1-flash` 是点号、`minimax-m3` 全小写）——**任何规整化都会让请求打到
 不存在的模型上**，故原样保留。
 
+⚠️ 该表现在是**回退表**（不再是唯一目录），但它仍是**唯一**记录「多模态标记」的
+地方：目录端点不带该字段，故动态目录生效时由 `applyTraeCnStaticModalities` 按 id
+把标记补回来（只补不增，见上「目录过滤规则」第 5 条）。
+
 - 上下文窗口取 **dev 档**（如 `262144/1048576` → 262144）：它是客户端默认实际
   使用的窗口。max 档（多数 1048576）是理论上限，按它声明会让 DSH 的上下文压缩
-  迟迟不触发；
+  迟迟不触发；动态目录同口径取 `prompt_max_tokens`（回退 `context_window_tokens.dev`）；
 - `inputModalities` **按模型给**：多模态项（**12/16**）输出 `['text','image']`，
   其余 `['text']`。`listModels` 与 `resolveModel` 读的是同一个 `supportsImages`
   字段，两处口径强制同源（不一致会让选择器与请求路径自相矛盾）；
 - `maxTokens` **只记录不 materialize**：DSH 的 `defaultMaxTokens` 会在调用方未给
   上限时自动填进请求体，而本仓库另外四个 provider 一个都没设该字段 ——
   由适配器替用户决定输出上限是行为变更，不在本次范围内。
+- **消耗倍率不再解析**：旧实现会从 `display_contact_config.consumption_rate.data.rate`
+  读出倍率但不展示（DSH 的 `LlmModelInfo` 没有放自定义元数据的位置，塞进
+  `description` 会污染选择器文案）。新的目录解析器**不读它** —— 读出来没有任何
+  落点，留着只会让人以为它被用上了。
 
 **思考档位（reasoning effort）已接线**：13/16 项声明档位，另 3 项
 （`minimax-m3` / `qwen-3.7-plus` / `Doubao-Seed-Evolving`）刻意不声明。
@@ -1062,6 +1151,12 @@ id 形态极不规则（`qwen3.8-flash` 无连字符、`qwen-3.7-plus` 有、
 才走 `reasoning_effort`；本插件用的是普通国内账号，故取前者。`ai_agent.dll` 的
 serde 字段块里两者**并列存在**，印证这是「两套账号体系各用一个」而非猜测。
 
+> ⚠️ **端点迁移后仍然不改这个字段名**（2026-09-19 的决定，刻意为之）：
+> SOLO 通道的第三方可用实现下发的是 `reasoning_effort`，但那是 **SOLO 代际**的
+> 写法，**未做 A/B 验证**。在拿到「同一请求两种字段名哪个真生效」的对比证据之前
+> 不盲改 —— 那是把一条有证据的结论换成一条没有证据的猜测。值域
+> `light` / `high` / `extra_high` 同样不变。
+
 > ⚠️ **已知未验证项**：上游是否**真的按档位改变思考**尚未做对比实验。真机
 > A/B **无法**用「是否报错」区分两个字段名 —— 测试账号在带与不带档位时都回
 > `code:4008`（配额），字段校验阶段被 4008 掩盖（该账号在
@@ -1069,7 +1164,13 @@ serde 字段块里两者**并列存在**，印证这是「两套账号体系各�
 > 但也不是可用来判定字段名的信号）。字段名本身由上述静态证据三方互证定案；
 > 「档位是否生效」需一次能跑通的对话来对比 `reasoning_content` 长度。
 
-**为何不接远端模型目录**（三端点实测结论，2026-09-18）：
+> ℹ️ **远端目录项的档位**：`get_detail_param` 的条目若带
+> `reasoning_effort_config`（`support_thinking:true` + 非空 `options`），同样会被
+> 声明；**没有该字段就不声明** —— 不编造档位。`default_level` 不在 `options` 内时
+> **只丢默认档、保留档位列表**（上游发出不自洽组合时用户仍能手动选档）。
+
+**旧「为何不接远端模型目录」的实测表仍然有效，但它只说明那三个端点不可用**
+（2026-09-18 三端点实测结论）：
 
 | 端点 | 实测结果 |
 |---|---|
@@ -1077,30 +1178,25 @@ serde 字段块里两者**并列存在**，印证这是「两套账号体系各�
 | `batch_get_detail_param` | 只回 **4 个 seed 配置** |
 | 其余约 200 种形状组合 | 18 项新池**一个都不出现** |
 
-官方客户端能看到新池，靠的是 `harness.dll` **内嵌静态映射** + 本地缓存（vscdb），
-不是任何可调用的 HTTP 接口。故 `fetchRemoteModels` **刻意不接线**，静态表即正解
-（`TRAE_CN_MODELS_PATH` 保留常量并注明不可用）。
+**`get_detail_param` 不在那张表里，它是可用的**（见上「模型目录」小节）。
+旧实现据此写下的「`fetchRemoteModels` 刻意不接线、静态表即正解」**已作废**；
+旧的容忍式解析器 `parseTraeCnModels`（从 `data`/`models`/`model_list` 等候选键里
+猜数组）与它配套的 `TraeCnRemoteModel` 类型**已整体删除** —— 现在只读实测路径
+`config_info_list`，不做信封猜测：上游真改版时，一个**空目录**（回退静态表，
+用户仍能用）比「猜对形状但读错字段」的半成品更容易诊断。
 
-> ⚠️ **待办**：解析器 `parseTraeCnModels` 因此**当前无调用方**（远端不接就没有
-> 响应可解）。刻意保留而非删除 —— 真接线时它仍是入口，且它的候选字段表是从客户端
-> 响应形态推出来的。接线时需一并校准该表。
->
-> 4 个旧死 id 的下落：`qwen3.7-max` **已下线**；`deepseek-v4-flash` /
-> `doubao-seed-2-1-pro` / `MiniMax-M3` 是拼写或大小写错误的**近似形态**
-> （真机分别是 `deepseek-v4.1-flash` / `Doubao-Seed-2.1-Pro` / `minimax-m3`）。
-> 真机目录里**没有** `deepseek//deepseek-chat` 与 `deepseek//deepseek-reasoner`
-> —— 那是账号自定义的 BYOK 条目，不属云端目录，已排除。
-
-消耗倍率（`display_contact_config.consumption_rate.data.rate`）会被解析出来，
-但**不塞进** `LlmModelInfo` —— DSH 该接口只有
-`provider`/`id`/`name`/`description`/`inputModalities` 五个字段，唯一的落点是
-`description`，而那会污染模型选择器的展示文案。
+4 个旧死 id 的下落：`qwen3.7-max` **已下线**；`deepseek-v4-flash` /
+`doubao-seed-2-1-pro` / `MiniMax-M3` 是拼写或大小写错误的**近似形态**
+（真机分别是 `deepseek-v4.1-flash` / `Doubao-Seed-2.1-Pro` / `minimax-m3`）。
+真机目录里**没有** `deepseek//deepseek-chat` 与 `deepseek//deepseek-reasoner`
+—— 那是账号自定义的 BYOK 条目，不属云端目录，已排除。
 
 **与其它 provider 一致的约定**：`stream()` 把 `options.model` 传给
 `resolveCredential` 与 `refresh`（硬约定，见「账号池与多账号」）；
 `listModels()` 实时读 `pool.disabledModelsFor('trae-cn')` 应用黑名单；
 **声明** reasoning 档位（13/16 项，真机 vscdb；下发字段 `reasoning_effort_level`，
 仅透传调用方显式传的值、不主动补档 —— 补档由 DSH 按 `defaultEffort` 完成）。
+目录拉取本身**不传 model**（目录对所有模型一致，不做逐模型限流过滤）。
 
 > ⚠️ **图片输入有意不一致**：目录照实报 `['text','image']`（那是**模型**的能力），
 > 而 `stream()` 仍对图片块抛 `UNSUPPORTED_CONTENT`（那是**本适配器**的能力 ——
@@ -1252,8 +1348,8 @@ Trae CN 账号的积分**分两个互不通用的池**，而**只有 Work 池能
 |---|---|---|
 | Host | `trae-api-cn.mchost.guru`（IDE 网关） | `work.trae.cn`（同源网页 RPC） |
 | 网关头 | 必须带齐 `x-app-id` / 纯数字 `x-ide-version-code` 等全套 | **不需要**，仅鉴权三头 |
-| 请求形态 | 单次 `POST /api/ide/v1/chat`（无状态） | **三段式**（建会话 → 发消息 → 订阅 SSE） |
-| 模型池 | 16 项 `chat_v3` 代际 | **14 项 `solo_agent_remote`，id 与 IDE 池完全不重合** |
+| 请求形态 | 单次 `POST /api/agent/v3/llm_utils_chat`（无状态） | **三段式**（建会话 → 发消息 → 订阅 SSE） |
+| 模型池 | 动态 `get_detail_param`（回退 16 项 `chat_v3` 静态表） | **14 项 `solo_agent_remote`，id 与 IDE 池完全不重合** |
 | 扣费池 | 通用积分（`endpoint=0`） | **Work 专属（`endpoint=1`）** |
 | 思考档落点 | 请求体**顶层** `reasoning_effort_level` | **`custom_model` 对象内部**同名字段 |
 | 会话清理 | 无状态，无需清理 | **每轮 DELETE** |
@@ -1376,9 +1472,10 @@ Work **没有独立登录** —— 它用**同一批 Trae CN 账号**（`TRAE_CN
 
 ### 模型目录：**远端可用**（与 IDE 路径相反），但**必须按 agent 分组取**
 
-IDE 路径的目录端点刻意不接线（任何 HTTP 端点都拿不到新池）；Work 的
-`GET /api/remote/v1/models` **真机 200**，故本 provider **已接线**，
+Work 的 `GET /api/remote/v1/models` **真机 200**，故本 provider **已接线**，
 远端是权威来源，静态表（`TRAE_CN_WORK_FALLBACK_MODELS`）只在整体失败时顶替。
+（IDE 路径的目录走的是**另一个**端点 `get_detail_param`，同样已接线，见
+「Trae CN provider」章节的「模型目录」小节。）
 
 ⚠️ **这个端点按 `function`（= agent）分池，`function` 由 query 决定**。
 2026-09-19 真机实测（同一凭据，仅 query 不同）：

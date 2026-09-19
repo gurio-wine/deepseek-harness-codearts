@@ -17,8 +17,10 @@
  * | 鉴权 | `Cloud-IDE-JWT <access>` + 同值 `X-Ide-Token` / `X-Cloudide-Token` |
  * | `stream` | **恒为 `true`** —— chat 端点只返回 SSE |
  * | 错误判定 | **按 SSE 业务码**，不按 HTTP 状态码（几乎恒为 200），见 `src/trae-cn-errors.ts` |
- * | 端点 | **IDE 网关** `TRAE_CN_IDE_API_BASE` + `TRAE_CN_CHAT_PATH`（T6 已校准：路径本就对，错的是 host） |
- * | 网关头 | 必须带齐 `x-app-id` / 纯数字 `x-ide-version-code` 等全套（缺了 500/401），见 `chatHeaders` |
+ * | 端点 | **SOLO 通道** `TRAE_CN_IDE_API_BASE` + `TRAE_CN_CHAT_PATH`（`/api/agent/v3/llm_utils_chat`） |
+ * | body | `model` + **`config_name`（= model）** + **`function`（模型来源 function）**，见 `buildBody` |
+ * | 网关头 | 见 `src/trae-cn-models.ts` 的 `traeCnSoloHeaders`（与目录拉取共用一份） |
+ * | 目录 | **动态 `get_detail_param`（按 function 取并集）+ 静态 16 项回退**，见 `ensureRemoteModels` |
  * | 图片 | **按模型给**：真机目录 12/16 项多模态 → `['text','image']`，其余 `['text']` |
  * | 思考等级 | **声明档位**（13/16 项，真机 vscdb `reasoning_effort_config`），下发字段名 `reasoning_effort_level` |
  *
@@ -33,24 +35,23 @@ import type {
   GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { AccountPool } from './account-pool.js'
-import { isTraeCnExpired, traeCnAccessHeaders } from './trae-cn-oauth.js'
+import { isTraeCnExpired } from './trae-cn-oauth.js'
 import type { TraeCnCredential } from './trae-cn-oauth.js'
 import {
   TRAE_CN,
   TRAE_CN_CHAT_PATH,
-  TRAE_CN_GATEWAY_USER_AGENT,
   TRAE_CN_IDE_API_BASE,
-  TRAE_CN_IDE_APP_ID,
-  TRAE_CN_IDE_GATEWAY_VERSION,
-  TRAE_CN_IDE_VERSION_CODE,
-  TRAE_CN_IDE_VERSION_TYPE,
-  TRAE_CN_REQUEST_TRAFFIC_TYPE,
 } from './trae-cn-product.js'
 import type { TraeCnProduct } from './trae-cn-product.js'
-// 设备四件套的两个形态常量**复用 credits 模块**（同一条客户端形态伪装口径）：
-// 两处各写一份会在其中一处校准时悄悄分叉，而网关与签到端点对客户端形态的
-// 判定口径本来就该是同一个。
-import { TRAE_CN_DEVICE_TYPE, TRAE_CN_OS_VERSION } from './trae-cn-credits.js'
+import {
+  TRAE_CN_MODELS_TTL_MS,
+  TRAE_CN_SOLO_REMOTE_FUNCTION,
+  applyTraeCnStaticModalities,
+  fallbackTraeCnCatalog,
+  fetchTraeCnDirectory,
+  traeCnSoloHeaders,
+} from './trae-cn-models.js'
+import type { TraeCnModelEntry } from './trae-cn-models.js'
 import {
   classifyTraeCnError,
   recordsTraeCnCooldown,
@@ -96,220 +97,6 @@ const TRAE_CN_EFFORT_NAMES: Readonly<Record<string, string>> = {
 /** 档位 id 的展示名；未登记的 id 回退为 id 本身。 */
 function effortDisplayName(id: string): string {
   return TRAE_CN_EFFORT_NAMES[id] ?? id
-}
-
-/** 兜底模型目录中的一个条目。 */
-export interface TraeCnFallbackModel {
-  /** 模型 ID（传给 chat 请求体的 `model`）。 */
-  id: string
-  /** 展示名。 */
-  name: string
-  /**
-   * 上下文窗口（**真机目录给出的开发档，非估计值**）。
-   *
-   * 真机目录（2026-09-18）为每项给出 `ctx(dev/max)` 两档，本字段取 **dev 档**：
-   * 它是客户端默认实际使用的窗口（如 `262144/1048576` → 262144）。
-   * max 档（多数为 1048576）**刻意不取** —— 目录里它是理论上限，
-   * 而 `resolveModel` 声明的窗口会被 DSH 用来决定何时压缩上下文，
-   * 按上限声明会让压缩迟迟不触发。
-   */
-  contextWindow: number
-  /**
-   * 是否接受图片输入（真机目录的「多模态」标记，12/16 项为真）。
-   *
-   * 与 `src/product.ts` 的 `supportsImages` 同语义同字段名：适配器据此在
-   * `listModels` / `resolveModel` 里输出 `['text','image']` 或 `['text']`。
-   */
-  supportsImages: boolean
-  /**
-   * 该模型的最大输出 token 数（真机目录的 `max_tokens`：`64000` 或 `32000`）。
-   *
-   * **刻意只记录、不落进 `defaultMaxTokens`**：DSH 的
-   * `LlmResolvedModelInfo.defaultMaxTokens` 会在调用方未给 `maxTokens` 时自动
-   * 填进请求体，而本仓库另外四个 provider 一个都没设该字段
-   * （`grep defaultMaxTokens src/` 零命中）—— 由适配器替用户决定输出上限是
-   * 行为变更，不在本次「目录换真机表」的范围内。
-   * 保留字段是为了让目录与真机逐列对齐（否则后来者会以为目录里本来就没有它）。
-   */
-  maxTokens: number
-  /**
-   * 可选思考档位（真机 vscdb `reasoning_effort_config.options`，逐字符照抄）。
-   *
-   * 空/缺省 = **不暴露选择器**：DSH 的模型选择器只读 `resolveModel().reasoning`，
-   * 不声明该字段时显示「当前模型未提供推理等级」，这是诚实的（同
-   * `src/buddy-adapter.ts` 的 `reasoningEfforts` 约定）。
-   *
-   * id 逐字符照抄真机值（`light` / `high` / `extra_high`），**不做规整化** ——
-   * 它会原样进请求体（见 `buildBody`），改写会让上游认不出档位。
-   */
-  reasoningEfforts?: readonly string[]
-  /**
-   * 默认档位（真机 `reasoning_effort_config.default_level`），**必须**在
-   * {@link reasoningEfforts} 内。
-   *
-   * DSH 的 `resolveCallInfo` 会在调用方省略 `reasoningEffort` 时把它 materialize
-   * 进请求，故它同时是「用户没选档位时实际下发的值」。声明了却不在
-   * efforts 里会被 DSH 判为 `INVALID_MODEL_REASONING` 直接抛错。
-   */
-  defaultReasoningEffort?: string
-}
-
-/**
- * 静态模型目录 —— **真机 16 项，唯一正确的目录**（2026-09-18）。
- *
- * ## 来源
- *
- * 真机 `chat_v3` 模型目录（2026-09-18），由 Trae 客户端 **vscdb 缓存**与
- * **160 处日志事件**互证得到；id / 展示名 / 多模态标记 / max_tokens /
- * 上下文窗口**逐字符**照抄。id 的形态极不规则（`qwen3.8-flash` 无连字符、
- * `qwen-3.7-plus` 有、`deepseek-v4.1-flash` 是点号、`minimax-m3` 全小写），
- * 任何「规整化」都会让请求打到不存在的模型上 —— 故原样保留，不要改写。
- *
- * ## 为什么这不是「兜底表」而是权威表
- *
- * 远端拉取**不可接**（实测结论，见 `TRAE_CN_MODELS_PATH` 的注释）：
- * `model_list` 只回 6 项旧池（Doubao-1.5 代）、`batch_get_detail_param` 只回
- * 4 个 seed 配置，18 项新池在任何 HTTP 端点都不出现（~200 种形状全排除）——
- * 官方客户端靠 `harness.dll` 内嵌静态映射 + 本地缓存，没有可调用的接口。
- * 故 `fetchRemoteModels` **刻意不接线**，本表就是模型目录本身。
- *
- * ## 4 个旧死 id 的下落（原 8 项静态表里的）
- *
- * | 旧 id | 现状 |
- * |---|---|
- * | `qwen3.7-max` | **已下线**（真机目录里没有它） |
- * | `deepseek-v4-flash` | 拼写错误的近似形态（真机是 `deepseek-v4.1-flash`） |
- * | `doubao-seed-2-1-pro` | 同上（真机是 `Doubao-Seed-2.1-Pro`） |
- * | `MiniMax-M3` | 大小写错误的近似形态（真机是 `minimax-m3`） |
- *
- * 真机目录里**没有** `deepseek//deepseek-chat` 与 `deepseek//deepseek-reasoner`：
- * 那两个是账号自定义的 BYOK 条目，不属于云端目录，故**排除**。
- */
-export const TRAE_CN_FALLBACK_MODELS: readonly TraeCnFallbackModel[] = [
-  { id: 'Doubao-Seed-Evolving', name: 'Seed-Evolving', supportsImages: true, contextWindow: 262_144, maxTokens: 64_000 },
-  { id: 'Doubao-Seed-2.1-Pro', name: 'Seed-2.1-Pro-0915', supportsImages: true, contextWindow: 262_144, maxTokens: 64_000, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
-  { id: 'Doubao-Seed-2.1-Turbo', name: 'Seed-2.1-Turbo', supportsImages: true, contextWindow: 262_144, maxTokens: 32_000, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
-  { id: 'Doubao-Seed-Code', name: 'Seed-Code', supportsImages: true, contextWindow: 262_144, maxTokens: 32_000, reasoningEfforts: ['light', 'high'], defaultReasoningEffort: 'high' },
-  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
-  { id: 'glm-5.3', name: 'GLM-5.3', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
-  { id: 'glm-5.2', name: 'GLM-5.2', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['high', 'extra_high'], defaultReasoningEffort: 'high' },
-  { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
-  { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
-  { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro 正式版', supportsImages: false, contextWindow: 119_040, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
-  { id: 'kimi-k3', name: 'Kimi-K3', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'extra_high' },
-  { id: 'kimi-k2.8-preview', name: 'Kimi-K2.8-Preview', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'extra_high' },
-  { id: 'minimax-m3', name: 'MiniMax-M3', supportsImages: true, contextWindow: 119_040, maxTokens: 64_000 },
-  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
-  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000, reasoningEfforts: ['light', 'high', 'extra_high'], defaultReasoningEffort: 'high' },
-  { id: 'qwen-3.7-plus', name: 'Qwen3.7-Plus', supportsImages: true, contextWindow: 204_800, maxTokens: 64_000 },
-]
-
-/**
- * Trae CN 远端模型条目（**当前没有生产调用方**，见 {@link parseTraeCnModels}）。
- *
- * 曾据调研认为远端 `POST /api/ide/v1/get_detail_param` 会返回 41 项、除 id/展示名
- * 外还带 `display_contact_config.consumption_rate.data.rate`（消耗倍率）。
- * 后续真机实测推翻了这条（该端点只回 seed 配置，见 `TRAE_CN_MODELS_PATH`），
- * 本类型与解析器因此成为**未接线的备用路径**。
- *
- * **倍率刻意不塞进 `LlmModelInfo`**：DSH 的该接口只有
- * `provider` / `id` / `name` / `description` / `inputModalities` 五个字段
- * （实测见 `dsh-llm/lib/types/types.d.ts` 的 `LlmModelInfo`），没有任何放自定义
- * 元数据的位置。可行做法只有把倍率拼进 `description`，但那会污染模型选择器的
- * 展示文案（用户看到「GLM-5.2 ×1.5」这种非描述性文字），故**不塞**：倍率只在
- * 本适配器内部解析出来备用（如将来的积分预估），当前不参与任何判定。
- */
-export interface TraeCnRemoteModel {
-  id: string
-  name: string
-  /** 消耗倍率（远端提供时才有）。 */
-  consumptionRate?: number
-}
-
-/**
- * 解析 `get_detail_param` 的响应。
- *
- * ⚠️ **当前无调用方**（远端目录刻意不接线，见 `TRAE_CN_MODELS_PATH` 的说明）——
- * 保留它是为了真接线时仍有入口。字段名候选表是从客户端响应形态推出来的，
- * **尚未用真机响应校准过**（真机拿不到新池，见 README 的「模型目录」小节）。
- *
- * 读取策略是**容忍式**：从若干候选键里取第一个可用的 id 与展示名，信封层级也做
- * 多形态尝试。全部落空时返回空数组 —— 调用方据此回退静态表，而不是拿到一堆
- * id 为空串的条目。
- */
-export function parseTraeCnModels(body: unknown): TraeCnRemoteModel[] {
-  const list = locateModelArray(body)
-  if (list === undefined) return []
-  const models: TraeCnRemoteModel[] = []
-  for (const item of list) {
-    if (typeof item !== 'object' || item === null) continue
-    const record = item as Record<string, unknown>
-    const id = firstString(record, ['model_name', 'model_id', 'modelName', 'modelId', 'name', 'id'])
-    if (id === undefined) continue
-    const display = firstString(record, ['display_name', 'displayName', 'model_display_name', 'config_name', 'title'])
-    const rate = readConsumptionRate(record)
-    models.push({
-      id,
-      name: display ?? id,
-      ...rate === undefined ? {} : { consumptionRate: rate },
-    })
-  }
-  return models
-}
-
-/** 在若干候选位置寻找模型数组（容忍不同信封层级）。 */
-function locateModelArray(body: unknown): readonly unknown[] | undefined {
-  const direct = asArray(body)
-  if (direct !== undefined) return direct
-  if (typeof body !== 'object' || body === null) return undefined
-  const record = body as Record<string, unknown>
-  for (const key of ['data', 'models', 'model_list', 'modelList', 'result', 'items']) {
-    const nested = record[key]
-    const array = asArray(nested)
-    if (array !== undefined) return array
-    // 再剥一层信封（`{data:{models:[...]}}`）。
-    if (typeof nested === 'object' && nested !== null) {
-      const inner = nested as Record<string, unknown>
-      for (const innerKey of ['models', 'model_list', 'modelList', 'list', 'items', 'data']) {
-        const array2 = asArray(inner[innerKey])
-        if (array2 !== undefined) return array2
-      }
-    }
-  }
-  return undefined
-}
-
-/** 严格判数组，非数组返回 undefined。 */
-function asArray(value: unknown): readonly unknown[] | undefined {
-  return Array.isArray(value) ? value : undefined
-}
-
-/** 依次尝试若干键，返回首个非空字符串（去首尾空白）。 */
-function firstString(source: Record<string, unknown>, keys: readonly string[]): string | undefined {
-  for (const key of keys) {
-    const value = source[key]
-    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
-  }
-  return undefined
-}
-
-/**
- * 读取消耗倍率。
- *
- * 路径（调研实测）：`display_contact_config.consumption_rate.data.rate`。
- * 中间任何一层缺失都返回 undefined —— **不编造默认值 1.0**：「没读到」与
- * 「倍率就是 1」是两件事，前者不该被当成事实。
- */
-function readConsumptionRate(record: Record<string, unknown>): number | undefined {
-  const contact = record.display_contact_config ?? record.displayContactConfig
-  if (typeof contact !== 'object' || contact === null) return undefined
-  const holder = (contact as Record<string, unknown>).consumption_rate
-    ?? (contact as Record<string, unknown>).consumptionRate
-  if (typeof holder !== 'object' || holder === null) return undefined
-  const data = (holder as Record<string, unknown>).data
-  if (typeof data !== 'object' || data === null) return undefined
-  const rate = (data as Record<string, unknown>).rate
-  return typeof rate === 'number' && Number.isFinite(rate) ? rate : undefined
 }
 
 /** 安全读取 Error.message。 */
@@ -404,8 +191,18 @@ export interface TraeCnAdapterOptions {
    * 缺陷，回归测试见 `tests/unit/lobsterai-wiring.spec.ts`）。
    */
   refresh: (model?: string) => Promise<void>
-  /** 动态拉取远端模型列表；失败或未注入时回退 {@link TRAE_CN_FALLBACK_MODELS}。 */
-  fetchRemoteModels?: () => Promise<TraeCnRemoteModel[]>
+  /**
+   * 注入的目录拉取器；**省略时用内置的 `fetchTraeCnDirectory`**
+   * （`POST /api/ide/v1/get_detail_param`，按 function 取并集）。
+   *
+   * 之所以仍留这个口子：
+   * - 测试要能在零网络下替换它；
+   * - `src/account-probe.ts` 要能**关掉**目录拉取（传 `async () => []` —— 探测只该
+   *   发一次 chat，不该顺带打两个目录请求）。
+   *
+   * 返回空数组或抛错都等价于「目录不可用」→ 回退静态表。
+   */
+  fetchRemoteModels?: (credential: TraeCnCredential) => Promise<TraeCnModelEntry[]>
   fetchImpl?: typeof fetch
   /** 多账号池（用于限流时切换账号）。 */
   accountPool?: AccountPool
@@ -417,16 +214,16 @@ export interface TraeCnAdapterOptions {
 export class TraeCnAdapter extends LlmAdapter {
   private readonly product: TraeCnProduct
   private readonly fetchImpl: typeof fetch
-  /** 动态模型缓存（首次 listModels 成功后填充）。 */
-  private remoteModels: TraeCnRemoteModel[] | undefined
-  /** 静态兜底模型索引（id → 条目）。 */
-  private readonly fallbackIndex: ReadonlyMap<string, TraeCnFallbackModel>
+  /** 动态目录缓存（含拉取时刻，用于 TTL 判定）。 */
+  private catalog: { entries: readonly TraeCnModelEntry[]; fetchedAt: number } | undefined
+  /** 静态回退目录索引（id → 条目）。 */
+  private readonly fallbackIndex: ReadonlyMap<string, TraeCnModelEntry>
 
   constructor(private readonly options: TraeCnAdapterOptions) {
     super()
     this.product = options.product ?? TRAE_CN
     this.fetchImpl = options.fetchImpl ?? fetch
-    this.fallbackIndex = new Map(TRAE_CN_FALLBACK_MODELS.map((model) => [model.id, model]))
+    this.fallbackIndex = new Map(fallbackTraeCnCatalog().map((entry) => [entry.id, entry]))
   }
 
   /**
@@ -443,52 +240,80 @@ export class TraeCnAdapter extends LlmAdapter {
   }
 
   /**
-   * 懒加载远端模型目录（仅拉取一次）。
+   * 确保目录就绪（带 TTL）。
    *
-   * `listModels` 与 `resolveModel` 共用：`resolveModel` 可能先于 `listModels` 被调用
-   * （如直接从历史会话进入），此时同样需要触发一次拉取。
+   * `listModels` / `resolveModel` / `stream` 三处都会调用：`resolveModel` 可能先于
+   * `listModels` 被调用（如直接从历史会话进入），`stream` 需要它来解析
+   * `function` 路由（见 {@link functionForModel}）。
+   *
+   * ## 缓存策略（参照 LobsterAI 的 `clientVersion` 12h 缓存先例）
+   *
+   * - **成功**：写缓存 + 记时刻，{@link TRAE_CN_MODELS_TTL_MS} 内不再拉取；
+   * - **失败/空**：**不写缓存**（下一次调用重试），也不清掉已有缓存 ——
+   *   一次网络抖动不该把目录打回静态表；
+   * - 拉取本身按「当前凭据」进行，故没有凭据时直接跳过（回退静态表）。
+   *
+   * 并发调用会各自触发一次拉取（没有 in-flight 去重）：目录拉取是幂等 GET 语义的
+   * POST，重复一次的代价远小于引入一个需要处理的共享 Promise 状态。
    */
   private async ensureRemoteModels(): Promise<void> {
-    if (this.remoteModels !== undefined || this.options.fetchRemoteModels === undefined) return
+    if (this.catalog !== undefined && Date.now() - this.catalog.fetchedAt < TRAE_CN_MODELS_TTL_MS) return
     try {
-      const models = await this.options.fetchRemoteModels()
-      if (models.length > 0) this.remoteModels = models
+      // 目录端点要鉴权，且**不消耗积分**；用与 chat 同源的凭据解析（不传 model：
+      // 目录对所有模型一致，故不做逐模型限流过滤，见 AGENTS.md 的账号池约定）。
+      const credential = await this.options.resolveCredential()
+      if (credential === undefined || credential.access_token.length === 0) return
+      const entries = this.options.fetchRemoteModels === undefined
+        ? await fetchTraeCnDirectory(credential, { fetchImpl: this.fetchImpl })
+        : await this.options.fetchRemoteModels(credential)
+      if (entries.length === 0) return
+      // 目录不带多模态标记，用静态表补（**不新增条目**，见该函数的说明）。
+      this.catalog = { entries: applyTraeCnStaticModalities(entries), fetchedAt: Date.now() }
     } catch {
-      // 远端不可用：回退兜底目录（由 staticFallbackModels 提供）。
+      // 远端不可用：回退静态目录（由 catalogEntries 提供）。
     }
   }
 
-  /**
-   * 静态模型目录。
-   *
-   * **不做 buddy 那样的「以兜底表为准」裁剪**（`reconcileWithFallback`）：远端接口若
-   * 将来接通，远端是**权威的**，静态表只在远端整体失败时顶替。
-   *
-   * 返回值保留 `supportsImages`：模态要在 `listModels` / `resolveModel` 里如实输出，
-   * 不能在这一步就抹成 `{id,name}`。类型与 {@link TraeCnRemoteModel} 的
-   * `supportsImages?` 对齐（可选），两来源才能在同一处按同一判据读模态。
-   */
-  private staticFallbackModels(): readonly { id: string; name: string; supportsImages?: boolean }[] {
-    return TRAE_CN_FALLBACK_MODELS.map((model) => ({
-      id: model.id, name: model.name, supportsImages: model.supportsImages,
-    }))
+  /** 当前生效的目录（动态优先，失败回退静态表）。 */
+  private catalogEntries(): readonly TraeCnModelEntry[] {
+    return this.catalog?.entries ?? fallbackTraeCnCatalog()
   }
 
   /**
    * 模型接受的输入模态。
    *
-   * 真机目录（2026-09-18）逐项标了多模态：**12/16 项支持图片**。远端若接通且
-   * 未带该能力字段，则**保守判为纯文本** —— 目录里没有的能力不该被假定存在
-   * （与 `stream()` 的图片拦截同向：宁可报 UNSUPPORTED_CONTENT，也不静默丢图）。
+   * 真机目录（2026-09-18）逐项标了多模态：**12/16 项支持图片**。动态目录条目由
+   * `applyTraeCnStaticModalities` 从静态表补齐该标记；仍缺省的（远端独有 id）
+   * **保守判为纯文本** —— 目录里没有的能力不该被假定存在（与 `stream()` 的图片
+   * 拦截同向：宁可报 UNSUPPORTED_CONTENT，也不静默丢图）。
    */
   private inputModalitiesFor(supportsImages: boolean | undefined): readonly ['text'] | readonly ['text', 'image'] {
     return supportsImages === true ? ['text', 'image'] : ['text']
   }
 
+  /**
+   * 目标模型应当用哪个 `function` 下发。
+   *
+   * ## 为什么必须逐模型记来源
+   *
+   * roster 被 Trae 摊在多个 SOLO function 下，而**一个模型只在其来源 function 下
+   * 可调**：`glm-5.3` 不在 `solo_work_lite` 集里，写死 lite 必回
+   * `4001 param is invalid`（真机实测）。故动态目录条目自带 `function`，
+   * 静态回退条目一律映射到 {@link TRAE_CN_SOLO_REMOTE_FUNCTION}（16 项实测全在
+   * remote 集内）。
+   *
+   * 表外模型（用户手输 / 历史会话里的旧 id）同样回退 remote —— 那是覆盖最广的
+   * function，且与静态表口径一致。
+   */
+  private functionForModel(model: string): string {
+    const entry = this.catalogEntries().find((candidate) => candidate.id === model)
+      ?? this.fallbackIndex.get(model)
+    return entry?.function ?? TRAE_CN_SOLO_REMOTE_FUNCTION
+  }
+
   async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
     await this.ensureRemoteModels()
-    const source: readonly { id: string; name: string; supportsImages?: boolean }[]
-      = this.remoteModels ?? this.staticFallbackModels()
+    const source = this.catalogEntries()
     // 用户在 Account Hub 关闭的模型（黑名单制：不在表里即默认打开）。
     const disabled = this.options.accountPool?.disabledModelsFor(this.product.id)
     const listed = disabled === undefined || disabled.size === 0
@@ -505,22 +330,23 @@ export class TraeCnAdapter extends LlmAdapter {
 
   async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     await this.ensureRemoteModels()
-    const remoteName = this.remoteModels?.find((entry) => entry.id === model)?.name
-    const entry = this.fallbackIndex.get(model)
+    const remote = this.catalogEntries().find((entry) => entry.id === model)
+    const entry = remote ?? this.fallbackIndex.get(model)
     const resolved: LlmResolvedModelInfo = {
       provider,
       id: model,
-      name: remoteName ?? entry?.name ?? model,
-      // 模态与 `listModels` **同源同口径**：两处都读静态表条目的 supportsImages，
+      name: entry?.name ?? model,
+      // 模态与 `listModels` **同源同口径**：两处都读同一条目的 supportsImages，
       // 否则选择器显示「支持图片」而请求路径按纯文本处理（或反之），是自相矛盾。
       inputModalities: this.inputModalitiesFor(entry?.supportsImages),
     }
-    // 上下文窗口：静态表的值来自真机目录的 dev 档（见 TraeCnFallbackModel）。
-    if (entry !== undefined) resolved.context = { contextWindow: entry.contextWindow }
+    // 上下文窗口：动态目录给 `prompt_max_tokens`（回退 `context_window_tokens.dev`），
+    // 静态表给真机 dev 档 —— 两者同口径（都是客户端默认实际使用的窗口）。
+    if (entry?.contextWindow !== undefined) resolved.context = { contextWindow: entry.contextWindow }
     // 思考档位：DSH 的「思考程度」选择器**唯一**的数据源就是本字段
     // （`resolveModel().reasoning`）——不声明时模型选择器里整行不渲染，
     // 用户只能看到「当前模型未提供推理等级」。档位数据来自真机 vscdb 的
-    // `reasoning_effort_config`（13/16 项有档位，见 TRAE_CN_FALLBACK_MODELS）。
+    // `reasoning_effort_config`（13/16 项有档位）；动态目录里带该配置的项同样声明。
     // 无档位的模型（minimax-m3 / qwen-3.7-plus / Doubao-Seed-Evolving）与不在
     // 表内的模型**保持不声明**：那是诚实的，而不是给一个上游不认的档位。
     const efforts = entry?.reasoningEfforts ?? []
@@ -803,87 +629,9 @@ export class TraeCnAdapter extends LlmAdapter {
     }
   }
 
-  /** 构造 chat 请求体。 */
+  /** 构造 chat 请求体（SOLO 通道形态）。 */
   private buildBody(options: GenerateOptions): string {
-    const messages = serializeTraeCnMessages(options.messages)
-    if (options.system !== undefined && options.system.length > 0) {
-      messages.unshift({ role: 'system', content: options.system })
-    }
-    const tools = options.tools?.map((tool) => ({
-      type: 'function' as const,
-      function: { name: tool.name, description: tool.description, parameters: tool.parameters },
-    }))
-    const body: Record<string, unknown> = {
-      model: options.model,
-      messages,
-      // **恒为 true**：chat 端点只返回 SSE。
-      stream: true,
-    }
-    if (tools !== undefined && tools.length > 0) body.tools = tools
-    if (options.temperature !== undefined) body.temperature = options.temperature
-    if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens
-    if (options.stop !== undefined && options.stop.length > 0) body.stop = options.stop
-    // 思考档位：仅在调用方显式传入时透传（**不主动补档** —— DSH 已按
-    // `reasoning.defaultEffort` 在调用方省略时补好，适配器再补一次会与 DSH
-    // 的口径分叉）。
-    //
-    // 字段名 `reasoning_effort_level`（**2026-09-18 真机定案**，不是 `reasoning_effort`）：
-    // 官方客户端对本端点用的就是它，依据有三，方向一致：
-    //   1. `ai-modules-chat/dist/index.mjs` 的 `resolveReasoningEffortRequestField`
-    //      默认返回 `{field:'reasoning_effort_level', value:f}`，只有字节内网账号
-    //      （`scope===BYTEDANCE`）才走 `reasoning_effort`；插件所用的是普通国内
-    //      账号，故取前者。
-    //   2. 同一 bundle 的 `sT` 直接以 `reasoning_effort_level` 为键产出该字段，
-    //      且只在模型真机档位表校验通过时才带（与本文件的 `reasoningEfforts` 同源）。
-    //   3. `ai_agent.dll` 的 serde 字段块里 `reasoning_effort` 与
-    //      `reasoning_effort_level` 并列存在（两个字段服务端都收），印证是**两套
-    //      账号体系各用一个**，而非我们猜错名字。
-    // ⚠️ 真机 A/B **无法**用「是否报错」区分二者：该账号在带与不带档位时都回
-    // `code:4008`（配额），即字段校验阶段被 4008 掩盖。故此处以静态证据定案，
-    // 并把「上游是否真的按档位思考」留给将来的对比实验（见 README）。
-    if (options.reasoningEffort !== undefined) body.reasoning_effort_level = options.reasoningEffort
-    return JSON.stringify(body)
-  }
-
-  /**
-   * 构造 chat 请求头（鉴权三头 + **IDE 网关全套**）。
-   *
-   * ## 网关头不是可选项（T6 真机校准，2026-09-18）
-   *
-   * 实测该网关按这几个头判定客户端形态：**缺了直接 500 / 401，带齐才 200**。
-   * 故它们与 `Authorization` 同级，而不是「遥测/统计字段」。
-   *
-   * | 头 | 值 | 备注 |
-   * |---|---|---|
-   * | `x-app-id` | {@link TRAE_CN_IDE_APP_ID} | 官方 product.json |
-   * | `x-ide-version-code` / `x-app-version-code` | `107` | **必须纯数字**，`3.3.100` 会 400 |
-   * | `x-ide-version` | `1.107.1` | 与登录用的 `3.3.100` **不是一个号** |
-   * | `x-ide-version-type` | `stable` | |
-   * | `request-traffic-type` | `normal` | |
-   * | `x-device-id` | 凭据的 `device_id` | 与签到头**同源**（同一账号同一设备） |
-   * | `x-device-type` / `x-os-version` | 与 credits 模块**同常量** | 见文件头的 import 说明 |
-   * | `User-Agent` | `TraeClient/TTNet` | 官方客户端 UA，不是浏览器 UA |
-   *
-   * `Accept: text/event-stream` 由 `traeCnAccessHeaders` 的 accept 参数给出。
-   */
-  private chatHeaders(credential: TraeCnCredential): Record<string, string> {
-    return {
-      // 三个等值 token 头（Authorization: Cloud-IDE-JWT + X-Ide-Token + X-Cloudide-Token）
-      // 由 oauth 模块统一构造：chat 与签到/续费走同一份鉴权形态。
-      ...traeCnAccessHeaders(credential, 'text/event-stream'),
-      'x-app-id': TRAE_CN_IDE_APP_ID,
-      'x-ide-version-code': TRAE_CN_IDE_VERSION_CODE,
-      'x-app-version-code': TRAE_CN_IDE_VERSION_CODE,
-      'x-ide-version': TRAE_CN_IDE_GATEWAY_VERSION,
-      'x-ide-version-type': TRAE_CN_IDE_VERSION_TYPE,
-      'request-traffic-type': TRAE_CN_REQUEST_TRAFFIC_TYPE,
-      // 设备号**取自凭据**（与签到端点同一个字段），不是登录 URL 里那个随机 16 位号
-      // —— 后者只参与登录握手，不是设备身份（见 TraeCnCredential.device_id）。
-      'x-device-id': credential.device_id,
-      'x-device-type': TRAE_CN_DEVICE_TYPE,
-      'x-os-version': TRAE_CN_OS_VERSION,
-      'User-Agent': TRAE_CN_GATEWAY_USER_AGENT,
-    }
+    return buildTraeCnSoloBody(options, this.functionForModel(options.model))
   }
 
   /** 发起一次 chat 请求；网络失败映射为可重试的 TRANSPORT 错误。 */
@@ -894,10 +642,10 @@ export class TraeCnAdapter extends LlmAdapter {
   ): Promise<Response> {
     // 注意：这里不用 `new Headers(...)` —— Headers 构造器会丢弃/规范化部分头，
     // 普通对象逐字传递（与 credits 模块一致），避免两处请求头形态不一致。
-    const headers = this.chatHeaders(credential)
+    const headers = traeCnSoloHeaders(credential, 'text/event-stream')
     try {
-      // **IDE 网关**而非 `product.apiBase`：`/api/ide/*` 在 api.trae.cn 上 404
-      // （T6 的真实病因，见 TRAE_CN_IDE_API_BASE 的注释）。
+      // **SOLO 通道**（`/api/agent/v3/llm_utils_chat`）打在 IDE 网关上，
+      // 而不是 `product.apiBase`（见 TRAE_CN_CHAT_PATH 的迁移说明）。
       return await this.fetchImpl(`${TRAE_CN_IDE_API_BASE}${TRAE_CN_CHAT_PATH}`, {
         method: 'POST',
         headers,
@@ -911,6 +659,131 @@ export class TraeCnAdapter extends LlmAdapter {
       }
       throw error
     }
+  }
+}
+
+/**
+ * 构造 SOLO 通道的 chat 请求体（**导出的纯函数，便于逐字段单测**）。
+ *
+ * ## 实测定案的形态（2026-09-19）
+ *
+ * ```js
+ * { messages, model, config_name: model, function, stream: true, tools?, reasoning_effort_level? }
+ * ```
+ *
+ * 与旧 IDE 通道的差异逐项如下，每一条都是「写错就静默失败」的那类：
+ *
+ * | 项 | 旧 IDE 通道 | **SOLO 通道** |
+ * |---|---|---|
+ * | `config_name` | 无 | **必填，等于 `model`**（网关按它选配置） |
+ * | `function` | 无 | **必填，模型来源 function**（写错必 `4001`） |
+ * | 消息 `content` | 字符串 | **`[{type:'text',text}]` 数组** |
+ * | `role:"developer"` | 无此角色 | **改写为 `"system"`**（上游不认 developer） |
+ * | assistant 的 `tool_calls[].function` | `function` | **改名 `function_call`**（无 er） |
+ * | `role:"tool"` | 带 `tool_call_id` | 同左（上游缺它会 400 整条请求） |
+ * | `tools[].function.parameters` | 对象 | **JSON 字符串** |
+ *
+ * ## 消息来源
+ *
+ * 复用 `serializeTraeCnMessages`（它已处理两条通用协议要求：剔除无法配对的
+ * tool_call / tool-result、assistant 正文为空且有 tool_calls 时 `content` 为
+ * `null`），再在其结果上做**出站形态改写**。SSE 解析侧**不动** ——
+ * `function_call` 是出站改名，入站帧里仍是 `function`。
+ *
+ * ## 思考字段名维持 `reasoning_effort_level`（**刻意不盲改**）
+ *
+ * SOLO 通道的第三方可用实现下发的是 `reasoning_effort`，但那是 **SOLO 代际**的
+ * 写法，**未做 A/B 验证**；而 `reasoning_effort_level` 有 chat_v3 代际的
+ * 三方互证（官方 bundle 的 `resolveReasoningEffortRequestField` + `sT` +
+ * `ai_agent.dll` 的 serde 字段块，见 README）。在拿到「同一请求两种字段名哪个
+ * 真生效」的对比证据之前，**不因为换了端点就改字段名** —— 那是把一条有证据的
+ * 结论换成一条没有证据的猜测。值域 `light` / `high` / `extra_high` 不变。
+ *
+ * @param options - harness 的生成选项。
+ * @param functionName - 目标模型的来源 function（见 `TraeCnAdapter.functionForModel`）。
+ */
+export function buildTraeCnSoloBody(options: GenerateOptions, functionName: string): string {
+  const messages = serializeTraeCnMessages(normalizeSoloRoles(options.messages))
+  if (options.system !== undefined && options.system.length > 0) {
+    messages.unshift({ role: 'system', content: options.system })
+  }
+  const body: Record<string, unknown> = {
+    messages: messages.map(toSoloWireMessage),
+    model: options.model,
+    // `config_name` 与 `model` 恒等：网关按 config_name 选配置，而它必须与
+    // `model` 一致（实测两个字段都要给，且给成同一个值）。
+    config_name: options.model,
+    function: functionName,
+    // **恒为 true**：chat 端点只返回 SSE。
+    stream: true,
+  }
+  const tools = options.tools?.map((tool) => ({
+    type: 'function' as const,
+    function: {
+      name: tool.name,
+      description: tool.description,
+      // ⚠️ **对象 → JSON 字符串**：上游把该字段当字符串绑定，传对象会
+      // `4001 parameter type does not match binding data`。
+      parameters: JSON.stringify(tool.parameters ?? {}),
+    },
+  }))
+  if (tools !== undefined && tools.length > 0) body.tools = tools
+  if (options.temperature !== undefined) body.temperature = options.temperature
+  if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens
+  if (options.stop !== undefined && options.stop.length > 0) body.stop = options.stop
+  // 思考档位：仅在调用方显式传入时透传（**不主动补档** —— DSH 已按
+  // `reasoning.defaultEffort` 在调用方省略时补好，适配器再补一次会与 DSH
+  // 的口径分叉）。字段名的证据链见函数头注释。
+  if (options.reasoningEffort !== undefined) body.reasoning_effort_level = options.reasoningEffort
+  return JSON.stringify(body)
+}
+
+/**
+ * 把 `role:"developer"` 归一成 `"system"`（**在序列化之前**）。
+ *
+ * 为什么必须在 `serializeTraeCnMessages` **之前**做：那个函数只认
+ * `assistant` / `system` / user 三类，未知角色会落进 user 分支 —— 于是
+ * `developer` 会被当成**用户发言**发出去，语义完全错位（上游收到一条用户消息，
+ * 而不是系统指令）。归一后再交给它，`developer` 才真的变成 system。
+ */
+function normalizeSoloRoles(
+  messages: readonly { role: string; content: unknown }[],
+): readonly { role: string; content: unknown }[] {
+  return messages.map((message) =>
+    message.role === 'developer' ? { ...message, role: 'system' } : message)
+}
+
+/**
+ * 把 `serializeTraeCnMessages` 的输出改写成 SOLO 通道的出站形态。
+ *
+ * 三条改写（**逐条都是实测要求**）：
+ * 1. `role:"developer"` → `"system"`（上游没有 developer 角色；实际归一在
+ *    {@link normalizeSoloRoles} 里做，此处兜一道防「有人绕过它直接调本函数」）；
+ * 2. 字符串 `content` → `[{type:'text',text}]`（`null` 保持 `null`：那是
+ *    「assistant 只有工具调用、没有正文」的合法形态，包成数组会让上游读到空文本）；
+ * 3. assistant 的 `tool_calls[].function` → **`function_call`**（无 er）。
+ */
+function toSoloWireMessage(message: Record<string, unknown>): Record<string, unknown> {
+  const role = message.role === 'developer' ? 'system' : message.role
+  const content = typeof message.content === 'string'
+    ? [{ type: 'text', text: message.content }]
+    : message.content
+  const calls = message.tool_calls
+  if (!Array.isArray(calls)) return { ...message, role, content }
+  return {
+    ...message,
+    role,
+    content,
+    tool_calls: calls.map((call) => {
+      if (typeof call !== 'object' || call === null) return call
+      const record = call as Record<string, unknown>
+      const fn = record.function
+      if (typeof fn !== 'object' || fn === null) return record
+      // 出站改名：`function` → `function_call`（入站帧仍是 `function`，
+      // 故解析侧不用动）。
+      const { function: _renamed, ...rest } = record
+      return { ...rest, function_call: fn }
+    }),
   }
 }
 

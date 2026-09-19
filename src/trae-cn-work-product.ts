@@ -195,7 +195,7 @@ export interface TraeCnWorkFallbackModel {
    *
    * **刻意只记录、不展示**：DSH 的 `LlmModelInfo` 没有放自定义元数据的位置，
    * 塞进 `description` 会污染模型选择器文案（用户看到「GLM-5.1 ×0.83」这种
-   * 非描述性文字）。与 IDE 路径的 `TraeCnRemoteModel.consumptionRate` 同处置。
+   * 非描述性文字）。IDE 路径对同一件事的处置是**根本不解析**它（读出来没有落点）。
    */
   consumptionRate: number
   /**

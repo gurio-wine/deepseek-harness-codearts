@@ -115,9 +115,11 @@ async function probeWithAdapter(
   const signal = AbortSignal.timeout(timeoutMs)
   const ref = credentialRef(entry.credentialRef)
 
-  // 刻意不传 accountPool / fetchRemoteModels：
+  // 刻意不传 accountPool / 显式关掉 fetchRemoteModels：
   // - 不传 accountPool → 只测这一个账号，且探测本身不写限流标记；
-  // - 不传 fetchRemoteModels → 避免为一次探测额外拉取远端模型目录。
+  // - `fetchRemoteModels: async () => []` → 避免为一次探测额外拉取远端模型目录
+  //   （Trae CN 的适配器**内置**了目录拉取，不显式关掉就会多发两个 HTTP 请求）。
+  //   关掉后 `function` 路由回退静态表口径（`solo_work_remote`），探测仍成立。
   //
   // refresh 设为 no-op：探测不应触发全局续期流程（那会影响其他账号与
   // 其他并发会话），凭据真的过期就让它以 AUTH 失败并如实上报。
@@ -154,6 +156,8 @@ async function probeWithAdapter(
       credentialRef: ref,
       resolveCredential: async () => credential as TraeCnCredential,
       refresh: async () => {},
+      // 探测只发一次 chat：不要顺带拉目录（见上方说明）。
+      fetchRemoteModels: async () => [],
       product: traeCnProduct,
     })
   } else {

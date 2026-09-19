@@ -82,10 +82,15 @@ export const TRAE_CN_RISK_CONTROL_CODES: readonly number[] = [4011, 4013, 4015]
  *
  * - `4007` / `3004` / `9074`：软限流 —— 服务端明确要求稍后重试，
  *   换号既无必要（限的是请求节奏而非账号额度），又会额外消耗其它账号的额度；
+ * - `3003`：**`MODEL_FAIL`（基础设施类，`all models failed`）** ——
+ *   2026-09-19 端点迁移取证时补入。它是**旧 IDE 通道**对我方新池请求的恒定回复，
+ *   语义是「服务端这一侧没有可用后端」，与具体账号无关：换号只会拿同一个
+ *   基础设施故障再问一遍。归**可重试**（退避）而不是直报，是因为它明确是
+ *   瞬时/容量类的失败，退避后可能就好了；
  * - `4000005`、`4050`–`4052`：**排队等待**。用户已确认按退避处理，
  *   理由见 {@link classifyTraeCnError} 的说明。
  */
-export const TRAE_CN_BACKOFF_CODES: readonly number[] = [4007, 3004, 9074]
+export const TRAE_CN_BACKOFF_CODES: readonly number[] = [4007, 3004, 9074, 3003]
 
 /**
  * 排队/等待码（**不换号**，按退避处理）。
